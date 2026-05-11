@@ -200,19 +200,22 @@ class StockWidget(QWidget):
     edited  = pyqtSignal(str)   # 수정 완료 후 저장 요청
 
     MIN_W      = 240    # 기본(최소) 가로폭
-    COMPACT_H  = 54     # 축소 높이
-    EXPAND_H   = 210    # 확장 높이
+    COMPACT_H  = 80     # 축소 높이 (2줄 레이아웃)
+    EXPAND_H   = 236    # 확장 높이 (compact + 상세 패널 156)
     RADIUS     = 13     # 모서리 반지름
 
-    def __init__(self, stock_data: dict):
+    def __init__(self, stock_data: dict, width: int | None = None):
         super().__init__()
         self.data = stock_data          # code, name, avg_price, quantity, pos
         self.current_price: int = 0
         self.is_expanded: bool = False
         self._drag_pos = None
+        self._press_pos = None    # 좌클릭 시작 위치 (드래그/클릭 구분용)
+        self._moved: bool = False # 일정 거리 이상 움직였는지
 
-        # 종목명 길이에 맞춰 위젯 가로폭 결정 (긴 이름만 확장됨)
-        self.W = self._calc_width(self.data.get("name", self.data["code"]))
+        # 외부에서 통일 너비를 받지 않으면 종목명 기준 자체 계산
+        name = self.data.get("name", self.data["code"])
+        self.W = width if width else self.calc_width_for_name(name)
 
         # 5초 자동 축소 타이머
         self.collapse_timer = QTimer(singleShot=True)
@@ -227,14 +230,15 @@ class StockWidget(QWidget):
         self._fetch()   # 즉시 한 번 조회
 
     # ── 종목명에 맞춰 가로폭 계산 ─────────────────────────────────────────
-    def _calc_width(self, name: str) -> int:
+    @staticmethod
+    def calc_width_for_name(name: str) -> int:
         """종목명 픽셀 폭을 측정해 위젯 가로폭을 결정. 최소 MIN_W."""
-        font = QFont("", 10, QFont.Weight.Bold)
+        font = QFont("", 8, QFont.Weight.Bold)
         fm = QFontMetrics(font)
         name_w = fm.horizontalAdvance(name)
-        # 종목명 외 요소: 좌우마진(22) + spacing 3개(18) + 가격(85) + 등락률(54) + 버튼(24) + 여유(8)
-        OVERHEAD = 211
-        return max(self.MIN_W, name_w + OVERHEAD)
+        # 좌마진(14) + 우마진(14) + 여유(6) = 34
+        OVERHEAD = 34
+        return max(StockWidget.MIN_W, name_w + OVERHEAD)
 
     # ── UI 구성 ────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -258,50 +262,38 @@ class StockWidget(QWidget):
             }}
         """)
 
-        # ── 상단 compact 줄 ──────────────────────────────────────────────
-        compact = QWidget(self.card)
-        compact.setGeometry(0, 0, self.W, self.COMPACT_H)
-        compact.setStyleSheet("background: transparent;")
+        # ── 상단 compact 영역 (2줄 레이아웃) ────────────────────────────
+        self.compact = QWidget(self.card)
+        self.compact.setGeometry(0, 0, self.W, self.COMPACT_H)
+        self.compact.setStyleSheet("background: transparent;")
 
-        hl = QHBoxLayout(compact)
-        hl.setContentsMargins(12, 0, 10, 0)
-        hl.setSpacing(6)
+        vl = QVBoxLayout(self.compact)
+        vl.setContentsMargins(14, 8, 14, 8)
+        vl.setSpacing(4)
 
-        # 종목명
+        # 1행: 종목명
         self.name_lbl = QLabel(self.data.get("name", self.data["code"]))
-        self.name_lbl.setFont(QFont("", 10, QFont.Weight.Bold))
+        self.name_lbl.setFont(QFont("", 8, QFont.Weight.Bold))
         self.name_lbl.setStyleSheet(f"color: {C['subtext']};")
-        hl.addWidget(self.name_lbl, 1)
+        vl.addWidget(self.name_lbl)
 
-        # 현재가
+        # 2행: 가격 + 등락률
+        price_row = QHBoxLayout()
+        price_row.setContentsMargins(0, 0, 0, 0)
+        price_row.setSpacing(8)
+
         self.price_lbl = QLabel("─")
-        self.price_lbl.setFont(QFont("", 14, QFont.Weight.Bold))
+        self.price_lbl.setFont(QFont("", 11, QFont.Weight.Bold))
         self.price_lbl.setStyleSheet(f"color: {C['text']};")
-        self.price_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        hl.addWidget(self.price_lbl)
+        price_row.addWidget(self.price_lbl)
 
-        # 등락률
         self.rate_lbl = QLabel("")
-        self.rate_lbl.setFont(QFont("", 8))
-        self.rate_lbl.setFixedWidth(54)
-        self.rate_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        hl.addWidget(self.rate_lbl)
+        self.rate_lbl.setFont(QFont("", 7))
+        self.rate_lbl.setStyleSheet(f"color: {C['subtext']};")
+        price_row.addWidget(self.rate_lbl)
+        price_row.addStretch()
 
-        # ▼ 확장 버튼
-        self.expand_btn = QPushButton("▼")
-        self.expand_btn.setFixedSize(24, 24)
-        self.expand_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {C['surface']};
-                border-radius: 6px;
-                color: {C['blue']};
-                font-size: 9px;
-                border: none;
-            }}
-            QPushButton:hover {{ background: {C['surface2']}; }}
-        """)
-        self.expand_btn.clicked.connect(self.toggle_expand)
-        hl.addWidget(self.expand_btn)
+        vl.addLayout(price_row)
 
         # ── 확장 패널 ────────────────────────────────────────────────────
         panel_h = self.EXPAND_H - self.COMPACT_H
@@ -330,6 +322,18 @@ class StockWidget(QWidget):
         # 손익 (강조)
         self.profit_val = self._make_row(vl, "평가손익", bold=True)
         self.prate_val  = self._make_row(vl, "수익률",   bold=True)
+
+    # ── 외부에서 위젯 너비 변경 (통일 너비 적용용) ────────────────────
+    def set_width(self, new_w: int):
+        if new_w == self.W:
+            return
+        self.W = new_w
+        cur_h = self.EXPAND_H if self.is_expanded else self.COMPACT_H
+        self.setFixedWidth(new_w)
+        self.card.setGeometry(0, 0, new_w, cur_h)
+        self.compact.setGeometry(0, 0, new_w, self.COMPACT_H)
+        panel_h = self.EXPAND_H - self.COMPACT_H
+        self.expand_panel.setGeometry(0, self.COMPACT_H, new_w, panel_h)
 
     def _make_row(self, parent_layout, key_text: str, bold=False) -> QLabel:
         """키-값 한 줄 생성, 값 QLabel 반환"""
@@ -377,9 +381,9 @@ class StockWidget(QWidget):
             color = C["subtext"]
             sign  = "  "
 
-        self.price_lbl.setStyleSheet(f"color: {color}; font-size: 14px; font-weight: bold;")
+        self.price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
-        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 8px;")
+        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 7px;")
 
         self._update_detail(price)
 
@@ -413,7 +417,6 @@ class StockWidget(QWidget):
 
     def expand(self):
         self.is_expanded = True
-        self.expand_btn.setText("▲")
         self.expand_panel.show()
         self.setFixedHeight(self.EXPAND_H)
         self.card.setGeometry(0, 0, self.W, self.EXPAND_H)
@@ -421,23 +424,36 @@ class StockWidget(QWidget):
 
     def collapse(self):
         self.is_expanded = False
-        self.expand_btn.setText("▼")
         self.expand_panel.hide()
         self.setFixedHeight(self.COMPACT_H)
         self.card.setGeometry(0, 0, self.W, self.COMPACT_H)
         self.collapse_timer.stop()
 
-    # ── 드래그 이동 ────────────────────────────────────────────────────────
+    # ── 드래그 이동 + 클릭 토글 ──────────────────────────────────────────
+    DRAG_THRESHOLD = 4   # 이 거리 이상 움직이면 드래그로 간주
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.pos()
+            self._drag_pos  = event.globalPosition().toPoint() - self.pos()
+            self._press_pos = event.globalPosition().toPoint()
+            self._moved     = False
 
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            if not self._moved and self._press_pos:
+                delta = event.globalPosition().toPoint() - self._press_pos
+                if abs(delta.x()) > self.DRAG_THRESHOLD or abs(delta.y()) > self.DRAG_THRESHOLD:
+                    self._moved = True
+            if self._moved:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, event):
-        self._drag_pos = None
+        # 드래그가 아니었으면(거의 안 움직임) = 클릭 → 확장/축소 토글
+        if event.button() == Qt.MouseButton.LeftButton and not self._moved:
+            self.toggle_expand()
+        self._drag_pos  = None
+        self._press_pos = None
+        self._moved     = False
 
     # ── 우클릭 메뉴 ────────────────────────────────────────────────────────
     def contextMenuEvent(self, event):
@@ -471,10 +487,29 @@ class WidgetManager:
         self.app = app
         self.stocks: list[dict] = []
         self.widgets: dict[str, StockWidget] = {}
+        self.uniform_w: int = StockWidget.MIN_W
 
         self._load_config()
         self._setup_tray()
         self._spawn_all()
+
+    # ── 통일 너비 계산/적용 ───────────────────────────────────────────────
+    def _calc_uniform_width(self) -> int:
+        """모든 종목명 중 가장 긴 이름 기준 통일 너비."""
+        w = StockWidget.MIN_W
+        for s in self.stocks:
+            name = s.get("name", s["code"])
+            w = max(w, StockWidget.calc_width_for_name(name))
+        return w
+
+    def _apply_uniform_width(self):
+        """현재 너비를 재계산해 모든 위젯에 적용."""
+        new_w = self._calc_uniform_width()
+        if new_w == self.uniform_w:
+            return
+        self.uniform_w = new_w
+        for w in self.widgets.values():
+            w.set_width(new_w)
 
     # ── 트레이 ─────────────────────────────────────────────────────────────
     def _setup_tray(self):
@@ -538,14 +573,15 @@ class WidgetManager:
 
     # ── 위젯 생성 ──────────────────────────────────────────────────────────
     def _spawn_all(self):
+        self.uniform_w = self._calc_uniform_width()
         for i, s in enumerate(self.stocks):
             default_x = 60
-            default_y = 60 + i * 70
+            default_y = 60 + i * (StockWidget.COMPACT_H + 12)
             self._spawn_widget(s, default_x, default_y)
 
     def _spawn_widget(self, stock: dict, def_x=60, def_y=60):
         code = stock["code"]
-        w = StockWidget(stock)
+        w = StockWidget(stock, width=self.uniform_w)
         w.deleted.connect(self._on_delete)
         w.edited.connect(lambda _: self._save_config())
 
@@ -578,8 +614,11 @@ class WidgetManager:
         self.stocks.append(d)
         self._save_config()
 
+        # 새 종목명이 더 길면 모든 위젯 너비 재조정 (새 위젯도 이 값으로 생성됨)
+        self._apply_uniform_width()
+
         # 새 위젯 위치: 기존 위젯들 아래
-        ny = 60 + len(self.widgets) * 70
+        ny = 60 + len(self.widgets) * (StockWidget.COMPACT_H + 12)
         self._spawn_widget(d, 60, ny)
 
     # ── 종목 삭제 ──────────────────────────────────────────────────────────
@@ -587,6 +626,8 @@ class WidgetManager:
         self.stocks = [s for s in self.stocks if s["code"] != code]
         self.widgets.pop(code, None)
         self._save_config()
+        # 가장 긴 종목이 삭제된 경우 남은 위젯들도 줄어들도록
+        self._apply_uniform_width()
 
 
 # ─── 진입점 ───────────────────────────────────────────────────────────────────
