@@ -488,10 +488,18 @@ class WidgetManager:
         self.stocks: list[dict] = []
         self.widgets: dict[str, StockWidget] = {}
         self.uniform_w: int = StockWidget.MIN_W
+        self.is_hidden: bool = False    # 위젯 전체 숨김 상태
 
         self._load_config()
         self._setup_tray()
         self._spawn_all()
+
+    # ── 전체 위젯 표시/숨김 토글 ─────────────────────────────────────────
+    def toggle_visibility(self):
+        self.is_hidden = not self.is_hidden
+        for w in self.widgets.values():
+            w.hide() if self.is_hidden else w.show()
+        self.toggle_act.setText("👀   표시하기" if self.is_hidden else "🙈   숨기기")
 
     # ── 통일 너비 계산/적용 ───────────────────────────────────────────────
     def _calc_uniform_width(self) -> int:
@@ -520,17 +528,26 @@ class WidgetManager:
         menu = QMenu()
         menu.setStyleSheet(TRAY_MENU_STYLE)
 
-        add_act  = QAction("➕   종목 추가", menu)
-        quit_act = QAction("❌   종료",      menu)
+        add_act  = QAction("➕   종목 추가",  menu)
+        self.toggle_act = QAction("🙈   숨기기", menu)
+        quit_act = QAction("❌   종료",       menu)
         add_act.triggered.connect(self.open_add_dialog)
+        self.toggle_act.triggered.connect(self.toggle_visibility)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
+        menu.addAction(self.toggle_act)
         menu.addSeparator()
         menu.addAction(quit_act)
 
         self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        # 트레이 아이콘 좌클릭(Trigger) 시 표시/숨김 빠른 토글
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle_visibility()
 
     @staticmethod
     def _make_tray_icon() -> QIcon:
@@ -620,6 +637,10 @@ class WidgetManager:
         # 새 위젯 위치: 기존 위젯들 아래
         ny = 60 + len(self.widgets) * (StockWidget.COMPACT_H + 12)
         self._spawn_widget(d, 60, ny)
+
+        # 숨김 상태에서 새 종목을 추가한 경우 자동으로 표시 상태로 전환
+        if self.is_hidden:
+            self.toggle_visibility()
 
     # ── 종목 삭제 ──────────────────────────────────────────────────────────
     def _on_delete(self, code: str):
