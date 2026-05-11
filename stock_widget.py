@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon, QMenu, QFrame, QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter, QIcon, QAction, QBrush, QPen
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QIcon, QAction, QBrush, QPen
 
 # ─── 설정 파일 경로 ────────────────────────────────────────────────────────────
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
@@ -199,7 +199,7 @@ class StockWidget(QWidget):
     deleted = pyqtSignal(str)   # code 전달
     edited  = pyqtSignal(str)   # 수정 완료 후 저장 요청
 
-    W          = 240    # 가로 고정
+    MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 54     # 축소 높이
     EXPAND_H   = 210    # 확장 높이
     RADIUS     = 13     # 모서리 반지름
@@ -210,6 +210,9 @@ class StockWidget(QWidget):
         self.current_price: int = 0
         self.is_expanded: bool = False
         self._drag_pos = None
+
+        # 종목명 길이에 맞춰 위젯 가로폭 결정 (긴 이름만 확장됨)
+        self.W = self._calc_width(self.data.get("name", self.data["code"]))
 
         # 5초 자동 축소 타이머
         self.collapse_timer = QTimer(singleShot=True)
@@ -222,6 +225,16 @@ class StockWidget(QWidget):
 
         self._build_ui()
         self._fetch()   # 즉시 한 번 조회
+
+    # ── 종목명에 맞춰 가로폭 계산 ─────────────────────────────────────────
+    def _calc_width(self, name: str) -> int:
+        """종목명 픽셀 폭을 측정해 위젯 가로폭을 결정. 최소 MIN_W."""
+        font = QFont("", 10, QFont.Weight.Bold)
+        fm = QFontMetrics(font)
+        name_w = fm.horizontalAdvance(name)
+        # 종목명 외 요소: 좌우마진(22) + spacing 3개(18) + 가격(85) + 등락률(54) + 버튼(24) + 여유(8)
+        OVERHEAD = 211
+        return max(self.MIN_W, name_w + OVERHEAD)
 
     # ── UI 구성 ────────────────────────────────────────────────────────────
     def _build_ui(self):
