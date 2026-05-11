@@ -288,7 +288,7 @@ class StockWidget(QWidget):
         price_row.addWidget(self.price_lbl)
 
         self.rate_lbl = QLabel("")
-        self.rate_lbl.setFont(QFont("Malgun Gothic",7))
+        self.rate_lbl.setFont(QFont("Malgun Gothic",9))
         self.rate_lbl.setStyleSheet(f"color: {C['subtext']};")
         price_row.addWidget(self.rate_lbl)
         price_row.addStretch()
@@ -383,7 +383,7 @@ class StockWidget(QWidget):
 
         self.price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
-        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 7px;")
+        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 9px;")
 
         self._update_detail(price)
 
