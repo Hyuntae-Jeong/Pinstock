@@ -11,13 +11,15 @@
 import sys
 import json
 import os
+import copy
 import requests
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QDialog, QFormLayout,
     QLineEdit, QSpinBox, QDialogButtonBox,
-    QSystemTrayIcon, QMenu, QFrame, QMessageBox
+    QSystemTrayIcon, QMenu, QFrame, QMessageBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QIcon, QAction, QBrush, QPen
@@ -107,6 +109,32 @@ QPushButton[flat="true"] {{
 QPushButton[flat="true"]:hover {{
     background: {C['surface2']};
 }}
+QTableWidget {{
+    background: {C['bg2']};
+    color: {C['text']};
+    border: 1px solid {C['surface2']};
+    border-radius: 7px;
+    gridline-color: {C['surface']};
+    selection-background-color: {C['surface2']};
+    selection-color: {C['text']};
+    font-size: 12px;
+}}
+QTableWidget::item {{
+    padding: 6px 8px;
+    border: none;
+}}
+QHeaderView::section {{
+    background: {C['surface']};
+    color: {C['subtext']};
+    border: none;
+    border-right: 1px solid {C['bg2']};
+    padding: 6px 8px;
+    font-size: 11px;
+    font-weight: bold;
+}}
+QHeaderView::section:last {{
+    border-right: none;
+}}
 """
 
 
@@ -190,6 +218,195 @@ class StockDialog(QDialog):
             "avg_price": self.avg_spin.value(),
             "quantity":  self.qty_spin.value(),
         }
+
+
+# ─── 종목 일괄 관리 다이얼로그 ────────────────────────────────────────────────
+class ManageStocksDialog(QDialog):
+    """현재 보유 종목들을 표 형태로 일괄 관리하는 다이얼로그."""
+
+    COLS = ["종목명", "종목코드", "평단가", "수량"]
+
+    def __init__(self, stocks: list[dict], parent=None):
+        super().__init__(parent)
+        self._stocks: list[dict] = stocks   # 호출측에서 deepcopy 해서 전달
+        self.setWindowTitle("종목 관리")
+        self.setMinimumSize(520, 400)
+        self.setStyleSheet(DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(12)
+
+        # ── 표 ─────────────────────────────────────────────────────────────
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(False)
+
+        # 드래그로 행 순서 변경
+        self.table.setDragEnabled(True)
+        self.table.setAcceptDrops(True)
+        self.table.viewport().setAcceptDrops(True)
+        self.table.setDropIndicatorShown(True)
+        self.table.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.table.setDragDropOverwriteMode(False)
+
+        # 컬럼 너비 정책
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)         # 종목명
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setStretchLastSection(False)
+
+        # 더블클릭으로도 수정 가능
+        self.table.doubleClicked.connect(lambda _: self._edit_selected())
+
+        # 드래그 정렬: 모델의 rowsMoved 시그널로 self._stocks 순서 동기화
+        self.table.model().rowsMoved.connect(self._on_rows_moved)
+
+        root.addWidget(self.table, 1)
+
+        # ── 행 액션 버튼 (추가 / 수정 / 삭제) ─────────────────────────────
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+
+        add_btn = QPushButton("➕  추가")
+        add_btn.clicked.connect(self._add)
+        action_row.addWidget(add_btn)
+
+        edit_btn = QPushButton("✏  수정")
+        edit_btn.setProperty("flat", "true")
+        edit_btn.clicked.connect(self._edit_selected)
+        action_row.addWidget(edit_btn)
+
+        del_btn = QPushButton("🗑  삭제")
+        del_btn.setProperty("flat", "true")
+        del_btn.clicked.connect(self._delete_selected)
+        action_row.addWidget(del_btn)
+
+        action_row.addStretch()
+        root.addLayout(action_row)
+
+        # ── 확인 / 취소 ────────────────────────────────────────────────────
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._rebuild_table()
+
+    # ── 표 동기화 ─────────────────────────────────────────────────────────
+    def _rebuild_table(self, select_row: int | None = None):
+        """self._stocks 기준으로 표를 다시 그림."""
+        # rowsMoved 신호가 재구성 중에 발화되지 않도록 일시 차단
+        self.table.model().rowsMoved.disconnect(self._on_rows_moved)
+        try:
+            self.table.setRowCount(0)
+            for s in self._stocks:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self._fill_row(row, s)
+        finally:
+            self.table.model().rowsMoved.connect(self._on_rows_moved)
+
+        if select_row is not None and 0 <= select_row < self.table.rowCount():
+            self.table.selectRow(select_row)
+
+    def _fill_row(self, row: int, s: dict):
+        name  = s.get("name", s["code"])
+        code  = s["code"]
+        avg   = f"{int(s.get('avg_price', 0)):,} 원"
+        qty   = f"{int(s.get('quantity', 0)):,} 주"
+        cells = [name, code, avg, qty]
+        for col, text in enumerate(cells):
+            item = QTableWidgetItem(text)
+            # 평단가/수량은 우측 정렬
+            if col in (2, 3):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            else:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            # 드래그-드롭 가능, 직접 편집 불가
+            item.setFlags(
+                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
+            )
+            self.table.setItem(row, col, item)
+
+    # ── 드래그 정렬 핸들러 ────────────────────────────────────────────────
+    def _on_rows_moved(self, parent, start, end, dest_parent, dest_row):
+        # 단일 행만 이동(SingleSelection) — 한 항목을 옮긴 결과를 self._stocks 에 반영
+        # Qt 의 dest_row 는 "이동 전 좌표계" 기준이므로 보정 필요
+        item = self._stocks.pop(start)
+        insert_at = dest_row if dest_row < start else dest_row - 1
+        insert_at = max(0, min(insert_at, len(self._stocks)))
+        self._stocks.insert(insert_at, item)
+        # 표는 Qt 가 이미 옮긴 상태이므로 재구성 불필요
+
+    # ── 액션 ───────────────────────────────────────────────────────────────
+    def _add(self):
+        dlg = StockDialog(parent=self)
+        if not dlg.exec():
+            return
+        d = dlg.get_data()
+        code = d["code"]
+        if not code:
+            return
+        if any(s["code"] == code for s in self._stocks):
+            QMessageBox.information(self, "알림", f"'{code}'는 이미 추가되어 있습니다.")
+            return
+
+        result = fetch_stock(code)
+        if not result:
+            QMessageBox.warning(
+                self, "조회 실패",
+                f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요."
+            )
+            return
+
+        d["name"] = result["name"]
+        self._stocks.append(d)
+        self._rebuild_table(select_row=len(self._stocks) - 1)
+
+    def _edit_selected(self):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._stocks):
+            return
+        dlg = StockDialog(parent=self, data=self._stocks[row])
+        if not dlg.exec():
+            return
+        new = dlg.get_data()
+        self._stocks[row]["avg_price"] = new["avg_price"]
+        self._stocks[row]["quantity"]  = new["quantity"]
+        self._rebuild_table(select_row=row)
+
+    def _delete_selected(self):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._stocks):
+            return
+        name = self._stocks[row].get("name", self._stocks[row]["code"])
+        ret = QMessageBox.question(
+            self, "삭제 확인",
+            f"'{name}' 을(를) 삭제할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        self._stocks.pop(row)
+        next_sel = min(row, len(self._stocks) - 1) if self._stocks else None
+        self._rebuild_table(select_row=next_sel)
+
+    def get_stocks(self) -> list[dict]:
+        return self._stocks
 
 
 # ─── 개별 주식 위젯 ───────────────────────────────────────────────────────────
@@ -559,16 +776,19 @@ class WidgetManager:
         menu = QMenu()
         menu.setStyleSheet(TRAY_MENU_STYLE)
 
-        add_act    = QAction("➕   종목 추가",  menu)
+        add_act    = QAction("➕   종목 추가",   menu)
+        manage_act = QAction("📋   종목 관리",   menu)
         self.toggle_act = QAction("🙈   숨기기", menu)
         reset_act  = QAction("📐   위치 초기화", menu)
-        quit_act   = QAction("❌   종료",       menu)
+        quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
+        manage_act.triggered.connect(self.open_manage_dialog)
         self.toggle_act.triggered.connect(self.toggle_visibility)
         reset_act.triggered.connect(self.reset_positions)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
+        menu.addAction(manage_act)
         menu.addAction(self.toggle_act)
         menu.addAction(reset_act)
         menu.addSeparator()
@@ -674,6 +894,48 @@ class WidgetManager:
 
         # 숨김 상태에서 새 종목을 추가한 경우 자동으로 표시 상태로 전환
         if self.is_hidden:
+            self.toggle_visibility()
+
+    # ── 종목 일괄 관리 ────────────────────────────────────────────────────
+    def open_manage_dialog(self):
+        dlg = ManageStocksDialog(stocks=copy.deepcopy(self.stocks))
+        if not dlg.exec():
+            return
+        new_stocks = dlg.get_stocks()
+
+        old_map = {s["code"]: s for s in self.stocks}
+        new_map = {s["code"]: s for s in new_stocks}
+
+        # 삭제된 종목: 위젯 닫고 제거
+        for code in list(old_map):
+            if code not in new_map:
+                w = self.widgets.pop(code, None)
+                if w:
+                    w.close()
+
+        # 추가된 종목: 위젯 생성 (기본 위치)
+        for s in new_stocks:
+            if s["code"] not in old_map:
+                ny = 60 + len(self.widgets) * (StockWidget.COMPACT_H + 12)
+                self._spawn_widget(s, 60, ny)
+
+        # 기존 종목: 평단가/수량 변경 반영
+        for s in new_stocks:
+            code = s["code"]
+            if code in old_map and code in self.widgets:
+                w = self.widgets[code]
+                w.data["avg_price"] = s["avg_price"]
+                w.data["quantity"]  = s["quantity"]
+                if w.current_price:
+                    w._update_detail(w.current_price)
+
+        # 순서 + 저장 + 너비 재계산
+        self.stocks = new_stocks
+        self._apply_uniform_width()
+        self._save_config()
+
+        # 숨김 상태에서 변경된 종목이 있으면 자동으로 표시 상태로 전환
+        if self.is_hidden and self.widgets:
             self.toggle_visibility()
 
     # ── 종목 삭제 ──────────────────────────────────────────────────────────
