@@ -200,8 +200,8 @@ class StockWidget(QWidget):
     edited  = pyqtSignal(str)   # 수정 완료 후 저장 요청
 
     MIN_W      = 240    # 기본(최소) 가로폭
-    COMPACT_H  = 80     # 축소 높이 (2줄 레이아웃)
-    EXPAND_H   = 236    # 확장 높이 (compact + 상세 패널 156)
+    COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
+    EXPAND_H   = 214    # 확장 높이 (compact + 상세 패널 156)
     RADIUS     = 13     # 모서리 반지름
 
     def __init__(self, stock_data: dict, width: int | None = None):
@@ -268,8 +268,8 @@ class StockWidget(QWidget):
         self.compact.setStyleSheet("background: transparent;")
 
         vl = QVBoxLayout(self.compact)
-        vl.setContentsMargins(14, 8, 14, 8)
-        vl.setSpacing(4)
+        vl.setContentsMargins(14, 5, 14, 5)
+        vl.setSpacing(1)
 
         # 1행: 종목명
         self.name_lbl = QLabel(self.data.get("name", self.data["code"]))
