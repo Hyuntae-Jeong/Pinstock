@@ -501,6 +501,37 @@ class WidgetManager:
             w.hide() if self.is_hidden else w.show()
         self.toggle_act.setText("👀   표시하기" if self.is_hidden else "🙈   숨기기")
 
+    # ── 위치 초기화 ───────────────────────────────────────────────────────
+    def reset_positions(self):
+        """각 위젯을 현재 위치한 모니터의 우상단에 세로 정렬."""
+        MARGIN_X = 20   # 화면 우측 여백
+        MARGIN_Y = 60   # 화면 상단 여백
+        GAP      = 4    # 위젯 간 세로 간격
+
+        # 위젯을 현재 속한 모니터별로 그룹화 (stocks 순서 보존)
+        groups: dict = {}
+        for s in self.stocks:
+            w = self.widgets.get(s["code"])
+            if not w:
+                continue
+            center = w.frameGeometry().center()
+            screen = QApplication.screenAt(center) or QApplication.primaryScreen()
+            groups.setdefault(screen, []).append((s, w))
+
+        # 모니터별 우상단 정렬
+        for screen, items in groups.items():
+            geo = screen.availableGeometry()
+            for i, (s, w) in enumerate(items):
+                x = geo.x() + geo.width() - w.width() - MARGIN_X
+                y = geo.y() + MARGIN_Y + i * (StockWidget.COMPACT_H + GAP)
+                w.move(x, y)
+                s["pos"] = [x, y]
+
+        self._save_config()
+        # 숨김 상태라면 자동으로 다시 표시
+        if self.is_hidden:
+            self.toggle_visibility()
+
     # ── 통일 너비 계산/적용 ───────────────────────────────────────────────
     def _calc_uniform_width(self) -> int:
         """모든 종목명 중 가장 긴 이름 기준 통일 너비."""
@@ -528,15 +559,18 @@ class WidgetManager:
         menu = QMenu()
         menu.setStyleSheet(TRAY_MENU_STYLE)
 
-        add_act  = QAction("➕   종목 추가",  menu)
+        add_act    = QAction("➕   종목 추가",  menu)
         self.toggle_act = QAction("🙈   숨기기", menu)
-        quit_act = QAction("❌   종료",       menu)
+        reset_act  = QAction("📐   위치 초기화", menu)
+        quit_act   = QAction("❌   종료",       menu)
         add_act.triggered.connect(self.open_add_dialog)
         self.toggle_act.triggered.connect(self.toggle_visibility)
+        reset_act.triggered.connect(self.reset_positions)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
         menu.addAction(self.toggle_act)
+        menu.addAction(reset_act)
         menu.addSeparator()
         menu.addAction(quit_act)
 
