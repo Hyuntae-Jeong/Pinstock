@@ -19,10 +19,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QDialog, QFormLayout,
     QLineEdit, QSpinBox, QDialogButtonBox,
     QSystemTrayIcon, QMenu, QFrame, QMessageBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QStyle, QStyleOptionSpinBox
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QIcon, QAction, QBrush, QPen
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QIcon, QAction, QBrush, QPen, QPolygon
 
 # ─── 설정 파일 경로 ────────────────────────────────────────────────────────────
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
@@ -87,8 +88,18 @@ QLineEdit:focus, QSpinBox:focus {{
 QSpinBox::up-button, QSpinBox::down-button {{
     background: {C['surface2']};
     border: none;
-    border-radius: 3px;
-    width: 16px;
+    width: 22px;
+}}
+QSpinBox::up-button {{ border-top-right-radius: 6px; }}
+QSpinBox::down-button {{ border-bottom-right-radius: 6px; }}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+    background: {C['blue']};
+}}
+/* 화살표는 ArrowSpinBox.paintEvent에서 직접 그림 — Qt 기본 화살표는 숨김 */
+QSpinBox::up-arrow, QSpinBox::down-arrow {{
+    image: none;
+    width: 0;
+    height: 0;
 }}
 QPushButton {{
     background: {C['blue']};
@@ -162,37 +173,89 @@ def fetch_stock(code: str) -> dict | None:
         return None
 
 
+# ─── 화살표를 직접 그리는 QSpinBox ───────────────────────────────────────────
+class ArrowSpinBox(QSpinBox):
+    """다크 stylesheet 환경에서 ▲▼ 화살표를 paintEvent로 직접 그림.
+    PyQt6의 ::up-arrow / ::down-arrow가 CSS triangle·inline SVG 모두
+    안 먹는 이슈를 회피한다."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.buttonSymbols() == QSpinBox.ButtonSymbols.NoButtons:
+            return
+
+        # 정확한 up/down 버튼 영역 얻기
+        opt = QStyleOptionSpinBox()
+        self.initStyleOption(opt)
+        style = self.style()
+        up_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt,
+            QStyle.SubControl.SC_SpinBoxUp, self)
+        down_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt,
+            QStyle.SubControl.SC_SpinBoxDown, self)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(QColor(C['text'])))
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        # 위 ▲
+        cx, cy = up_rect.center().x(), up_rect.center().y()
+        painter.drawPolygon(QPolygon([
+            QPoint(cx,     cy - 3),
+            QPoint(cx - 4, cy + 2),
+            QPoint(cx + 4, cy + 2),
+        ]))
+        # 아래 ▼
+        cx, cy = down_rect.center().x(), down_rect.center().y()
+        painter.drawPolygon(QPolygon([
+            QPoint(cx - 4, cy - 2),
+            QPoint(cx + 4, cy - 2),
+            QPoint(cx,     cy + 3),
+        ]))
+        painter.end()
+
+
 # ─── 종목 추가 / 수정 다이얼로그 ──────────────────────────────────────────────
 class StockDialog(QDialog):
     def __init__(self, parent=None, data: dict | None = None):
         super().__init__(parent)
         self.is_edit = data is not None
         self.setWindowTitle("종목 수정" if self.is_edit else "종목 추가")
-        self.setFixedSize(320, 230)
+        self.setFixedSize(340, 270)
         self.setStyleSheet(DIALOG_STYLE)
 
         layout = QFormLayout(self)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
         layout.setContentsMargins(24, 24, 24, 20)
-        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # 라벨과 입력 위젯의 세로 중심을 일치시킴 (이슈 #2)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         # 종목코드
         self.code_edit = QLineEdit()
         self.code_edit.setPlaceholderText("예: 005930  (삼성전자)")
-        layout.addRow("종목 코드", self.code_edit)
+        self.code_edit.editingFinished.connect(self._preview_name)
+        layout.addRow(self._row_label("종목 코드"), self.code_edit)
 
-        # 평단가
+        # 종목명 미리보기 (코드 입력 후 자동 조회, 이슈 #2)
+        self.preview_lbl = QLabel("─")
+        self._set_preview_neutral()
+        layout.addRow(self._row_label("종목명"), self.preview_lbl)
+
+        # 평단가 (화살표 버튼 제거 - 사용자 요청)
         self.avg_spin = QSpinBox()
+        self.avg_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.avg_spin.setRange(1, 10_000_000)
         self.avg_spin.setSingleStep(100)
         self.avg_spin.setSuffix("  원")
-        layout.addRow("평단가", self.avg_spin)
+        layout.addRow(self._row_label("평단가"), self.avg_spin)
 
-        # 수량
-        self.qty_spin = QSpinBox()
+        # 수량 (paintEvent로 ▲▼ 화살표 직접 그림)
+        self.qty_spin = ArrowSpinBox()
         self.qty_spin.setRange(1, 1_000_000)
         self.qty_spin.setSuffix("  주")
-        layout.addRow("수  량", self.qty_spin)
+        layout.addRow(self._row_label("수  량"), self.qty_spin)
 
         # 기존 데이터 채우기
         if self.is_edit:
@@ -200,6 +263,8 @@ class StockDialog(QDialog):
             self.code_edit.setReadOnly(True)
             self.avg_spin.setValue(int(data.get("avg_price", 0)))
             self.qty_spin.setValue(int(data.get("quantity", 1)))
+            if data.get("name"):
+                self._set_preview_found(data["name"])
 
         # 버튼
         btns = QDialogButtonBox(
@@ -211,6 +276,55 @@ class StockDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addRow(btns)
+
+    # ── 라벨 생성기 (입력 위젯과 세로 중심 정렬, 이슈 #2) ────────────────
+    @staticmethod
+    def _row_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl.setMinimumHeight(34)   # QLineEdit/QSpinBox 높이와 매칭
+        return lbl
+
+    # ── 종목명 자동 미리보기 ─────────────────────────────────────────────
+    def _preview_name(self):
+        code = self.code_edit.text().strip()
+        if not code:
+            self._set_preview_neutral()
+            return
+        if len(code) != 6 or not code.isdigit():
+            self._set_preview_hint("6자리 숫자 코드를 입력하세요")
+            return
+        self._set_preview_hint("조회 중...")
+        self.preview_lbl.repaint()
+        result = fetch_stock(code)
+        if result:
+            self._set_preview_found(result["name"])
+        else:
+            self._set_preview_error("찾을 수 없는 종목")
+
+    def _set_preview_neutral(self):
+        self.preview_lbl.setText("─")
+        self.preview_lbl.setStyleSheet(
+            f"color: {C['subtext']}; font-size: 12px; padding-left: 4px;"
+        )
+
+    def _set_preview_hint(self, msg: str):
+        self.preview_lbl.setText(msg)
+        self.preview_lbl.setStyleSheet(
+            f"color: {C['subtext']}; font-size: 12px; font-style: italic; padding-left: 4px;"
+        )
+
+    def _set_preview_found(self, name: str):
+        self.preview_lbl.setText(name)
+        self.preview_lbl.setStyleSheet(
+            f"color: {C['text']}; font-size: 13px; font-weight: bold; padding-left: 4px;"
+        )
+
+    def _set_preview_error(self, msg: str):
+        self.preview_lbl.setText(msg)
+        self.preview_lbl.setStyleSheet(
+            f"color: {C['red']}; font-size: 12px; font-style: italic; padding-left: 4px;"
+        )
 
     def get_data(self) -> dict:
         return {
