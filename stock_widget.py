@@ -13,6 +13,7 @@ import json
 import os
 import copy
 import requests
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
@@ -22,7 +23,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyle, QStyleOptionSpinBox
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPointF
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPointF, QRectF
 from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QPainterPath, QIcon, QAction, QBrush, QPen, QPolygon
 
 # ─── 설정 파일 경로 ────────────────────────────────────────────────────────────
@@ -198,10 +199,51 @@ def fetch_minute_chart(code: str) -> dict | None:
         return None
 
 
-# ─── 당일 가격 미니 차트 (sparkline) ──────────────────────────────────────────
+# ─── 네이버 금융 일봉 차트 API (장 외 시간 폴백용) ──────────────────────────
+def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict | None:
+    """최근 N 캘린더일 일봉 OHLC 시계열 조회.
+    분봉이 비어있는 장 외 시간/주말/공휴일에 캔들 차트로 표시할 용도.
+    반환: {'candles': [{'open','high','low','close'}, ...]} or None"""
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    url = (
+        f"https://api.stock.naver.com/chart/domestic/item/{code}/day"
+        f"?startDateTime={start.strftime('%Y%m%d')}"
+        f"&endDateTime={end.strftime('%Y%m%d')}"
+    )
+    try:
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data:
+            return None
+        candles = [
+            {
+                "open":  float(d["openPrice"]),
+                "high":  float(d["highPrice"]),
+                "low":   float(d["lowPrice"]),
+                "close": float(d["closePrice"]),
+            }
+            for d in data
+        ]
+        if max_candles > 0:
+            candles = candles[-max_candles:]
+        return {"candles": candles}
+    except Exception as e:
+        print(f"[fetch_daily_chart] {code} 오류: {e}")
+        return None
+
+
+# ─── 가격 미니 차트 (sparkline) ───────────────────────────────────────────────
 class SparklineWidget(QWidget):
-    """당일 1분봉 가격 추이를 라인 + 채움(area)으로 그리는 미니 차트.
-    시초가 대비 현재가가 높으면 빨강(상승), 낮으면 파랑(하락)."""
+    """미니 가격 차트. 두 가지 모드 지원.
+    - line  : 당일 1분봉 라인 + area, 시초가 대비 색상 결정, 전일 종가 점선
+    - candle: 최근 N일 일봉 캔들 (양봉=빨강, 음봉=파랑)"""
 
     W = 100   # 차트 너비
     H = 40    # 차트 높이
@@ -209,18 +251,33 @@ class SparklineWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(self.W, self.H)
+        self.mode: str = "line"
         self.prices: list[float] = []
         self.open_price: float = 0.0
-        self.prev_close: float = 0.0   # 전일 종가 (가로 점선 표시용)
+        self.prev_close: float = 0.0   # 전일 종가 (가로 점선 표시용, line 모드 전용)
+        self.candles: list[dict] = []  # OHLC dict 리스트 (candle 모드)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
+        self.mode = "line"
         self.prices = prices
         self.open_price = open_price
         self.prev_close = prev_close
         self.update()
 
+    def set_candles(self, candles: list[dict]):
+        self.mode = "candle"
+        self.candles = candles
+        self.update()
+
     def paintEvent(self, event):
+        if self.mode == "candle":
+            self._paint_candles()
+        else:
+            self._paint_line()
+
+    # ── 라인 모드 (당일 분봉) ────────────────────────────────────────────
+    def _paint_line(self):
         prices = self.prices
         if not prices or len(prices) < 2:
             return
@@ -286,6 +343,57 @@ class SparklineWidget(QWidget):
         painter.setPen(QPen(color, 1.3))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(line)
+
+        painter.end()
+
+    # ── 캔들 모드 (일봉) ────────────────────────────────────────────────
+    def _paint_candles(self):
+        candles = self.candles
+        if not candles:
+            return
+
+        painter = QPainter(self)
+        # 캔들은 픽셀 정렬이 더 선명 — antialias off
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        pad = 3
+        w = self.W - 2 * pad
+        h = self.H - 2 * pad
+
+        mn = min(c["low"]  for c in candles)
+        mx = max(c["high"] for c in candles)
+        rng = (mx - mn) if mx > mn else 1.0
+
+        def y_of(price: float) -> float:
+            return pad + (1 - (price - mn) / rng) * h
+
+        n = len(candles)
+        slot = w / n
+        body_w = max(1.5, slot * 0.7)
+
+        red  = QColor(C['red'])
+        blue = QColor(C['blue'])
+
+        for i, c in enumerate(candles):
+            cx = pad + (i + 0.5) * slot
+            up = c["close"] >= c["open"]
+            color = red if up else blue
+
+            # 심지(고가–저가)
+            painter.setPen(QPen(color, 0.8))
+            painter.drawLine(
+                QPointF(cx, y_of(c["high"])),
+                QPointF(cx, y_of(c["low"])),
+            )
+
+            # 몸통(시가↔종가)
+            y_open  = y_of(c["open"])
+            y_close = y_of(c["close"])
+            body_top = min(y_open, y_close)
+            body_h   = max(1.0, abs(y_close - y_open))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawRect(QRectF(cx - body_w / 2, body_top, body_w, body_h))
 
         painter.end()
 
@@ -844,14 +952,19 @@ class StockWidget(QWidget):
             self.name_lbl.setText(result["name"])
             self.current_price = result["price"]
             self._apply_price(result)
-        # 당일 sparkline 갱신 (+ 전일 종가 점선)
+        # sparkline 갱신: 당일 분봉 우선, 비어있으면 최근 일봉으로 폴백
         chart = fetch_minute_chart(self.data["code"])
-        if chart and chart["prices"]:
-            # 전일 종가 = 현재가 - 전일 대비 등락액
+        if chart and len(chart["prices"]) >= 2:
+            # 분봉 모드: 전일 종가(현재가 - 전일대비) 점선 함께 표시
             prev_close = 0.0
             if result:
                 prev_close = float(result["price"] - result["change_price"])
             self.sparkline.set_data(chart["prices"], chart["open"], prev_close)
+        else:
+            # 일봉 모드: 최근 N일 캔들 차트로 폴백
+            daily = fetch_daily_chart(self.data["code"])
+            if daily:
+                self.sparkline.set_candles(daily["candles"])
 
     def _apply_price(self, result: dict):
         price = result["price"]
