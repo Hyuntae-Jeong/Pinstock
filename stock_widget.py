@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout, QDialog, QFormLayout,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QDialog, QFormLayout,
     QLineEdit, QSpinBox, QDialogButtonBox,
     QSystemTrayIcon, QMenu, QFrame, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
@@ -989,8 +989,9 @@ class ManageStocksDialog(QDialog):
 class StockWidget(QWidget):
     """화면에 떠있는 하나의 주식 위젯"""
 
-    deleted = pyqtSignal(str)   # code 전달
-    edited  = pyqtSignal(str)   # 수정 완료 후 저장 요청
+    deleted        = pyqtSignal(str)   # code 전달
+    edited         = pyqtSignal(str)   # 수정 완료 후 저장 요청
+    price_updated  = pyqtSignal(str)   # 현재가 갱신 시 (마스터 위젯 재집계용)
 
     MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
@@ -1167,6 +1168,7 @@ class StockWidget(QWidget):
             self.name_lbl.setText(result["name"])
             self.current_price = result["price"]
             self._apply_price(result)
+            self.price_updated.emit(self.data["code"])
         # sparkline 갱신: 당일 분봉 우선, 비어있으면 최근 일봉으로 폴백
         chart = fetch_minute_chart(self.data["code"])
         if chart and len(chart["prices"]) >= 2:
@@ -1297,6 +1299,132 @@ class StockWidget(QWidget):
             self.edited.emit(self.data["code"])
 
 
+# ─── 포트폴리오 요약 마스터 위젯 ─────────────────────────────────────────────
+class MasterWidget(QWidget):
+    """포트폴리오 전체 요약을 표시하는 마스터 위젯.
+    총 매입금액 / 평가금액 / 평가손익 / 수익률 4개 지표를 2×2 그리드로 표시.
+    개별 종목 위젯과 동일한 다크 카드 스타일이며 드래그로 이동 가능."""
+
+    H      = 96    # 카드 높이
+    RADIUS = 13
+
+    def __init__(self, width: int):
+        super().__init__()
+        # 가장 긴 종목명 기준 통일 폭과 동일하게 맞춤
+        self.W = width
+        self._drag_pos = None
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(self.W, self.H)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("master_card")
+        self.card.setGeometry(0, 0, self.W, self.H)
+        self.card.setStyleSheet(f"""
+            QFrame#master_card {{
+                background: {C['bg']};
+                border: 1px solid {C['border']};
+                border-radius: {self.RADIUS}px;
+            }}
+        """)
+
+        # 2x2 그리드 (제목 없음, 1행/2행 사이를 살짝 띄움)
+        grid = QGridLayout(self.card)
+        grid.setContentsMargins(14, 12, 14, 12)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(10)
+
+        self.invest_val = self._make_cell(grid, 0, 0, "총 매입금액")
+        self.eval_val   = self._make_cell(grid, 0, 1, "평가금액")
+        self.profit_val = self._make_cell(grid, 1, 0, "평가손익", bold=True)
+        self.prate_val  = self._make_cell(grid, 1, 1, "수익률",   bold=True)
+
+    def _make_cell(self, grid: QGridLayout, row: int, col: int,
+                   key_text: str, bold: bool = False) -> QLabel:
+        cell = QVBoxLayout()
+        cell.setContentsMargins(0, 0, 0, 0)
+        cell.setSpacing(0)
+
+        key_lbl = QLabel(key_text)
+        key_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
+        cell.addWidget(key_lbl)
+
+        style = f"color: {C['text']}; font-size: 13px;"
+        if bold:
+            style += " font-weight: bold;"
+        val_lbl = QLabel("─")
+        val_lbl.setStyleSheet(style)
+        cell.addWidget(val_lbl)
+
+        grid.addLayout(cell, row, col)
+        return val_lbl
+
+    # ── 외부에서 너비 변경 (개별 위젯 통일 폭에 맞춰 갱신) ───────────────
+    def set_uniform_width(self, base_w: int):
+        if base_w == self.W:
+            return
+        self.W = base_w
+        self.setFixedWidth(base_w)
+        self.card.setGeometry(0, 0, base_w, self.H)
+
+    # ── 지표 갱신 ────────────────────────────────────────────────────────
+    def update_metrics(self, total_invest: int, total_eval: int):
+        profit = total_eval - total_invest
+        prate  = (profit / total_invest * 100.0) if total_invest else 0.0
+
+        # 한국 시장 컨벤션과 일관: 이익=빨강, 손실=파랑
+        if profit > 0:
+            color = C['red']
+            sign  = "+"
+        elif profit < 0:
+            color = C['blue']
+            sign  = ""   # 음수면 자체적으로 '-' 가 붙음
+        else:
+            color = C['subtext']
+            sign  = ""
+
+        self.invest_val.setText(f"{total_invest:,} 원")
+        self.eval_val.setText(f"{total_eval:,} 원")
+        self.profit_val.setText(f"{sign}{profit:,} 원")
+        self.profit_val.setStyleSheet(
+            f"color: {color}; font-size: 13px; font-weight: bold;"
+        )
+        self.prate_val.setText(f"{sign}{prate:.2f}%")
+        self.prate_val.setStyleSheet(
+            f"color: {color}; font-size: 13px; font-weight: bold;"
+        )
+
+    def clear_metrics(self):
+        """종목이 하나도 없을 때 0/빈 표시로 초기화."""
+        self.invest_val.setText("0 원")
+        self.eval_val.setText("0 원")
+        self.profit_val.setText("─")
+        self.profit_val.setStyleSheet(
+            f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
+        )
+        self.prate_val.setText("─")
+        self.prate_val.setStyleSheet(
+            f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
+        )
+
+    # ── 드래그 이동 (StockWidget 와 동일 패턴, 클릭 확장은 없음) ─────────
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.pos()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+
 # ─── 전체 위젯 관리자 ─────────────────────────────────────────────────────────
 class WidgetManager:
     def __init__(self, app: QApplication):
@@ -1305,6 +1433,10 @@ class WidgetManager:
         self.widgets: dict[str, StockWidget] = {}
         self.uniform_w: int = StockWidget.MIN_W
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
+        # 마스터 위젯 (포트폴리오 요약)
+        self.master_widget: MasterWidget | None = None
+        self.master_visible: bool = True
+        self.master_pos: list | None = None   # None → 기본 위치
 
         self._load_config()
         self._setup_tray()
@@ -1315,14 +1447,35 @@ class WidgetManager:
         self.is_hidden = not self.is_hidden
         for w in self.widgets.values():
             w.hide() if self.is_hidden else w.show()
+        # 마스터 위젯도 전체 토글에 함께 따름. 단, 마스터 개별 숨김 상태는 보존.
+        if self.master_widget:
+            if self.is_hidden:
+                self.master_widget.hide()
+            elif self.master_visible:
+                self.master_widget.show()
         self.toggle_act.setText("👀   표시하기" if self.is_hidden else "🙈   숨기기")
 
     # ── 위치 초기화 ───────────────────────────────────────────────────────
     def reset_positions(self):
-        """각 위젯을 현재 위치한 모니터의 우상단에 세로 정렬."""
+        """각 위젯을 현재 위치한 모니터의 우상단에 세로 정렬.
+        마스터 위젯이 표시되어 있으면 자기 모니터의 우상단 맨 위에 두고,
+        같은 모니터의 종목들은 그 아래로 밀어서 배치한다."""
         MARGIN_X = 20   # 화면 우측 여백
         MARGIN_Y = 60   # 화면 상단 여백
         GAP      = 4    # 위젯 간 세로 간격
+
+        # 마스터 위젯이 표시 중인 모니터 파악
+        master_screen = None
+        master_offset = 0   # 그 모니터의 종목들이 마스터 높이만큼 아래로 밀림
+        if self.master_widget and self.master_widget.isVisible():
+            mc = self.master_widget.frameGeometry().center()
+            master_screen = QApplication.screenAt(mc) or QApplication.primaryScreen()
+            mgeo = master_screen.availableGeometry()
+            mx = mgeo.x() + mgeo.width() - self.master_widget.width() - MARGIN_X
+            my = mgeo.y() + MARGIN_Y
+            self.master_widget.move(mx, my)
+            self.master_pos = [mx, my]
+            master_offset = self.master_widget.height() + GAP
 
         # 위젯을 현재 속한 모니터별로 그룹화 (stocks 순서 보존)
         groups: dict = {}
@@ -1334,12 +1487,13 @@ class WidgetManager:
             screen = QApplication.screenAt(center) or QApplication.primaryScreen()
             groups.setdefault(screen, []).append((s, w))
 
-        # 모니터별 우상단 정렬
+        # 모니터별 우상단 정렬 (마스터가 있는 모니터는 그 아래부터)
         for screen, items in groups.items():
             geo = screen.availableGeometry()
+            base_y = geo.y() + MARGIN_Y + (master_offset if screen is master_screen else 0)
             for i, (s, w) in enumerate(items):
                 x = geo.x() + geo.width() - w.width() - MARGIN_X
-                y = geo.y() + MARGIN_Y + i * (StockWidget.COMPACT_H + GAP)
+                y = base_y + i * (StockWidget.COMPACT_H + GAP)
                 w.move(x, y)
                 s["pos"] = [x, y]
 
@@ -1365,6 +1519,8 @@ class WidgetManager:
         self.uniform_w = new_w
         for w in self.widgets.values():
             w.set_width(new_w)
+        if self.master_widget:
+            self.master_widget.set_uniform_width(new_w)
 
     # ── 트레이 ─────────────────────────────────────────────────────────────
     def _setup_tray(self):
@@ -1380,6 +1536,7 @@ class WidgetManager:
         export_act = QAction("📤   Excel로 내보내기", menu)
         import_act = QAction("📥   Excel에서 가져오기", menu)
         self.toggle_act = QAction("🙈   숨기기", menu)
+        self.master_toggle_act = QAction(self._master_toggle_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
@@ -1387,6 +1544,7 @@ class WidgetManager:
         export_act.triggered.connect(self.open_export_dialog)
         import_act.triggered.connect(self.open_import_dialog)
         self.toggle_act.triggered.connect(self.toggle_visibility)
+        self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
         reset_act.triggered.connect(self.reset_positions)
         quit_act.triggered.connect(self.app.quit)
 
@@ -1397,6 +1555,7 @@ class WidgetManager:
         menu.addAction(import_act)
         menu.addSeparator()
         menu.addAction(self.toggle_act)
+        menu.addAction(self.master_toggle_act)
         menu.addAction(reset_act)
         menu.addSeparator()
         menu.addAction(quit_act)
@@ -1426,18 +1585,44 @@ class WidgetManager:
         return QIcon(px)
 
     # ── 설정 파일 ──────────────────────────────────────────────────────────
+    # 스키마 변천:
+    #   v1 (구버전): JSON 루트가 list — 종목 dict 의 배열
+    #   v2 (현재):   JSON 루트가 dict — {"stocks": [...], "master": {"visible": bool, "pos": [x,y]|null}}
+    # 로드는 둘 다 받아주고, 저장은 항상 v2 로 한다 (한 번 저장되면 자동 마이그레이트).
     def _load_config(self):
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    self.stocks = json.load(f)
-            except Exception:
-                self.stocks = []
+        if not os.path.exists(CONFIG_FILE):
+            return
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        if isinstance(data, list):
+            # v1 → 종목만 있음, 마스터 설정은 기본값
+            self.stocks = data
+        elif isinstance(data, dict):
+            self.stocks = data.get("stocks", []) or []
+            master = data.get("master") or {}
+            self.master_visible = bool(master.get("visible", True))
+            pos = master.get("pos")
+            if isinstance(pos, list) and len(pos) == 2:
+                try:
+                    self.master_pos = [int(pos[0]), int(pos[1])]
+                except (TypeError, ValueError):
+                    self.master_pos = None
 
     def _save_config(self):
+        data = {
+            "stocks": self.stocks,
+            "master": {
+                "visible": self.master_visible,
+                "pos": self.master_pos,
+            },
+        }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.stocks, f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[save] 오류: {e}")
 
@@ -1447,6 +1632,9 @@ class WidgetManager:
             if w:
                 pos = w.pos()
                 s["pos"] = [pos.x(), pos.y()]
+        if self.master_widget:
+            mpos = self.master_widget.pos()
+            self.master_pos = [mpos.x(), mpos.y()]
         self._save_config()
 
     # ── 위젯 생성 ──────────────────────────────────────────────────────────
@@ -1456,17 +1644,78 @@ class WidgetManager:
             default_x = 60
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
             self._spawn_widget(s, default_x, default_y)
+        self._spawn_master()
 
     def _spawn_widget(self, stock: dict, def_x=60, def_y=60):
         code = stock["code"]
         w = StockWidget(stock, width=self.uniform_w)
         w.deleted.connect(self._on_delete)
-        w.edited.connect(lambda _: self._save_config())
+        w.edited.connect(self._on_edited)
+        w.price_updated.connect(lambda _: self._recompute_master())
 
         pos = stock.get("pos", [def_x, def_y])
         w.move(pos[0], pos[1])
         w.show()
         self.widgets[code] = w
+
+    def _on_edited(self, _code: str):
+        """개별 위젯에서 평단가/수량을 수정한 경우. 저장 + 마스터 갱신."""
+        self._save_config()
+        self._recompute_master()
+
+    # ── 마스터 위젯 생성/표시 ─────────────────────────────────────────────
+    def _spawn_master(self):
+        if self.master_widget is None:
+            self.master_widget = MasterWidget(width=self.uniform_w)
+
+        # 위치: 저장된 위치가 있으면 사용, 없으면 종목 위젯들 위에 적당히 둠
+        if self.master_pos:
+            self.master_widget.move(self.master_pos[0], self.master_pos[1])
+        else:
+            self.master_widget.move(60, 20)
+
+        if self.master_visible and not self.is_hidden:
+            self.master_widget.show()
+        else:
+            self.master_widget.hide()
+
+        # 초기 표시: 현재가 아직 없으면 0/─ 으로 둠 → 30초 이내 자동 갱신
+        self._recompute_master()
+
+    def _master_toggle_text(self) -> str:
+        return "📊   마스터 위젯 숨기기" if self.master_visible else "📊   마스터 위젯 표시"
+
+    def toggle_master_visibility(self):
+        self.master_visible = not self.master_visible
+        if self.master_widget:
+            if self.master_visible and not self.is_hidden:
+                self.master_widget.show()
+            else:
+                self.master_widget.hide()
+        self.master_toggle_act.setText(self._master_toggle_text())
+        self._save_config()
+
+    def _recompute_master(self):
+        """모든 종목 위젯의 current_price 를 모아 마스터 4지표를 다시 계산."""
+        if not self.master_widget:
+            return
+        if not self.stocks:
+            self.master_widget.clear_metrics()
+            return
+
+        total_invest = 0
+        total_eval   = 0
+        for s in self.stocks:
+            avg = int(s.get("avg_price", 0))
+            qty = int(s.get("quantity", 0))
+            total_invest += avg * qty
+
+            w = self.widgets.get(s["code"])
+            # 현재가가 아직 안 잡힌 종목은 평가금액에서 평단가로 임시 사용
+            price = w.current_price if (w and w.current_price) else avg
+            total_eval += price * qty
+
+        self.master_widget.update_metrics(total_invest, total_eval)
 
     # ── 종목 추가 ──────────────────────────────────────────────────────────
     def open_add_dialog(self):
@@ -1498,6 +1747,8 @@ class WidgetManager:
         # 새 위젯 위치: 기존 위젯들 아래
         ny = 60 + len(self.widgets) * (StockWidget.COMPACT_H + 12)
         self._spawn_widget(d, 60, ny)
+
+        self._recompute_master()
 
         # 숨김 상태에서 새 종목을 추가한 경우 자동으로 표시 상태로 전환
         if self.is_hidden:
@@ -1540,6 +1791,7 @@ class WidgetManager:
         self.stocks = new_stocks
         self._apply_uniform_width()
         self._save_config()
+        self._recompute_master()
 
         # 숨김 상태에서 변경된 종목이 있으면 자동으로 표시 상태로 전환
         if self.is_hidden and self.widgets:
@@ -1688,7 +1940,12 @@ class WidgetManager:
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
             self._spawn_widget(s, default_x, default_y)
 
+        # 마스터 위젯도 새 너비에 맞춰 갱신
+        if self.master_widget:
+            self.master_widget.set_uniform_width(self.uniform_w)
+
         self._save_config()
+        self._recompute_master()
 
         # 위치 정보가 없는 종목들이 있으면 자동으로 정렬
         if any("pos" not in s for s in self.stocks):
@@ -1704,6 +1961,7 @@ class WidgetManager:
         self._save_config()
         # 가장 긴 종목이 삭제된 경우 남은 위젯들도 줄어들도록
         self._apply_uniform_width()
+        self._recompute_master()
 
 
 # ─── 진입점 ───────────────────────────────────────────────────────────────────
