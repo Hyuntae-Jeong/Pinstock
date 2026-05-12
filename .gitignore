@@ -16,6 +16,8 @@ dist/
 
 # 개인 데이터 (보유 종목/평단가/수량)
 stocks.json
+stocks.json.bak
+pinstock_holdings_*.xlsx
 
 # 압축/배포 파일
 *.zip

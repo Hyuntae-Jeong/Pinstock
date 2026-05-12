@@ -12,6 +12,7 @@ import sys
 import json
 import os
 import copy
+import shutil
 import requests
 from datetime import datetime, timedelta
 
@@ -21,13 +22,24 @@ from PyQt6.QtWidgets import (
     QLineEdit, QSpinBox, QDialogButtonBox,
     QSystemTrayIcon, QMenu, QFrame, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QStyle, QStyleOptionSpinBox
+    QStyle, QStyleOptionSpinBox,
+    QFileDialog, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPointF, QRectF
 from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QPainterPath, QIcon, QAction, QBrush, QPen, QPolygon
 
 # ─── 설정 파일 경로 ────────────────────────────────────────────────────────────
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
+BACKUP_FILE = CONFIG_FILE + ".bak"
+
+# ─── Excel import/export 컬럼 정의 ────────────────────────────────────────────
+# 헤더 ↔ stocks.json 필드 매핑. 순서는 export 시 컬럼 순서가 됨.
+EXCEL_COLUMNS = [
+    ("종목코드", "code"),
+    ("종목명",   "name"),
+    ("평단가",   "avg_price"),
+    ("수량",     "quantity"),
+]
 
 # ─── 색상 테마 (다크 / Catppuccin Mocha 계열) ────────────────────────────────
 C = {
@@ -237,6 +249,209 @@ def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict 
     except Exception as e:
         print(f"[fetch_daily_chart] {code} 오류: {e}")
         return None
+
+
+# ─── Excel import/export ─────────────────────────────────────────────────────
+def export_stocks_to_excel(stocks: list[dict], path: str) -> None:
+    """보유 종목을 .xlsx 로 내보내기.
+    - 종목코드는 텍스트 셀로 저장 (선행 0 보존: '005930', '0183J0').
+    - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "보유종목"
+
+    headers = [h for h, _ in EXCEL_COLUMNS]
+    ws.append(headers)
+    bold = Font(bold=True)
+    for col_idx in range(1, len(headers) + 1):
+        ws.cell(row=1, column=col_idx).font = bold
+
+    for s in stocks:
+        row = []
+        for _, key in EXCEL_COLUMNS:
+            if key == "code":
+                row.append(str(s.get("code", "")))
+            elif key == "name":
+                row.append(s.get("name", s.get("code", "")))
+            else:
+                row.append(int(s.get(key, 0)))
+        ws.append(row)
+
+    # 종목코드 컬럼을 텍스트 포맷으로 (선행 0/영문 안전)
+    code_col_idx = next(i for i, (_, k) in enumerate(EXCEL_COLUMNS, 1) if k == "code")
+    code_letter = ws.cell(row=1, column=code_col_idx).column_letter
+    for cell in ws[code_letter][1:]:   # 헤더 제외
+        cell.number_format = "@"
+        cell.alignment = Alignment(horizontal="left")
+
+    # 컬럼 너비 자동 조정 (간단히 헤더+여유)
+    widths = {"종목코드": 12, "종목명": 28, "평단가": 12, "수량": 10}
+    for col_idx, (header, _) in enumerate(EXCEL_COLUMNS, 1):
+        letter = ws.cell(row=1, column=col_idx).column_letter
+        ws.column_dimensions[letter].width = widths.get(header, 14)
+
+    wb.save(path)
+
+
+def import_stocks_from_excel(path: str) -> list[dict]:
+    """Excel 파일에서 보유 종목을 읽어 stocks.json 형식 dict 리스트로 반환.
+    검증 실패 시 ValueError 를 발생시킨다 (메시지는 사용자에게 그대로 표시 가능)."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, data_only=True)
+    ws = wb.active
+    if ws.max_row < 1:
+        raise ValueError("시트가 비어 있습니다.")
+
+    # 1행 헤더 읽기 (공백/None 안전)
+    header_row = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
+    required = [h for h, _ in EXCEL_COLUMNS]
+    missing = [h for h in required if h not in header_row]
+    if missing:
+        raise ValueError(
+            "필수 컬럼이 누락되었습니다: " + ", ".join(missing)
+            + f"\n(필요한 헤더: {', '.join(required)})"
+        )
+
+    # 헤더명 → 컬럼 인덱스
+    idx_of = {h: header_row.index(h) for h in required}
+
+    stocks: list[dict] = []
+    seen_codes: set[str] = set()
+    errors: list[str] = []
+
+    for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        # 완전 빈 행은 건너뜀
+        if row is None or all(v is None or (isinstance(v, str) and not v.strip()) for v in row):
+            continue
+
+        def cell(h: str):
+            i = idx_of[h]
+            return row[i] if i < len(row) else None
+
+        raw_code = cell("종목코드")
+        raw_name = cell("종목명")
+        raw_avg  = cell("평단가")
+        raw_qty  = cell("수량")
+
+        # 종목코드: 숫자로 읽혔어도 문자열로 정규화 후 6자 영숫자 검증 + 대문자
+        if raw_code is None or str(raw_code).strip() == "":
+            errors.append(f"{row_num}행: 종목코드가 비어 있습니다.")
+            continue
+        code = str(raw_code).strip().upper()
+        # 엑셀이 숫자로 인식해 선행 0 손실된 경우 6자리로 패딩 (전부 숫자일 때만)
+        if code.isdigit() and len(code) < 6:
+            code = code.zfill(6)
+        if len(code) != 6 or not code.isalnum():
+            errors.append(f"{row_num}행: 종목코드 '{code}' 가 6자리 영숫자가 아닙니다.")
+            continue
+        if code in seen_codes:
+            errors.append(f"{row_num}행: 종목코드 '{code}' 가 중복되었습니다.")
+            continue
+
+        # 평단가/수량: 정수 변환
+        try:
+            avg_price = int(float(raw_avg)) if raw_avg is not None and str(raw_avg).strip() != "" else 0
+        except (TypeError, ValueError):
+            errors.append(f"{row_num}행: 평단가 '{raw_avg}' 가 숫자가 아닙니다.")
+            continue
+        try:
+            quantity = int(float(raw_qty)) if raw_qty is not None and str(raw_qty).strip() != "" else 0
+        except (TypeError, ValueError):
+            errors.append(f"{row_num}행: 수량 '{raw_qty}' 가 숫자가 아닙니다.")
+            continue
+        if avg_price < 1:
+            errors.append(f"{row_num}행: 평단가가 1 이상이어야 합니다.")
+            continue
+        if quantity < 1:
+            errors.append(f"{row_num}행: 수량이 1 이상이어야 합니다.")
+            continue
+
+        name = str(raw_name).strip() if raw_name is not None and str(raw_name).strip() else code
+
+        stocks.append({
+            "code":      code,
+            "name":      name,
+            "avg_price": avg_price,
+            "quantity":  quantity,
+        })
+        seen_codes.add(code)
+
+    if errors:
+        # 너무 길지 않게 상위 10개만 보여줌
+        head = "\n".join(errors[:10])
+        more = f"\n... 외 {len(errors) - 10}건" if len(errors) > 10 else ""
+        raise ValueError("다음 항목에서 오류가 발생했습니다:\n\n" + head + more)
+
+    if not stocks:
+        raise ValueError("가져올 종목이 없습니다. (데이터 행을 찾지 못했습니다)")
+
+    return stocks
+
+
+# ─── Excel import 모드 선택 다이얼로그 ───────────────────────────────────────
+class ImportModeDialog(QDialog):
+    """덮어쓰기 / 병합 모드 선택. accept 시 self.mode 에 'overwrite' 또는 'merge'."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("가져오기 모드")
+        self.setFixedSize(360, 220)
+        self.setStyleSheet(DIALOG_STYLE)
+        self.mode: str = "merge"
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 18)
+        root.setSpacing(10)
+
+        title = QLabel("가져오기 방식을 선택하세요")
+        title.setStyleSheet(f"color: {C['text']}; font-size: 13px; font-weight: bold;")
+        root.addWidget(title)
+
+        desc = QLabel(
+            "기존 stocks.json 은 자동으로 stocks.json.bak 에 백업됩니다."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color: {C['subtext']}; font-size: 11px;")
+        root.addWidget(desc)
+
+        root.addSpacing(4)
+
+        radio_style = (
+            f"QRadioButton {{ color: {C['text']}; font-size: 12px; padding: 4px 0; }}"
+            f"QRadioButton::indicator {{ width: 14px; height: 14px; }}"
+        )
+
+        self.merge_rb = QRadioButton("병합 — 같은 종목코드는 Excel 값으로 갱신, 나머지는 유지")
+        self.overwrite_rb = QRadioButton("덮어쓰기 — 기존 종목을 모두 삭제하고 Excel 내용으로 교체")
+        self.merge_rb.setStyleSheet(radio_style)
+        self.overwrite_rb.setStyleSheet(radio_style)
+        self.merge_rb.setChecked(True)
+
+        group = QButtonGroup(self)
+        group.addButton(self.merge_rb)
+        group.addButton(self.overwrite_rb)
+
+        root.addWidget(self.merge_rb)
+        root.addWidget(self.overwrite_rb)
+        root.addStretch()
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("가져오기")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self._on_ok)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def _on_ok(self):
+        self.mode = "overwrite" if self.overwrite_rb.isChecked() else "merge"
+        self.accept()
 
 
 # ─── 가격 미니 차트 (sparkline) ───────────────────────────────────────────────
@@ -1162,17 +1377,25 @@ class WidgetManager:
 
         add_act    = QAction("➕   종목 추가",   menu)
         manage_act = QAction("📋   종목 관리",   menu)
+        export_act = QAction("📤   Excel로 내보내기", menu)
+        import_act = QAction("📥   Excel에서 가져오기", menu)
         self.toggle_act = QAction("🙈   숨기기", menu)
         reset_act  = QAction("📐   위치 초기화", menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
+        export_act.triggered.connect(self.open_export_dialog)
+        import_act.triggered.connect(self.open_import_dialog)
         self.toggle_act.triggered.connect(self.toggle_visibility)
         reset_act.triggered.connect(self.reset_positions)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
         menu.addAction(manage_act)
+        menu.addSeparator()
+        menu.addAction(export_act)
+        menu.addAction(import_act)
+        menu.addSeparator()
         menu.addAction(self.toggle_act)
         menu.addAction(reset_act)
         menu.addSeparator()
@@ -1319,6 +1542,158 @@ class WidgetManager:
         self._save_config()
 
         # 숨김 상태에서 변경된 종목이 있으면 자동으로 표시 상태로 전환
+        if self.is_hidden and self.widgets:
+            self.toggle_visibility()
+
+    # ── Excel 내보내기 ────────────────────────────────────────────────────
+    def open_export_dialog(self):
+        if not self.stocks:
+            QMessageBox.information(None, "알림", "내보낼 보유 종목이 없습니다.")
+            return
+
+        default_name = f"pinstock_holdings_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            None, "보유 종목 Excel로 내보내기",
+            os.path.join(os.path.expanduser("~"), default_name),
+            "Excel 파일 (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        try:
+            export_stocks_to_excel(self.stocks, path)
+        except ImportError:
+            QMessageBox.critical(
+                None, "라이브러리 없음",
+                "openpyxl 패키지가 필요합니다.\n\n터미널에서 다음을 실행하세요:\n    pip install openpyxl"
+            )
+            return
+        except Exception as e:
+            QMessageBox.critical(None, "내보내기 실패", f"파일을 저장할 수 없습니다.\n\n{e}")
+            return
+
+        QMessageBox.information(
+            None, "내보내기 완료",
+            f"{len(self.stocks)}개 종목을 저장했습니다.\n\n{path}"
+        )
+
+    # ── Excel 가져오기 ────────────────────────────────────────────────────
+    def open_import_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            None, "Excel에서 보유 종목 가져오기",
+            os.path.expanduser("~"),
+            "Excel 파일 (*.xlsx)"
+        )
+        if not path:
+            return
+
+        try:
+            imported = import_stocks_from_excel(path)
+        except ImportError:
+            QMessageBox.critical(
+                None, "라이브러리 없음",
+                "openpyxl 패키지가 필요합니다.\n\n터미널에서 다음을 실행하세요:\n    pip install openpyxl"
+            )
+            return
+        except ValueError as e:
+            QMessageBox.critical(None, "가져오기 실패", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(None, "가져오기 실패", f"파일을 읽을 수 없습니다.\n\n{e}")
+            return
+
+        # 모드 선택
+        mode_dlg = ImportModeDialog()
+        if not mode_dlg.exec():
+            return
+        mode = mode_dlg.mode
+
+        # 미리보기 / 최종 확인
+        if mode == "overwrite":
+            msg = (
+                f"덮어쓰기 모드입니다.\n\n"
+                f"기존 {len(self.stocks)}개 종목이 모두 삭제되고\n"
+                f"Excel의 {len(imported)}개 종목으로 교체됩니다.\n\n"
+                "계속할까요?"
+            )
+        else:
+            new_codes = {s["code"] for s in imported}
+            existing_codes = {s["code"] for s in self.stocks}
+            updated = len(new_codes & existing_codes)
+            added = len(new_codes - existing_codes)
+            msg = (
+                f"병합 모드입니다.\n\n"
+                f"• 갱신: {updated}개 (기존 종목 평단가/수량 업데이트)\n"
+                f"• 추가: {added}개 (새 종목)\n"
+                f"• 유지: {len(existing_codes - new_codes)}개 (Excel에 없는 기존 종목)\n\n"
+                "계속할까요?"
+            )
+        ret = QMessageBox.question(
+            None, "가져오기 확인", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        # 적용 직전에 위치 저장 (병합 모드에서 기존 위치 보존하려면 최신 좌표가 필요)
+        self.save_positions()
+
+        # stocks.json 백업
+        if os.path.exists(CONFIG_FILE):
+            try:
+                shutil.copy2(CONFIG_FILE, BACKUP_FILE)
+            except Exception as e:
+                print(f"[backup] 오류: {e}")
+
+        # 새 stocks 리스트 구성
+        if mode == "overwrite":
+            new_stocks = imported   # pos 없음 → 다시 spawn 시 기본 위치
+        else:
+            by_code = {s["code"]: s for s in self.stocks}
+            new_stocks = []
+            for s in imported:
+                # 기존 항목이 있으면 pos 등 부가 정보 보존
+                base = dict(by_code.get(s["code"], {}))
+                base.update(s)   # 평단가/수량/이름은 Excel 값으로 갱신
+                new_stocks.append(base)
+            # Excel 에 없는 기존 종목은 뒤에 그대로 유지
+            imported_codes = {s["code"] for s in imported}
+            for s in self.stocks:
+                if s["code"] not in imported_codes:
+                    new_stocks.append(s)
+
+        self._rebuild_widgets(new_stocks)
+
+        QMessageBox.information(
+            None, "가져오기 완료",
+            f"총 {len(new_stocks)}개 종목이 적용되었습니다.\n"
+            f"이전 데이터는 다음에 백업되었습니다:\n{BACKUP_FILE}"
+        )
+
+    # ── 종목 리스트 전체 교체 후 위젯 재구성 ─────────────────────────────
+    def _rebuild_widgets(self, new_stocks: list[dict]):
+        """기존 위젯을 모두 닫고 new_stocks 기준으로 위젯을 다시 생성한다."""
+        for w in list(self.widgets.values()):
+            w.close()
+        self.widgets.clear()
+
+        self.stocks = new_stocks
+        self.uniform_w = self._calc_uniform_width()
+
+        for i, s in enumerate(self.stocks):
+            default_x = 60
+            default_y = 60 + i * (StockWidget.COMPACT_H + 12)
+            self._spawn_widget(s, default_x, default_y)
+
+        self._save_config()
+
+        # 위치 정보가 없는 종목들이 있으면 자동으로 정렬
+        if any("pos" not in s for s in self.stocks):
+            self.reset_positions()
+
         if self.is_hidden and self.widgets:
             self.toggle_visibility()
 
