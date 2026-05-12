@@ -252,10 +252,14 @@ def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict 
 
 
 # ─── Excel import/export ─────────────────────────────────────────────────────
-def export_stocks_to_excel(stocks: list[dict], path: str) -> None:
+def export_stocks_to_excel(stocks: list[dict], path: str,
+                           current_prices: dict | None = None) -> None:
     """보유 종목을 .xlsx 로 내보내기.
     - 종목코드는 텍스트 셀로 저장 (선행 0 보존: '005930', '0183J0').
-    - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음."""
+    - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음.
+    - current_prices ({code: price}) 가 주어지면 시트 하단에 포트폴리오 요약
+      (총 매입금액 / 평가금액 / 평가손익 / 수익률) 을 빈 행 한 줄로 분리해서 추가.
+      import 시에는 빈 행 이후의 행을 모두 무시하므로 라운드트립에 영향 없음."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment
 
@@ -293,6 +297,41 @@ def export_stocks_to_excel(stocks: list[dict], path: str) -> None:
         letter = ws.cell(row=1, column=col_idx).column_letter
         ws.column_dimensions[letter].width = widths.get(header, 14)
 
+    # ── 포트폴리오 요약 (종목이 1개 이상일 때) ────────────────────────
+    # 종목 표와 빈 행 한 줄로 분리. import 측에서 빈 행 이후를 모두 무시하므로
+    # 라운드트립 안전.
+    if stocks:
+        total_invest = sum(
+            int(s.get("avg_price", 0)) * int(s.get("quantity", 0)) for s in stocks
+        )
+        cp = current_prices or {}
+        total_eval = 0
+        for s in stocks:
+            avg = int(s.get("avg_price", 0))
+            qty = int(s.get("quantity", 0))
+            # 현재가가 없는 종목은 평단가로 폴백 (평가손익 0 으로 계산됨)
+            price = int(cp.get(s.get("code")) or avg)
+            total_eval += price * qty
+        profit = total_eval - total_invest
+        prate  = (profit / total_invest * 100.0) if total_invest else 0.0
+
+        # 빈 행 한 줄 띄우고 다음 행에 요약 헤더
+        header_row = ws.max_row + 2
+        ws.cell(row=header_row, column=1, value="포트폴리오 요약").font = bold
+
+        rows = [
+            ("총 매입금액", total_invest, "#,##0"),
+            ("평가금액",   total_eval,   "#,##0"),
+            ("평가손익",   profit,        "#,##0"),
+            ("수익률 (%)", round(prate, 2), "0.00"),
+        ]
+        for i, (label, val, fmt) in enumerate(rows, 1):
+            r = header_row + i
+            ws.cell(row=r, column=1, value=label)
+            val_cell = ws.cell(row=r, column=2, value=val)
+            val_cell.number_format = fmt
+            val_cell.alignment = Alignment(horizontal="right")
+
     wb.save(path)
 
 
@@ -324,9 +363,9 @@ def import_stocks_from_excel(path: str) -> list[dict]:
     errors: list[str] = []
 
     for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        # 완전 빈 행은 건너뜀
+        # 빈 행을 만나면 그 이후는 모두 무시 (export 시 빈 행으로 구분한 요약 섹션 등)
         if row is None or all(v is None or (isinstance(v, str) and not v.strip()) for v in row):
-            continue
+            break
 
         def cell(h: str):
             i = idx_of[h]
@@ -1814,8 +1853,15 @@ class WidgetManager:
         if not path.lower().endswith(".xlsx"):
             path += ".xlsx"
 
+        # 마스터 위젯과 동일한 4지표를 시트 하단에 포함시키기 위해 현재가 dict 전달
+        current_prices = {
+            code: w.current_price
+            for code, w in self.widgets.items()
+            if w.current_price
+        }
+
         try:
-            export_stocks_to_excel(self.stocks, path)
+            export_stocks_to_excel(self.stocks, path, current_prices)
         except ImportError:
             QMessageBox.critical(
                 None, "라이브러리 없음",
