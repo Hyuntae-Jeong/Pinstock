@@ -22,8 +22,8 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyle, QStyleOptionSpinBox
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint
-from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QIcon, QAction, QBrush, QPen, QPolygon
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPointF
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QPainterPath, QIcon, QAction, QBrush, QPen, QPolygon
 
 # ─── 설정 파일 경로 ────────────────────────────────────────────────────────────
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
@@ -171,6 +171,123 @@ def fetch_stock(code: str) -> dict | None:
     except Exception as e:
         print(f"[fetch_stock] {code} 오류: {e}")
         return None
+
+
+# ─── 네이버 금융 분봉 차트 API ───────────────────────────────────────────────
+def fetch_minute_chart(code: str) -> dict | None:
+    """네이버 금융 분봉 API로 당일 1분봉 시계열 조회.
+    반환: {'prices': [float, ...], 'open': float} or None"""
+    url = f"https://api.stock.naver.com/chart/domestic/item/{code}/minute"
+    try:
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data:
+            return None
+        return {
+            "prices": [float(d["currentPrice"]) for d in data],
+            "open":   float(data[0]["openPrice"]),
+        }
+    except Exception as e:
+        print(f"[fetch_minute_chart] {code} 오류: {e}")
+        return None
+
+
+# ─── 당일 가격 미니 차트 (sparkline) ──────────────────────────────────────────
+class SparklineWidget(QWidget):
+    """당일 1분봉 가격 추이를 라인 + 채움(area)으로 그리는 미니 차트.
+    시초가 대비 현재가가 높으면 빨강(상승), 낮으면 파랑(하락)."""
+
+    W = 100   # 차트 너비
+    H = 40    # 차트 높이
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.W, self.H)
+        self.prices: list[float] = []
+        self.open_price: float = 0.0
+        self.prev_close: float = 0.0   # 전일 종가 (가로 점선 표시용)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
+        self.prices = prices
+        self.open_price = open_price
+        self.prev_close = prev_close
+        self.update()
+
+    def paintEvent(self, event):
+        prices = self.prices
+        if not prices or len(prices) < 2:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        last = prices[-1]
+        op = self.open_price or prices[0]
+        color = QColor(C['red']) if last >= op else QColor(C['blue'])
+        fill = QColor(color)
+        fill.setAlpha(50)
+
+        pad = 4
+        w = self.W - 2 * pad
+        h = self.H - 2 * pad
+
+        # y범위: 가격뿐 아니라 전일 종가도 포함시켜 점선이 항상 영역 안에 들어오게
+        y_values = list(prices)
+        if self.prev_close > 0:
+            y_values.append(self.prev_close)
+        mn = min(y_values)
+        mx = max(y_values)
+        rng = (mx - mn) if mx > mn else 1.0
+
+        def y_of(price: float) -> float:
+            return pad + (1 - (price - mn) / rng) * h
+
+        n = len(prices)
+        pts: list[QPointF] = []
+        for i, p in enumerate(prices):
+            x = pad + (i / (n - 1)) * w
+            pts.append(QPointF(x, y_of(p)))
+
+        # area fill (라인 아래 반투명 채움)
+        area = QPainterPath()
+        area.moveTo(pts[0])
+        for pt in pts[1:]:
+            area.lineTo(pt)
+        area.lineTo(pts[-1].x(), pad + h)
+        area.lineTo(pts[0].x(), pad + h)
+        area.closeSubpath()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(fill))
+        painter.drawPath(area)
+
+        # 전일 종가 기준선 (가로 점선) — 촘촘한 dot, 살짝 흐린 색
+        if self.prev_close > 0:
+            line_y = y_of(self.prev_close)
+            pen_color = QColor(C['subtext'])
+            pen_color.setAlpha(180)         # 살짝 흐리게
+            dotted = QPen(pen_color)
+            dotted.setWidthF(0.8)            # 얇게
+            dotted.setDashPattern([1, 2])    # 1px on, 2px off (거의 dot)
+            painter.setPen(dotted)
+            painter.drawLine(QPointF(pad, line_y), QPointF(pad + w, line_y))
+
+        # line stroke (현재가 라인)
+        line = QPainterPath()
+        line.moveTo(pts[0])
+        for pt in pts[1:]:
+            line.lineTo(pt)
+        painter.setPen(QPen(color, 1.3))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(line)
+
+        painter.end()
 
 
 # ─── 포커스 진입 시 자동 전체선택 ────────────────────────────────────────────
@@ -589,8 +706,8 @@ class StockWidget(QWidget):
         font = QFont("Malgun Gothic",8, QFont.Weight.Bold)
         fm = QFontMetrics(font)
         name_w = fm.horizontalAdvance(name)
-        # 좌마진(14) + 우마진(14) + 여유(6) = 34
-        OVERHEAD = 34
+        # 좌마진(14) + 정보~sparkline spacing(8) + sparkline(100) + 우마진(10) + 여유(6) = 138
+        OVERHEAD = 138
         return max(StockWidget.MIN_W, name_w + OVERHEAD)
 
     # ── UI 구성 ────────────────────────────────────────────────────────────
@@ -615,20 +732,25 @@ class StockWidget(QWidget):
             }}
         """)
 
-        # ── 상단 compact 영역 (2줄 레이아웃) ────────────────────────────
+        # ── 상단 compact 영역 (좌: 정보 / 우: 당일 sparkline) ──────────
         self.compact = QWidget(self.card)
         self.compact.setGeometry(0, 0, self.W, self.COMPACT_H)
         self.compact.setStyleSheet("background: transparent;")
 
-        vl = QVBoxLayout(self.compact)
-        vl.setContentsMargins(14, 5, 14, 5)
-        vl.setSpacing(1)
+        hl = QHBoxLayout(self.compact)
+        hl.setContentsMargins(14, 5, 10, 5)
+        hl.setSpacing(8)
+
+        # 좌측: 종목명 + 가격 행
+        info = QVBoxLayout()
+        info.setContentsMargins(0, 0, 0, 0)
+        info.setSpacing(1)
 
         # 1행: 종목명
         self.name_lbl = QLabel(self.data.get("name", self.data["code"]))
         self.name_lbl.setFont(QFont("Malgun Gothic",8, QFont.Weight.Bold))
         self.name_lbl.setStyleSheet(f"color: {C['subtext']};")
-        vl.addWidget(self.name_lbl)
+        info.addWidget(self.name_lbl)
 
         # 2행: 가격 + 등락률
         price_row = QHBoxLayout()
@@ -646,7 +768,12 @@ class StockWidget(QWidget):
         price_row.addWidget(self.rate_lbl)
         price_row.addStretch()
 
-        vl.addLayout(price_row)
+        info.addLayout(price_row)
+        hl.addLayout(info, 1)
+
+        # 우측: 당일 sparkline 미니 차트
+        self.sparkline = SparklineWidget(self.compact)
+        hl.addWidget(self.sparkline, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # ── 확장 패널 ────────────────────────────────────────────────────
         panel_h = self.EXPAND_H - self.COMPACT_H
@@ -717,6 +844,14 @@ class StockWidget(QWidget):
             self.name_lbl.setText(result["name"])
             self.current_price = result["price"]
             self._apply_price(result)
+        # 당일 sparkline 갱신 (+ 전일 종가 점선)
+        chart = fetch_minute_chart(self.data["code"])
+        if chart and chart["prices"]:
+            # 전일 종가 = 현재가 - 전일 대비 등락액
+            prev_close = 0.0
+            if result:
+                prev_close = float(result["price"] - result["change_price"])
+            self.sparkline.set_data(chart["prices"], chart["open"], prev_close)
 
     def _apply_price(self, result: dict):
         price = result["price"]
