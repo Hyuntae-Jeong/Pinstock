@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 202 148">
+  <!-- candle 1: bullish tall (solid) -->
+  <line x1="22" y1="0" x2="22" y2="16" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+  <rect x="4" y="16" width="36" height="80" rx="6" fill="#1a1a1a"/>
+  <line x1="22" y1="96" x2="22" y2="114" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- candle 2: bearish hollow -->
+  <line x1="72" y1="24" x2="72" y2="40" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+  <rect x="54" y="40" width="36" height="60" rx="6" fill="none" stroke="#1a1a1a" stroke-width="7"/>
+  <line x1="72" y1="100" x2="72" y2="120" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- candle 3: bullish very tall (가장 큰 강조) -->
+  <line x1="122" y1="0" x2="122" y2="8" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+  <rect x="104" y="8" width="36" height="120" rx="6" fill="#1a1a1a"/>
+  <line x1="122" y1="128" x2="122" y2="140" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- candle 4: bullish medium -->
+  <line x1="172" y1="18" x2="172" y2="30" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+  <rect x="154" y="30" width="36" height="80" rx="6" fill="#1a1a1a"/>
+  <line x1="172" y1="110" x2="172" y2="128" stroke="#1a1a1a" stroke-width="7" stroke-linecap="round"/>
+</svg>
