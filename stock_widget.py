@@ -1954,11 +1954,12 @@ class WidgetManager:
                 self.master_widget.hide()
             elif self.master_visible:
                 self.master_widget.show()
-        # 동그라미 토글 버튼도 함께 숨김/표시 (다시 켜기는 트레이로만 가능)
+        # 토글 버튼도 함께 표시/숨김 (다시 켜기는 트레이로만 가능)
         if self.hide_all_btn:
             self.hide_all_btn.hide() if self.is_hidden else self.hide_all_btn.show()
         if self.hide_master_btn:
-            self.hide_master_btn.hide() if self.is_hidden else self.hide_master_btn.show()
+            show_master_btn = self.master_visible and not self.is_hidden
+            self.hide_master_btn.show() if show_master_btn else self.hide_master_btn.hide()
         self.toggle_act.setText("👀   표시하기" if self.is_hidden else "🙈   숨기기")
 
     # ── 위치 초기화 ───────────────────────────────────────────────────────
@@ -2015,24 +2016,42 @@ class WidgetManager:
                 w.move(x, y)
                 s["pos"] = [x, y]
 
-        # 토글 버튼: 마스터 위젯 왼쪽에 위/아래로 2개 (마스터 없으면 화면 우상단)
+        # 토글 버튼 위치:
+        # 1) 마스터 표시 중 → 마스터 왼쪽에 위/아래
+        # 2) 마스터 없거나 숨김 + 종목 있음 → 맨 마지막 종목 위젯 왼쪽에 위/아래
+        # 3) 둘 다 없음 → 화면 우상단 fallback
         btn_size = ToggleButton.SIZE
         if self.master_widget and self.master_widget.isVisible():
             btn_x = mx - btn_size - GAP
             top_y = my
             bot_y = my + btn_size + GAP
+        elif self.stocks:
+            # 마지막 종목 위젯 위치 (방금 위에서 self.stocks[-1]["pos"]에 저장됨)
+            last_pos = self.stocks[-1].get("pos") or [0, 0]
+            btn_x = last_pos[0] - btn_size - GAP
+            top_y = last_pos[1]
+            bot_y = top_y + btn_size + GAP
         else:
             primary = QApplication.primaryScreen()
-            geo = primary.availableGeometry()
-            btn_x = geo.x() + geo.width() - btn_size - MARGIN_X
-            top_y = geo.y() + MARGIN_Y
+            pgeo = primary.availableGeometry()
+            btn_x = pgeo.x() + pgeo.width() - btn_size - MARGIN_X
+            top_y = pgeo.y() + MARGIN_Y
             bot_y = top_y + btn_size + GAP
+
         if self.hide_all_btn:
             self.hide_all_btn.move(btn_x, top_y)
             self.hide_all_btn_pos = [btn_x, top_y]
+            # 전체 토글은 항상 보임 (전체 숨김 상태가 아닌 한)
+            if not self.is_hidden:
+                self.hide_all_btn.show()
         if self.hide_master_btn:
             self.hide_master_btn.move(btn_x, bot_y)
             self.hide_master_btn_pos = [btn_x, bot_y]
+            # 마스터 토글은 마스터 표시 상태에 따름
+            if self.master_visible and not self.is_hidden:
+                self.hide_master_btn.show()
+            else:
+                self.hide_master_btn.hide()
 
         self._save_config()
         # 숨김 상태라면 자동으로 다시 표시
@@ -2229,8 +2248,12 @@ class WidgetManager:
         pm = self.hide_master_btn_pos or [default_master_x, default_master_y]
         self.hide_all_btn.move(pa[0], pa[1])
         self.hide_master_btn.move(pm[0], pm[1])
-        self.hide_all_btn.show()
-        self.hide_master_btn.show()
+        # 전체 토글은 항상 보임 (전체 숨김 상태일 때만 같이 숨겨짐)
+        if not self.is_hidden:
+            self.hide_all_btn.show()
+        # 마스터 토글은 마스터 위젯이 표시 중일 때만 보임
+        if self.master_visible and not self.is_hidden:
+            self.hide_master_btn.show()
 
     def _spawn_widget(self, stock: dict, def_x=60, def_y=60, stagger_idx: int = 0):
         code = stock["code"]
@@ -2273,11 +2296,12 @@ class WidgetManager:
 
     def toggle_master_visibility(self):
         self.master_visible = not self.master_visible
+        show_master = self.master_visible and not self.is_hidden
         if self.master_widget:
-            if self.master_visible and not self.is_hidden:
-                self.master_widget.show()
-            else:
-                self.master_widget.hide()
+            self.master_widget.show() if show_master else self.master_widget.hide()
+        # 마스터 토글 버튼도 마스터 위젯 표시 상태에 따름
+        if self.hide_master_btn:
+            self.hide_master_btn.show() if show_master else self.hide_master_btn.hide()
         self.master_toggle_act.setText(self._master_toggle_text())
         self._save_config()
 
