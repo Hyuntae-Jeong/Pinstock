@@ -16,6 +16,12 @@ import shutil
 import requests
 from datetime import datetime, timedelta
 
+# ─── 공용 HTTP 세션 (TCP/TLS 연결 재사용으로 호출당 100~300ms 절감) ─────────
+_SESSION = requests.Session()
+_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+})
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QDialog, QFormLayout,
@@ -167,11 +173,7 @@ def fetch_stock(code: str) -> dict | None:
     """네이버 금융 모바일 API로 현재가 조회"""
     url = f"https://m.stock.naver.com/api/stock/{code}/basic"
     try:
-        r = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=5,
-        )
+        r = _SESSION.get(url, timeout=3)
         if r.status_code != 200:
             return None
         d = r.json()
@@ -192,11 +194,7 @@ def fetch_minute_chart(code: str) -> dict | None:
     반환: {'prices': [float, ...], 'open': float} or None"""
     url = f"https://api.stock.naver.com/chart/domestic/item/{code}/minute"
     try:
-        r = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=5,
-        )
+        r = _SESSION.get(url, timeout=3)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -224,11 +222,7 @@ def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict 
         f"&endDateTime={end.strftime('%Y%m%d')}"
     )
     try:
-        r = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=5,
-        )
+        r = _SESSION.get(url, timeout=3)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -1044,7 +1038,7 @@ class StockWidget(QWidget):
     EXPAND_H   = 214    # 확장 높이 (compact + 상세 패널 156)
     RADIUS     = 13     # 모서리 반지름
 
-    def __init__(self, stock_data: dict, width: int | None = None):
+    def __init__(self, stock_data: dict, width: int | None = None, stagger_idx: int = 0):
         super().__init__()
         self.data = stock_data          # code, name, avg_price, quantity, pos
         self.current_price: int = 0
@@ -1052,6 +1046,7 @@ class StockWidget(QWidget):
         self._drag_pos = None
         self._press_pos = None    # 좌클릭 시작 위치 (드래그/클릭 구분용)
         self._moved: bool = False # 일정 거리 이상 움직였는지
+        self._stagger_idx = stagger_idx   # 동시 호출 분산용 인덱스
 
         # 외부에서 통일 너비를 받지 않으면 종목명 기준 자체 계산
         name = self.data.get("name", self.data["code"])
@@ -1067,15 +1062,24 @@ class StockWidget(QWidget):
 
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self._fetch_price)
-        self.refresh_timer.start(5_000)
 
         self.chart_timer = QTimer()
         self.chart_timer.timeout.connect(self._fetch_chart)
-        self.chart_timer.start(60_000)
 
         self._build_ui()
-        self._fetch_price()   # 즉시 1회
-        self._fetch_chart()   # 즉시 1회
+
+        # 타이머/첫 fetch를 stagger 인덱스만큼 지연시켜 시작.
+        # 여러 위젯이 거의 같은 시점에 동시 HTTP 호출하지 않도록 분산.
+        STAGGER_MS = 600   # 위젯당 약 0.6초 간격
+        delay = self._stagger_idx * STAGGER_MS
+        QTimer.singleShot(delay, self._start_fetching)
+
+    def _start_fetching(self):
+        """타이머 가동 + 즉시 1회 fetch (stagger 지연 후 호출)."""
+        self.refresh_timer.start(5_000)
+        self.chart_timer.start(60_000)
+        self._fetch_price()
+        self._fetch_chart()
 
     # ── 종목명에 맞춰 가로폭 계산 ─────────────────────────────────────────
     @staticmethod
@@ -1847,12 +1851,12 @@ class WidgetManager:
         for i, s in enumerate(self.stocks):
             default_x = 60
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
-            self._spawn_widget(s, default_x, default_y)
+            self._spawn_widget(s, default_x, default_y, stagger_idx=i)
         self._spawn_master()
 
-    def _spawn_widget(self, stock: dict, def_x=60, def_y=60):
+    def _spawn_widget(self, stock: dict, def_x=60, def_y=60, stagger_idx: int = 0):
         code = stock["code"]
-        w = StockWidget(stock, width=self.uniform_w)
+        w = StockWidget(stock, width=self.uniform_w, stagger_idx=stagger_idx)
         w.deleted.connect(self._on_delete)
         w.edited.connect(self._on_edited)
         w.price_updated.connect(lambda _: self._recompute_master())
@@ -1960,9 +1964,9 @@ class WidgetManager:
         # 새 종목명이 더 길면 모든 위젯 너비 재조정 (새 위젯도 이 값으로 생성됨)
         self._apply_uniform_width()
 
-        # 새 위젯 위치: 기존 위젯들 아래
+        # 새 위젯 위치: 기존 위젯들 아래. 추가된 위젯이라 stagger 필요 없음(즉시 시작)
         ny = 60 + len(self.widgets) * (StockWidget.COMPACT_H + 12)
-        self._spawn_widget(d, 60, ny)
+        self._spawn_widget(d, 60, ny, stagger_idx=0)
 
         self._recompute_master()
 
@@ -1987,11 +1991,13 @@ class WidgetManager:
                 if w:
                     w.close()
 
-        # 추가된 종목: 위젯 생성 (기본 위치)
+        # 추가된 종목: 위젯 생성 (기본 위치) — 다수 추가 시 stagger로 분산
+        added_idx = 0
         for s in new_stocks:
             if s["code"] not in old_map:
                 ny = 60 + len(self.widgets) * (StockWidget.COMPACT_H + 12)
-                self._spawn_widget(s, 60, ny)
+                self._spawn_widget(s, 60, ny, stagger_idx=added_idx)
+                added_idx += 1
 
         # 기존 종목: 평단가/수량 변경 반영
         for s in new_stocks:
@@ -2161,7 +2167,7 @@ class WidgetManager:
         for i, s in enumerate(self.stocks):
             default_x = 60
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
-            self._spawn_widget(s, default_x, default_y)
+            self._spawn_widget(s, default_x, default_y, stagger_idx=i)
 
         # 마스터 위젯도 새 너비에 맞춰 갱신
         if self.master_widget:
