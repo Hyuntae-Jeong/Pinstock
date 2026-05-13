@@ -1649,16 +1649,19 @@ class WidgetManager:
 
     # ── 위치 초기화 ───────────────────────────────────────────────────────
     def reset_positions(self):
-        """각 위젯을 현재 위치한 모니터의 우상단에 세로 정렬.
-        마스터 위젯이 표시되어 있으면 자기 모니터의 우상단 맨 위에 두고,
-        같은 모니터의 종목들은 그 아래로 밀어서 배치한다."""
-        MARGIN_X = 20   # 화면 우측 여백
-        MARGIN_Y = 60   # 화면 상단 여백
-        GAP      = 4    # 위젯 간 세로 간격
+        """각 위젯을 현재 위치한 모니터의 우상단부터 column-wrap 방식으로 정렬.
+        - 첫 column이 화면 세로 영역을 넘어가면 그 왼쪽에 새 column을 시작
+        - 마스터 위젯이 표시 중이면 자기 모니터의 우상단 첫 자리에 두고,
+          모든 column은 마스터 아래 y부터 시작 (마스터보다 위로는 가지 않음)"""
+        MARGIN_X      = 20   # 화면 우측 여백
+        MARGIN_Y      = 60   # 화면 상단 여백
+        MARGIN_BOTTOM = 20   # 화면 하단 여백 (이 안쪽으로만 위젯 배치)
+        GAP           = 4    # 같은 column 내 위젯 간 세로 간격
+        COL_GAP       = 8    # column 사이 가로 간격
 
         # 마스터 위젯이 표시 중인 모니터 파악
         master_screen = None
-        master_offset = 0   # 그 모니터의 종목들이 마스터 높이만큼 아래로 밀림
+        master_offset = 0
         if self.master_widget and self.master_widget.isVisible():
             mc = self.master_widget.frameGeometry().center()
             master_screen = QApplication.screenAt(mc) or QApplication.primaryScreen()
@@ -1679,13 +1682,22 @@ class WidgetManager:
             screen = QApplication.screenAt(center) or QApplication.primaryScreen()
             groups.setdefault(screen, []).append((s, w))
 
-        # 모니터별 우상단 정렬 (마스터가 있는 모니터는 그 아래부터)
+        widget_w = self.uniform_w
+        step_y   = StockWidget.COMPACT_H + GAP
+
         for screen, items in groups.items():
             geo = screen.availableGeometry()
-            base_y = geo.y() + MARGIN_Y + (master_offset if screen is master_screen else 0)
+            col_top_y = geo.y() + MARGIN_Y + (master_offset if screen is master_screen else 0)
+            # 한 column에 들어가는 위젯 수 (하단 여백까지 고려)
+            avail_h = geo.y() + geo.height() - MARGIN_BOTTOM - col_top_y
+            max_per_col = max(1, avail_h // step_y)
+
+            first_col_x = geo.x() + geo.width() - widget_w - MARGIN_X
             for i, (s, w) in enumerate(items):
-                x = geo.x() + geo.width() - w.width() - MARGIN_X
-                y = base_y + i * (StockWidget.COMPACT_H + GAP)
+                col_idx = i // max_per_col
+                row_idx = i %  max_per_col
+                x = first_col_x - col_idx * (widget_w + COL_GAP)
+                y = col_top_y + row_idx * step_y
                 w.move(x, y)
                 s["pos"] = [x, y]
 
