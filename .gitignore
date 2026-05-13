@@ -13,6 +13,7 @@ env/
 build/
 dist/
 *.spec
+!pinstock.spec
 
 # 개인 데이터 (보유 종목/평단가/수량)
 stocks.json

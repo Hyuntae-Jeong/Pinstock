@@ -3,6 +3,7 @@
 시스템 라이트/다크 모드에 따라 적절한 SVG 아이콘으로 자동 전환.
 """
 
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QPoint, Qt, pyqtSignal
@@ -13,8 +14,16 @@ from PyQt6.QtWidgets import QSystemTrayIcon, QApplication
 from ..ui_windows.theme import C
 
 
-# 레포 루트의 icons/ 디렉토리. pinstock/ui_macos/menubar.py 의 두 단계 부모.
-_ICONS_DIR = Path(__file__).resolve().parent.parent.parent / "icons"
+def _resolve_icons_dir() -> Path:
+    # PyInstaller 번들에서는 sys._MEIPASS 가 리소스 루트.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "icons"
+    # 개발 모드: 레포 루트의 icons/.
+    return Path(__file__).resolve().parent.parent.parent / "icons"
+
+
+_ICONS_DIR = _resolve_icons_dir()
 _ICON_LIGHT = _ICONS_DIR / "menubar_light.svg"   # 라이트 모드: 검정 단색
 _ICON_DARK  = _ICONS_DIR / "menubar_dark.svg"    # 다크 모드:   흰색 단색
 
