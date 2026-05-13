@@ -153,6 +153,11 @@ QTableWidget::item {{
     padding: 6px 8px;
     border: none;
 }}
+QTableWidget::item:focus, QTableWidget::item:selected {{
+    outline: 0;
+    border: none;
+}}
+QTableView {{ outline: 0; }}
 QHeaderView::section {{
     background: {C['surface']};
     color: {C['subtext']};
@@ -849,11 +854,62 @@ class WideEditorDelegate(QStyledItemDelegate):
         editor.setGeometry(rect.x(), rect.y(), new_w, rect.height())
 
 
+# ─── ON/OFF 슬라이딩 토글 스위치 ─────────────────────────────────────────────
+class ToggleSwitch(QWidget):
+    """슬라이딩 토글 스위치. ON=녹색 트랙, OFF=회색 트랙. 핸들은 흰 원."""
+
+    toggled = pyqtSignal(bool)
+
+    W = 36
+    H = 18
+
+    def __init__(self, checked: bool = True, parent=None):
+        super().__init__(parent)
+        self._checked = bool(checked)
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # focus 받을 때 그려지는 native outline 차단
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, value: bool):
+        value = bool(value)
+        if self._checked != value:
+            self._checked = value
+            self.update()
+            self.toggled.emit(value)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setChecked(not self._checked)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        # 트랙 (둥근 막대) — ON: 파랑 / OFF: 어두운 회색
+        track = QColor(C['blue']) if self._checked else QColor(C['surface2'])
+        painter.setBrush(QBrush(track))
+        painter.drawRoundedRect(0, 0, self.W, self.H, self.H / 2, self.H / 2)
+
+        # 핸들 (흰 원)
+        handle_size = self.H - 4
+        margin = 2
+        hx = self.W - handle_size - margin if self._checked else margin
+        painter.setBrush(QBrush(QColor("white")))
+        painter.drawEllipse(hx, margin, handle_size, handle_size)
+
+        painter.end()
+
+
 # ─── 종목 일괄 관리 다이얼로그 ────────────────────────────────────────────────
 class ManageStocksDialog(QDialog):
     """현재 보유 종목들을 표 형태로 일괄 관리하는 다이얼로그."""
 
-    COLS = ["종목명", "종목코드", "평단가", "수량", "평가손익"]
+    COLS = ["종목명", "종목코드", "평단가", "수량", "평가손익", "표시"]
 
     def __init__(self, stocks: list[dict], current_prices: dict | None = None, parent=None):
         super().__init__(parent)
@@ -862,7 +918,7 @@ class ManageStocksDialog(QDialog):
         self._suppress_change: bool = False   # itemChanged 재귀 차단용
 
         self.setWindowTitle("종목 관리")
-        self.setMinimumSize(640, 400)
+        self.setMinimumSize(700, 400)
         self.setStyleSheet(DIALOG_STYLE)
 
         root = QVBoxLayout(self)
@@ -899,6 +955,9 @@ class ManageStocksDialog(QDialog):
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        # 표시 컬럼은 ToggleSwitch 가 잘리지 않게 고정 폭
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(5, 64)
         hdr.setStretchLastSection(False)
 
         # 헤더 클릭 자동 정렬은 사용하지 않음 (명시적 "정렬" 버튼으로 대체)
@@ -1028,18 +1087,50 @@ class ManageStocksDialog(QDialog):
             item.setFlags(base_flags)
             self.table.setItem(row, col, item)
 
-    # ── 더블클릭: 평단가/수량은 인라인 편집, 그 외는 종목 수정 팝업 ──────
+        # 6번째: 표시 토글 스위치 (ON=표시, OFF=숨김)
+        # setCellWidget 사용해 셀에 위젯을 직접 배치 — item 이 없으므로
+        # 이전 체크박스에서 발생하던 "0" inline-edit 잔영 문제 회피
+        hidden = bool(s.get("hidden", False))
+        toggle = ToggleSwitch(checked=not hidden)
+        toggle.toggled.connect(
+            lambda checked, r=row: self._on_visibility_toggled(r, checked)
+        )
+        # 셀 가운데 정렬용 컨테이너 (드래그-드롭 정렬 시 시각 일관성 유지)
+        container = QWidget()
+        hl = QHBoxLayout(container)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addStretch()
+        hl.addWidget(toggle)
+        hl.addStretch()
+        # 셀에 비선택 빈 item 을 깔아 토글 옆 영역 클릭 시 focus/selection
+        # 표시가 그려지지 않게 차단 (ItemIsSelectable 제외)
+        placeholder = QTableWidgetItem("")
+        placeholder.setFlags(
+            Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        self.table.setItem(row, 5, placeholder)
+        self.table.setCellWidget(row, 5, container)
+
+    # ── 더블클릭: 평단가/수량/표시는 인라인 처리, 그 외는 종목 수정 팝업 ─
     def _on_double_clicked(self, index):
-        if index.column() in (2, 3):
-            return   # Qt 의 자동 인라인 편집에 맡김
+        if index.column() in (2, 3, 5):   # 5: 표시 체크박스 (Qt 가 토글 처리)
+            return
         self._edit_selected()
+
+    # ── 표시 토글 스위치 변경 → self._stocks[row].hidden 갱신 ────────────
+    def _on_visibility_toggled(self, row: int, checked: bool):
+        if 0 <= row < len(self._stocks):
+            self._stocks[row]["hidden"] = not checked
 
     # ── 인라인 편집 결과 반영 ────────────────────────────────────────────
     def _on_item_changed(self, item):
         if self._suppress_change or item is None:
             return
         row, col = item.row(), item.column()
-        if col not in (2, 3) or row < 0 or row >= len(self._stocks):
+        if row < 0 or row >= len(self._stocks):
+            return
+
+        if col not in (2, 3):
             return
 
         # 사용자가 입력한 텍스트에서 숫자만 추출
@@ -1123,7 +1214,9 @@ class ManageStocksDialog(QDialog):
         insert_at = dest_row if dest_row < start else dest_row - 1
         insert_at = max(0, min(insert_at, len(self._stocks)))
         self._stocks.insert(insert_at, item)
-        # 표는 Qt 가 이미 옮긴 상태이므로 재구성 불필요
+        # cell widget (ToggleSwitch) 은 drag-drop 시 자동으로 같이 옮겨지지 않으므로
+        # 표를 다시 그려서 스위치 위치와 lambda 의 row 캡처를 동기화한다
+        self._rebuild_table()
 
     # ── 액션 ───────────────────────────────────────────────────────────────
     def _add(self):
@@ -1946,8 +2039,13 @@ class WidgetManager:
     # ── 전체 위젯 표시/숨김 토글 ─────────────────────────────────────────
     def toggle_visibility(self):
         self.is_hidden = not self.is_hidden
-        for w in self.widgets.values():
-            w.hide() if self.is_hidden else w.show()
+        # 표시 복귀 시 종목별 hidden 상태는 보존 (hidden=True 종목은 계속 숨김)
+        hidden_by_code = {s["code"]: bool(s.get("hidden", False)) for s in self.stocks}
+        for code, w in self.widgets.items():
+            if self.is_hidden:
+                w.hide()
+            elif not hidden_by_code.get(code, False):
+                w.show()
         # 마스터 위젯도 전체 토글에 함께 따름. 단, 마스터 개별 숨김 상태는 보존.
         if self.master_widget:
             if self.is_hidden:
@@ -2264,7 +2362,9 @@ class WidgetManager:
 
         pos = stock.get("pos", [def_x, def_y])
         w.move(pos[0], pos[1])
-        w.show()
+        # 종목별 hidden 표시 + 전체 숨김 상태 둘 다 고려
+        if not stock.get("hidden", False) and not self.is_hidden:
+            w.show()
         self.widgets[code] = w
 
     def _on_edited(self, _code: str):
@@ -2317,6 +2417,9 @@ class WidgetManager:
         total_eval   = 0
         holdings: list[dict] = []
         for s in self.stocks:
+            # 숨김 종목은 합산/holdings 모두 제외 (엑셀 내보내기엔 포함됨)
+            if s.get("hidden", False):
+                continue
             avg = int(s.get("avg_price", 0))
             qty = int(s.get("quantity", 0))
             invest = avg * qty
@@ -2410,15 +2513,22 @@ class WidgetManager:
                 self._spawn_widget(s, 60, ny, stagger_idx=added_idx)
                 added_idx += 1
 
-        # 기존 종목: 평단가/수량 변경 반영
+        # 기존 종목: 평단가/수량/hidden 변경 반영
         for s in new_stocks:
             code = s["code"]
             if code in old_map and code in self.widgets:
                 w = self.widgets[code]
                 w.data["avg_price"] = s["avg_price"]
                 w.data["quantity"]  = s["quantity"]
+                w.data["hidden"]    = bool(s.get("hidden", False))
                 if w.current_price:
                     w._update_detail(w.current_price)
+                # hidden 상태에 따라 표시 토글 (전체 숨김 모드면 건드리지 않음)
+                if not self.is_hidden:
+                    if w.data["hidden"]:
+                        w.hide()
+                    else:
+                        w.show()
 
         # 순서 + 저장 + 너비 재계산
         self.stocks = new_stocks
