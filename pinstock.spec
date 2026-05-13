@@ -24,9 +24,10 @@ ROOT = Path(SPECPATH).resolve()
 ICON_MAC = str(ROOT / "assets" / "Pinstock.icns")
 ICON_WIN = str(ROOT / "assets" / "Pinstock.ico")
 
-# 런타임에 필요한 데이터 파일 — 메뉴바 SVG 아이콘들.
+# 런타임에 필요한 데이터 파일 — 메뉴바 SVG 아이콘들 + 앱 아이콘(.ico/.icns)
 datas = [
     (str(ROOT / "icons"), "icons"),
+    (str(ROOT / "assets"), "assets"),
 ]
 
 block_cipher = None

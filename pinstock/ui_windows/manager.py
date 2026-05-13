@@ -1,9 +1,11 @@
 """Windows 환경 위젯 오케스트레이션."""
 
 import os
+import sys
 import json
 import copy
 import shutil
+from pathlib import Path
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
@@ -13,6 +15,19 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import (
     QIcon, QAction, QPixmap, QPainter, QFont, QColor, QBrush, QPen,
 )
+
+
+def _resolve_app_icon() -> QIcon:
+    # PyInstaller 번들이면 sys._MEIPASS/assets, 개발 모드면 레포 루트/assets
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base = Path(meipass) / "assets"
+    else:
+        base = Path(__file__).resolve().parent.parent.parent / "assets"
+    ico = base / "Pinstock.ico"
+    if ico.exists():
+        return QIcon(str(ico))
+    return QIcon()
 
 from ..core.api import fetch_stock
 from ..core.storage import (
@@ -237,6 +252,10 @@ class WidgetManager:
 
     @staticmethod
     def _make_tray_icon() -> QIcon:
+        # assets/Pinstock.ico 를 우선 사용. 못 찾으면 기존 파란 원+₩ 폴백.
+        icon = _resolve_app_icon()
+        if not icon.isNull():
+            return icon
         px = QPixmap(32, 32)
         px.fill(QColor(0, 0, 0, 0))
         p = QPainter(px)
