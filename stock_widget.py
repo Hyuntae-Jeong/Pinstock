@@ -1360,14 +1360,19 @@ class MasterWidget(QWidget):
     총 매입금액 / 평가금액 / 평가손익 / 수익률 4개 지표를 2×2 그리드로 표시.
     개별 종목 위젯과 동일한 다크 카드 스타일이며 드래그로 이동 가능."""
 
-    H      = 96    # 카드 높이
+    H      = 96    # compact 카드 높이 (2×2 요약 그리드)
     RADIUS = 13
+    DRAG_THRESHOLD = 4
 
     def __init__(self, width: int):
         super().__init__()
         # 가장 긴 종목명 기준 통일 폭과 동일하게 맞춤
         self.W = width
-        self._drag_pos = None
+        self._drag_pos  = None
+        self._press_pos = None
+        self._moved     = False
+        self.is_expanded: bool = False
+        self.holdings: list[dict] = []   # [{"name", "profit", "profit_rate"}, ...]
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -1388,8 +1393,11 @@ class MasterWidget(QWidget):
             }}
         """)
 
-        # 2x2 그리드 (제목 없음, 1행/2행 사이를 살짝 띄움)
-        grid = QGridLayout(self.card)
+        # 상단 compact: 2x2 그리드 (제목 없음, 1행/2행 사이를 살짝 띄움)
+        self.compact = QWidget(self.card)
+        self.compact.setGeometry(0, 0, self.W, self.H)
+        self.compact.setStyleSheet("background: transparent;")
+        grid = QGridLayout(self.compact)
         grid.setContentsMargins(14, 12, 14, 12)
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(10)
@@ -1398,6 +1406,11 @@ class MasterWidget(QWidget):
         self.eval_val   = self._make_cell(grid, 0, 1, "평가금액")
         self.profit_val = self._make_cell(grid, 1, 0, "평가손익", bold=True)
         self.prate_val  = self._make_cell(grid, 1, 1, "수익률",   bold=True)
+
+        # 확장 패널 (클릭 시 종목별 손익 표시) — 초기 숨김
+        self.expand_panel = QWidget(self.card)
+        self.expand_panel.setStyleSheet("background: transparent;")
+        self.expand_panel.hide()
 
     def _make_cell(self, grid: QGridLayout, row: int, col: int,
                    key_text: str, bold: bool = False) -> QLabel:
@@ -1425,7 +1438,12 @@ class MasterWidget(QWidget):
             return
         self.W = base_w
         self.setFixedWidth(base_w)
-        self.card.setGeometry(0, 0, base_w, self.H)
+        cur_h = self.height()
+        self.card.setGeometry(0, 0, base_w, cur_h)
+        self.compact.setGeometry(0, 0, base_w, self.H)
+        if self.is_expanded:
+            panel_h = cur_h - self.H
+            self.expand_panel.setGeometry(0, self.H, base_w, panel_h)
 
     # ── 지표 갱신 ────────────────────────────────────────────────────────
     def update_metrics(self, total_invest: int, total_eval: int):
@@ -1466,18 +1484,137 @@ class MasterWidget(QWidget):
         self.prate_val.setStyleSheet(
             f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
         )
+        self.holdings = []
+        if self.is_expanded:
+            self.collapse()
 
-    # ── 드래그 이동 (StockWidget 와 동일 패턴, 클릭 확장은 없음) ─────────
+    # ── 보유 종목 목록 표시 ──────────────────────────────────────────────
+    ROW_H        = 20    # 종목 1행 높이 (폰트 11 + 약간의 여유)
+    ROW_SPACING  = 4
+    PANEL_TOP    = 6
+    PANEL_BOTTOM = 10
+
+    def update_holdings(self, holdings: list[dict]):
+        """holdings: [{"name": str, "profit": int, "profit_rate": float}, ...]
+        펼친 상태면 즉시 다시 그리고 카드 높이도 재조정."""
+        self.holdings = holdings
+        if self.is_expanded:
+            self._render_holdings()
+            self._resize_to_expanded()
+
+    def _calc_panel_height(self) -> int:
+        n = len(self.holdings)
+        if n == 0:
+            return 0
+        # 구분선(1px) + top/bottom padding + N행 + (N-1) row spacing
+        return (
+            self.PANEL_TOP + 1 + self.PANEL_TOP
+            + n * self.ROW_H + max(0, n - 1) * self.ROW_SPACING
+            + self.PANEL_BOTTOM
+        )
+
+    def _resize_to_expanded(self):
+        panel_h = self._calc_panel_height()
+        total_h = self.H + panel_h
+        self.setFixedHeight(total_h)
+        self.card.setGeometry(0, 0, self.W, total_h)
+        self.expand_panel.setGeometry(0, self.H, self.W, panel_h)
+
+    def _render_holdings(self):
+        """expand_panel 안에 종목별 행 다시 그림 (기존 layout 폐기 후 재구성)."""
+        # 기존 layout 정리 (dummy QWidget로 양도 → GC)
+        old = self.expand_panel.layout()
+        if old is not None:
+            QWidget().setLayout(old)
+
+        vl = QVBoxLayout(self.expand_panel)
+        vl.setContentsMargins(14, self.PANEL_TOP, 14, self.PANEL_BOTTOM)
+        vl.setSpacing(self.ROW_SPACING)
+
+        # 상단 구분선
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background: {C['border']}; max-height: 1px; border: none;")
+        vl.addWidget(sep)
+
+        for h in self.holdings:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+
+            name_lbl = QLabel(h["name"])
+            name_lbl.setStyleSheet(f"color: {C['text']}; font-size: 11px;")
+            row.addWidget(name_lbl, 1)
+
+            profit = int(h["profit"])
+            rate   = float(h["profit_rate"])
+            if profit > 0:
+                color, sign = C['red'], "+"
+            elif profit < 0:
+                color, sign = C['blue'], ""   # 음수는 자체 '-' 사용
+            else:
+                color, sign = C['subtext'], ""
+
+            profit_lbl = QLabel(f"{sign}{profit:,} 원")
+            profit_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+            profit_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            profit_lbl.setFixedWidth(100)
+            row.addWidget(profit_lbl)
+
+            rate_lbl = QLabel(f"{sign}{rate:.2f}%")
+            rate_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+            rate_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            rate_lbl.setFixedWidth(60)
+            row.addWidget(rate_lbl)
+
+            vl.addLayout(row)
+
+    # ── 확장 / 축소 토글 ─────────────────────────────────────────────────
+    def toggle_expand(self):
+        if self.is_expanded:
+            self.collapse()
+        else:
+            self.expand()
+
+    def expand(self):
+        if self.is_expanded or not self.holdings:
+            return
+        self.is_expanded = True
+        self._render_holdings()
+        self._resize_to_expanded()
+        self.expand_panel.show()
+
+    def collapse(self):
+        if not self.is_expanded:
+            return
+        self.is_expanded = False
+        self.expand_panel.hide()
+        self.setFixedHeight(self.H)
+        self.card.setGeometry(0, 0, self.W, self.H)
+
+    # ── 드래그 이동 + 클릭 토글 (StockWidget 와 동일 패턴) ────────────────
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.pos()
+            self._drag_pos  = event.globalPosition().toPoint() - self.pos()
+            self._press_pos = event.globalPosition().toPoint()
+            self._moved     = False
 
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            if not self._moved and self._press_pos:
+                delta = event.globalPosition().toPoint() - self._press_pos
+                if abs(delta.x()) > self.DRAG_THRESHOLD or abs(delta.y()) > self.DRAG_THRESHOLD:
+                    self._moved = True
+            if self._moved:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, event):
-        self._drag_pos = None
+        # 드래그가 아니었으면 = 클릭 → 종목 목록 토글
+        if event.button() == Qt.MouseButton.LeftButton and not self._moved:
+            self.toggle_expand()
+        self._drag_pos  = None
+        self._press_pos = None
+        self._moved     = False
 
 
 # ─── 전체 위젯 관리자 ─────────────────────────────────────────────────────────
@@ -1751,7 +1888,7 @@ class WidgetManager:
         self._save_config()
 
     def _recompute_master(self):
-        """모든 종목 위젯의 current_price 를 모아 마스터 4지표를 다시 계산."""
+        """모든 종목 위젯의 current_price 를 모아 마스터 4지표 및 보유 종목 상세를 갱신."""
         if not self.master_widget:
             return
         if not self.stocks:
@@ -1760,17 +1897,29 @@ class WidgetManager:
 
         total_invest = 0
         total_eval   = 0
+        holdings: list[dict] = []
         for s in self.stocks:
             avg = int(s.get("avg_price", 0))
             qty = int(s.get("quantity", 0))
-            total_invest += avg * qty
+            invest = avg * qty
+            total_invest += invest
 
             w = self.widgets.get(s["code"])
             # 현재가가 아직 안 잡힌 종목은 평가금액에서 평단가로 임시 사용
             price = w.current_price if (w and w.current_price) else avg
-            total_eval += price * qty
+            eval_v = price * qty
+            total_eval += eval_v
+
+            profit = eval_v - invest
+            rate   = (profit / invest * 100.0) if invest else 0.0
+            holdings.append({
+                "name":        s.get("name", s["code"]),
+                "profit":      profit,
+                "profit_rate": rate,
+            })
 
         self.master_widget.update_metrics(total_invest, total_eval)
+        self.master_widget.update_holdings(holdings)
 
     # ── 종목 추가 ──────────────────────────────────────────────────────────
     def open_add_dialog(self):
