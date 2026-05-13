@@ -1061,13 +1061,21 @@ class StockWidget(QWidget):
         self.collapse_timer = QTimer(singleShot=True)
         self.collapse_timer.timeout.connect(self.collapse)
 
-        # 30초마다 시세 갱신
+        # 가격은 5초마다, sparkline은 60초마다 갱신
+        # (분봉 데이터는 1분 단위 생성이라 더 자주 호출해도 같은 데이터)
+        self._prev_close: float = 0.0
+
         self.refresh_timer = QTimer()
-        self.refresh_timer.timeout.connect(self._fetch)
-        self.refresh_timer.start(30_000)
+        self.refresh_timer.timeout.connect(self._fetch_price)
+        self.refresh_timer.start(5_000)
+
+        self.chart_timer = QTimer()
+        self.chart_timer.timeout.connect(self._fetch_chart)
+        self.chart_timer.start(60_000)
 
         self._build_ui()
-        self._fetch()   # 즉시 한 번 조회
+        self._fetch_price()   # 즉시 1회
+        self._fetch_chart()   # 즉시 1회
 
     # ── 종목명에 맞춰 가로폭 계산 ─────────────────────────────────────────
     @staticmethod
@@ -1207,22 +1215,23 @@ class StockWidget(QWidget):
         return val_lbl
 
     # ── 데이터 갱신 ────────────────────────────────────────────────────────
-    def _fetch(self):
+    def _fetch_price(self):
+        """현재가/등락률 갱신 (5초 주기)."""
         result = fetch_stock(self.data["code"])
         if result:
             self.data["name"] = result["name"]
             self.name_lbl.setText(result["name"])
             self.current_price = result["price"]
+            self._prev_close = float(result["price"] - result["change_price"])
             self._apply_price(result)
             self.price_updated.emit(self.data["code"])
-        # sparkline 갱신: 당일 분봉 우선, 비어있으면 최근 일봉으로 폴백
+
+    def _fetch_chart(self):
+        """sparkline 갱신 (60초 주기) — 당일 분봉 우선, 비어있으면 최근 일봉 폴백."""
         chart = fetch_minute_chart(self.data["code"])
         if chart and len(chart["prices"]) >= 2:
-            # 분봉 모드: 전일 종가(현재가 - 전일대비) 점선 함께 표시
-            prev_close = 0.0
-            if result:
-                prev_close = float(result["price"] - result["change_price"])
-            self.sparkline.set_data(chart["prices"], chart["open"], prev_close)
+            # 분봉 모드: 전일 종가 점선(=현재가 - 전일대비)도 함께 표시
+            self.sparkline.set_data(chart["prices"], chart["open"], self._prev_close)
         else:
             # 일봉 모드: 최근 N일 캔들 차트로 폴백
             daily = fetch_daily_chart(self.data["code"])
