@@ -2015,6 +2015,25 @@ class WidgetManager:
                 w.move(x, y)
                 s["pos"] = [x, y]
 
+        # 토글 버튼: 마스터 위젯 왼쪽에 위/아래로 2개 (마스터 없으면 화면 우상단)
+        btn_size = ToggleButton.SIZE
+        if self.master_widget and self.master_widget.isVisible():
+            btn_x = mx - btn_size - GAP
+            top_y = my
+            bot_y = my + btn_size + GAP
+        else:
+            primary = QApplication.primaryScreen()
+            geo = primary.availableGeometry()
+            btn_x = geo.x() + geo.width() - btn_size - MARGIN_X
+            top_y = geo.y() + MARGIN_Y
+            bot_y = top_y + btn_size + GAP
+        if self.hide_all_btn:
+            self.hide_all_btn.move(btn_x, top_y)
+            self.hide_all_btn_pos = [btn_x, top_y]
+        if self.hide_master_btn:
+            self.hide_master_btn.move(btn_x, bot_y)
+            self.hide_master_btn_pos = [btn_x, bot_y]
+
         self._save_config()
         # 숨김 상태라면 자동으로 다시 표시
         if self.is_hidden:
