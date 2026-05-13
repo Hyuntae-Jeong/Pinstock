@@ -23,17 +23,18 @@ CONFIG_FILE = str(_config_dir() / "stocks.json")
 BACKUP_FILE = CONFIG_FILE + ".bak"
 
 
-# ─── 레거시 위치(stock_widget.py 옆/CWD)에서 1회 자동 이전 ─────────────────
+# ─── 레거시 위치(레포 루트/CWD)에서 새 위치로 1회 자동 이전 ───────────────
 def migrate_legacy_config() -> None:
-    """v1.x 시절 stock_widget.py 옆에 저장된 stocks.json 을 새 위치로 1회 이전.
+    """저장소 루트(또는 현재 작업 디렉토리)에 있던 stocks.json 을 새 위치로 1회 이전.
 
-    새 위치에 이미 파일이 있으면 아무것도 하지 않음.
-    이전 후 옛 파일은 같은 경로에 `.migrated` 마커를 남겨 사용자가 확인할 수 있게 한다.
+    v1.x 시절 단일 스크립트 옆에 stocks.json 을 저장하던 기존 사용자를 위함.
+    새 위치에 이미 파일이 있으면 아무것도 하지 않는다.
+    이전 후 옛 파일은 같은 경로에 `.migrated` 마커를 남겨 확인할 수 있게 한다.
     """
     if os.path.exists(CONFIG_FILE):
         return
     candidates = [
-        # 패키지 부모(레포 루트)의 stock_widget.py 옆
+        # 레포 루트 (pinstock/core/storage.py 의 두 단계 부모)
         Path(__file__).resolve().parent.parent.parent / "stocks.json",
         # 현재 작업 디렉토리
         Path.cwd() / "stocks.json",
