@@ -1452,12 +1452,15 @@ class StockWidget(QWidget):
         else:
             self.expand()
 
+    SCREEN_MARGIN = 10   # 확장 위젯의 화면 가장자리 여백
+
     def expand(self):
         self.is_expanded = True
         self.expand_panel.show()
         self.setFixedHeight(self.EXPAND_H)
         self.card.setGeometry(0, 0, self.W, self.EXPAND_H)
         self.collapse_timer.start(5_000)   # 5초 뒤 자동 축소
+        self._ensure_on_screen()           # 화면 밖이면 위로 이동
 
     def collapse(self):
         self.is_expanded = False
@@ -1465,6 +1468,36 @@ class StockWidget(QWidget):
         self.setFixedHeight(self.COMPACT_H)
         self.card.setGeometry(0, 0, self.W, self.COMPACT_H)
         self.collapse_timer.stop()
+        self._restore_pre_expand_pos()     # 임시 이동했으면 원위치
+
+    def _ensure_on_screen(self):
+        """확장 후 화면 하단을 넘어가면 위젯을 위로 이동.
+        축소 시 _restore_pre_expand_pos() 에서 원위치 복귀."""
+        x = self.x()
+        y = self.y()
+        h = self.height()   # 확장 후 실제 높이 (setFixedHeight 직후라 EXPAND_H 와 동일)
+
+        # 위젯이 속한 모니터: frameGeometry().center() 는 막 확장된 직후라 늦게
+        # 업데이트될 수 있어, 좌상단 점 기준으로 결정한다.
+        screen = QApplication.screenAt(QPoint(x, y))
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+
+        bottom = y + h
+        max_y  = geo.y() + geo.height() - self.SCREEN_MARGIN
+        if bottom <= max_y:
+            return  # 화면 안에 들어옴 — 이동 불필요
+        new_y = max_y - h
+        new_y = max(geo.y() + self.SCREEN_MARGIN, new_y)   # 위쪽도 화면 안에
+        self._pre_expand_y = y
+        self.move(x, new_y)
+        self.raise_()    # 다른 위젯과 겹쳐도 위에 표시
+
+    def _restore_pre_expand_pos(self):
+        if getattr(self, "_pre_expand_y", None) is not None:
+            self.move(self.x(), self._pre_expand_y)
+            self._pre_expand_y = None
 
     # ── 드래그 이동 + 클릭 토글 ──────────────────────────────────────────
     DRAG_THRESHOLD = 4   # 이 거리 이상 움직이면 드래그로 간주
@@ -1747,6 +1780,7 @@ class MasterWidget(QWidget):
         self._render_holdings()
         self._resize_to_expanded()
         self.expand_panel.show()
+        self._ensure_on_screen()   # 확장 후 화면 밖이면 위로 이동
 
     def collapse(self):
         if not self.is_expanded:
@@ -1755,6 +1789,35 @@ class MasterWidget(QWidget):
         self.expand_panel.hide()
         self.setFixedHeight(self.H)
         self.card.setGeometry(0, 0, self.W, self.H)
+        self._restore_pre_expand_pos()
+
+    SCREEN_MARGIN = 10
+
+    def _ensure_on_screen(self):
+        """확장 후 화면 하단을 넘어가면 위젯을 위로 이동."""
+        x = self.x()
+        y = self.y()
+        h = self.height()   # 확장 후 실제 높이
+
+        screen = QApplication.screenAt(QPoint(x, y))
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+
+        bottom = y + h
+        max_y  = geo.y() + geo.height() - self.SCREEN_MARGIN
+        if bottom <= max_y:
+            return
+        new_y = max_y - h
+        new_y = max(geo.y() + self.SCREEN_MARGIN, new_y)
+        self._pre_expand_y = y
+        self.move(x, new_y)
+        self.raise_()
+
+    def _restore_pre_expand_pos(self):
+        if getattr(self, "_pre_expand_y", None) is not None:
+            self.move(self.x(), self._pre_expand_y)
+            self._pre_expand_y = None
 
     # ── 드래그 이동 + 클릭 토글 (StockWidget 와 동일 패턴) ────────────────
     def mousePressEvent(self, event):
