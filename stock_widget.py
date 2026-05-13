@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QSpinBox, QDialogButtonBox,
     QSystemTrayIcon, QMenu, QFrame, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QStyle, QStyleOptionSpinBox,
+    QStyle, QStyleOptionSpinBox, QStyledItemDelegate,
     QFileDialog, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPointF, QRectF
@@ -836,17 +836,33 @@ class StockDialog(QDialog):
         }
 
 
+# ─── 좁은 셀에서도 입력값이 잘리지 않도록 editor 폭을 약간만 늘리는 delegate ──
+class WideEditorDelegate(QStyledItemDelegate):
+    """편집 진입 시 editor 가로폭을 셀 폭 + PADDING 으로 임시 확장.
+    셀 자체 너비는 그대로, editor 만 약간 넓어져 cursor·입력값이 잘리지 않게."""
+
+    PADDING = 15   # 셀 폭에 추가할 여유 (cursor + 한두 자 입력 공간)
+
+    def updateEditorGeometry(self, editor, option, index):
+        rect = option.rect
+        new_w = rect.width() + self.PADDING
+        editor.setGeometry(rect.x(), rect.y(), new_w, rect.height())
+
+
 # ─── 종목 일괄 관리 다이얼로그 ────────────────────────────────────────────────
 class ManageStocksDialog(QDialog):
     """현재 보유 종목들을 표 형태로 일괄 관리하는 다이얼로그."""
 
-    COLS = ["종목명", "종목코드", "평단가", "수량"]
+    COLS = ["종목명", "종목코드", "평단가", "수량", "평가손익"]
 
-    def __init__(self, stocks: list[dict], parent=None):
+    def __init__(self, stocks: list[dict], current_prices: dict | None = None, parent=None):
         super().__init__(parent)
         self._stocks: list[dict] = stocks   # 호출측에서 deepcopy 해서 전달
+        self._current_prices: dict = current_prices or {}   # {code: 현재가}
+        self._suppress_change: bool = False   # itemChanged 재귀 차단용
+
         self.setWindowTitle("종목 관리")
-        self.setMinimumSize(520, 400)
+        self.setMinimumSize(640, 400)
         self.setStyleSheet(DIALOG_STYLE)
 
         root = QVBoxLayout(self)
@@ -857,8 +873,13 @@ class ManageStocksDialog(QDialog):
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # 더블클릭/EditKey/AnyKey 로 셀 인라인 편집 진입 (편집 가능 셀은 _fill_row 에서 지정)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(False)
@@ -877,10 +898,24 @@ class ManageStocksDialog(QDialog):
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setStretchLastSection(False)
 
-        # 더블클릭으로도 수정 가능
-        self.table.doubleClicked.connect(lambda _: self._edit_selected())
+        # 헤더 클릭 자동 정렬은 사용하지 않음 (명시적 "정렬" 버튼으로 대체)
+        hdr.setSectionsClickable(False)
+        hdr.setSortIndicatorShown(False)
+
+        # 평단가/수량 인라인 편집 시 editor 폭을 키워서 입력값이 잘리지 않게
+        self._wide_delegate = WideEditorDelegate(self)
+        self.table.setItemDelegateForColumn(2, self._wide_delegate)
+        self.table.setItemDelegateForColumn(3, self._wide_delegate)
+
+        # 더블클릭: 평단가/수량 셀은 Qt 가 인라인 편집을 처리하므로 패스,
+        # 그 외 셀에서는 기존처럼 종목 수정 팝업을 띄움
+        self.table.doubleClicked.connect(self._on_double_clicked)
+
+        # 인라인 편집 결과 반영
+        self.table.itemChanged.connect(self._on_item_changed)
 
         # 드래그 정렬: 모델의 rowsMoved 시그널로 self._stocks 순서 동기화
         self.table.model().rowsMoved.connect(self._on_rows_moved)
@@ -906,6 +941,13 @@ class ManageStocksDialog(QDialog):
         action_row.addWidget(del_btn)
 
         action_row.addStretch()
+
+        # 평가손익 내림차순 정렬 (명시적 버튼, 자동 정렬은 안 함)
+        sort_btn = QPushButton("📊  평가손익 정렬")
+        sort_btn.setProperty("flat", "true")
+        sort_btn.clicked.connect(self._sort_by_profit_desc)
+        action_row.addWidget(sort_btn)
+
         root.addLayout(action_row)
 
         # ── 확인 / 취소 ────────────────────────────────────────────────────
@@ -924,8 +966,9 @@ class ManageStocksDialog(QDialog):
     # ── 표 동기화 ─────────────────────────────────────────────────────────
     def _rebuild_table(self, select_row: int | None = None):
         """self._stocks 기준으로 표를 다시 그림."""
-        # rowsMoved 신호가 재구성 중에 발화되지 않도록 일시 차단
+        # rowsMoved / itemChanged 신호가 재구성 중에 발화되지 않도록 일시 차단
         self.table.model().rowsMoved.disconnect(self._on_rows_moved)
+        self._suppress_change = True
         try:
             self.table.setRowCount(0)
             for s in self._stocks:
@@ -933,6 +976,7 @@ class ManageStocksDialog(QDialog):
                 self.table.insertRow(row)
                 self._fill_row(row, s)
         finally:
+            self._suppress_change = False
             self.table.model().rowsMoved.connect(self._on_rows_moved)
 
         if select_row is not None and 0 <= select_row < self.table.rowCount():
@@ -941,21 +985,135 @@ class ManageStocksDialog(QDialog):
     def _fill_row(self, row: int, s: dict):
         name  = s.get("name", s["code"])
         code  = s["code"]
-        avg   = f"{int(s.get('avg_price', 0)):,} 원"
-        qty   = f"{int(s.get('quantity', 0)):,} 주"
-        cells = [name, code, avg, qty]
+        avg_p = int(s.get("avg_price", 0))
+        qty_n = int(s.get("quantity", 0))
+        avg   = f"{avg_p:,} 원"
+        qty   = f"{qty_n:,} 주"
+
+        # 평가손익 = (현재가 - 평단가) * 수량. 현재가 없으면 평단가 fallback → 0
+        cur_p  = int(self._current_prices.get(code, avg_p))
+        profit = (cur_p - avg_p) * qty_n
+        if profit > 0:
+            profit_text  = f"+{profit:,} 원"
+            profit_color = C['red']    # 이익 = 빨강 (한국 컨벤션)
+        elif profit < 0:
+            profit_text  = f"{profit:,} 원"     # 음수면 자체 '-' 표시
+            profit_color = C['blue']   # 손실 = 파랑
+        else:
+            profit_text  = "0 원"
+            profit_color = None
+
+        cells = [name, code, avg, qty, profit_text]
         for col, text in enumerate(cells):
             item = QTableWidgetItem(text)
-            # 평단가/수량은 우측 정렬
-            if col in (2, 3):
+            # 평단가/수량/평가손익은 우측 정렬
+            if col in (2, 3, 4):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             else:
                 item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            # 드래그-드롭 가능, 직접 편집 불가
-            item.setFlags(
-                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
+            # 평가손익 셀에 색상 적용
+            if col == 4 and profit_color is not None:
+                item.setForeground(QColor(profit_color))
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
+            # 평단가(2)/수량(3) 셀은 인라인 편집 가능
+            base_flags = (
+                Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsDragEnabled
             )
+            if col in (2, 3):
+                base_flags |= Qt.ItemFlag.ItemIsEditable
+            item.setFlags(base_flags)
             self.table.setItem(row, col, item)
+
+    # ── 더블클릭: 평단가/수량은 인라인 편집, 그 외는 종목 수정 팝업 ──────
+    def _on_double_clicked(self, index):
+        if index.column() in (2, 3):
+            return   # Qt 의 자동 인라인 편집에 맡김
+        self._edit_selected()
+
+    # ── 인라인 편집 결과 반영 ────────────────────────────────────────────
+    def _on_item_changed(self, item):
+        if self._suppress_change or item is None:
+            return
+        row, col = item.row(), item.column()
+        if col not in (2, 3) or row < 0 or row >= len(self._stocks):
+            return
+
+        # 사용자가 입력한 텍스트에서 숫자만 추출
+        text = item.text().strip()
+        digits = "".join(c for c in text if c.isdigit())
+        s = self._stocks[row]
+
+        if not digits or int(digits) <= 0:
+            # 잘못된 입력 → 원래 값으로 복원
+            self._suppress_change = True
+            if col == 2:
+                item.setText(f"{int(s.get('avg_price', 0)):,} 원")
+            else:
+                item.setText(f"{int(s.get('quantity', 0)):,} 주")
+            self._suppress_change = False
+            return
+
+        value = int(digits)
+        if col == 2:
+            s["avg_price"] = value
+            suffix = "원"
+        else:
+            s["quantity"] = value
+            suffix = "주"
+
+        # 표시 형식 (쉼표 + 단위) 재포맷
+        self._suppress_change = True
+        item.setText(f"{value:,} {suffix}")
+        self._suppress_change = False
+
+        # 평가손익 셀 즉시 갱신
+        self._refresh_profit_cell(row)
+
+    def _refresh_profit_cell(self, row: int):
+        s = self._stocks[row]
+        code = s["code"]
+        avg = int(s.get("avg_price", 0))
+        qty = int(s.get("quantity", 0))
+        cur = int(self._current_prices.get(code, avg))
+        profit = (cur - avg) * qty
+
+        if profit > 0:
+            text, color = f"+{profit:,} 원", C['red']
+        elif profit < 0:
+            text, color = f"{profit:,} 원", C['blue']
+        else:
+            text, color = "0 원", None
+
+        item = self.table.item(row, 4)
+        if item is None:
+            return
+        self._suppress_change = True
+        item.setText(text)
+        if color:
+            item.setForeground(QColor(color))
+            f = item.font()
+            f.setBold(True)
+            item.setFont(f)
+        else:
+            item.setForeground(QColor(C['text']))
+            f = item.font()
+            f.setBold(False)
+            item.setFont(f)
+        self._suppress_change = False
+
+    # ── 평가손익 내림차순 정렬 (명시적 버튼) ─────────────────────────────
+    def _sort_by_profit_desc(self):
+        def key_for(s: dict):
+            avg = int(s.get("avg_price", 0))
+            qty = int(s.get("quantity", 0))
+            cur = int(self._current_prices.get(s["code"], avg))
+            return (cur - avg) * qty
+        self._stocks.sort(key=key_for, reverse=True)
+        self._rebuild_table()
 
     # ── 드래그 정렬 핸들러 ────────────────────────────────────────────────
     def _on_rows_moved(self, parent, start, end, dest_parent, dest_row):
@@ -990,6 +1148,8 @@ class ManageStocksDialog(QDialog):
 
         d["name"] = result["name"]
         self._stocks.append(d)
+        # 현재가도 캐시해 두면 평가손익이 즉시 계산됨
+        self._current_prices[code] = int(result["price"])
         self._rebuild_table(select_row=len(self._stocks) - 1)
 
     def _edit_selected(self):
@@ -1976,7 +2136,16 @@ class WidgetManager:
 
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
     def open_manage_dialog(self):
-        dlg = ManageStocksDialog(stocks=copy.deepcopy(self.stocks))
+        # 평가손익 계산용 현재가 스냅샷
+        current_prices = {
+            code: int(w.current_price)
+            for code, w in self.widgets.items()
+            if w.current_price
+        }
+        dlg = ManageStocksDialog(
+            stocks=copy.deepcopy(self.stocks),
+            current_prices=current_prices,
+        )
         if not dlg.exec():
             return
         new_stocks = dlg.get_stocks()
