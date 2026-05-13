@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPointF, QRectF
-from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QPainterPath, QIcon, QAction, QBrush, QPen, QPolygon
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPixmap, QPainter, QPainterPath, QIcon, QAction, QBrush, QPen, QPolygon, QRegion
 
 # ─── 설정 파일 경로 ────────────────────────────────────────────────────────────
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
@@ -1844,6 +1844,83 @@ class MasterWidget(QWidget):
         self._moved     = False
 
 
+# ─── 동그라미 토글 버튼 (이모지만 표시, 드래그 가능) ─────────────────────────
+class ToggleButton(QWidget):
+    """원형 + 이모지 한 글자만 표시되는 작은 토글 버튼.
+    드래그로 위치 이동 / 짧은 클릭으로 clicked 시그널 emit.
+    몰컴 모드 등 빠른 숨기기/표시 토글용."""
+
+    SIZE = 44
+    DRAG_THRESHOLD = 4
+
+    clicked = pyqtSignal()
+
+    def __init__(self, emoji: str, tooltip: str = "", parent=None):
+        super().__init__(parent)
+        self._emoji = emoji
+        self._drag_pos  = None
+        self._press_pos = None
+        self._moved     = False
+
+        # NoDropShadowWindowHint: Qt 가 자동으로 그리는 정사각형 그림자 제거
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.NoDropShadowWindowHint
+        )
+        # 위젯 사각형 영역 완전 투명화
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setStyleSheet("background: transparent;")
+        self.setFixedSize(self.SIZE, self.SIZE)
+        if tooltip:
+            self.setToolTip(tooltip)
+
+    def set_emoji(self, emoji: str):
+        self._emoji = emoji
+        self.update()
+
+    RADIUS = 10   # 둥근 모서리 반지름
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 둥근 사각형 카드 (다른 위젯과 동일 톤)
+        painter.setBrush(QBrush(QColor(C['bg'])))
+        painter.setPen(QPen(QColor(C['surface2']), 1))
+        painter.drawRoundedRect(0, 0, self.SIZE - 1, self.SIZE - 1,
+                                self.RADIUS, self.RADIUS)
+        # 이모지
+        painter.setPen(QPen(QColor(C['text'])))
+        painter.setFont(QFont("Malgun Gothic", 16))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._emoji)
+        painter.end()
+
+    # 드래그 + 클릭 구분 (StockWidget 동일 패턴)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos  = event.globalPosition().toPoint() - self.pos()
+            self._press_pos = event.globalPosition().toPoint()
+            self._moved     = False
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
+            if not self._moved and self._press_pos:
+                delta = event.globalPosition().toPoint() - self._press_pos
+                if abs(delta.x()) > self.DRAG_THRESHOLD or abs(delta.y()) > self.DRAG_THRESHOLD:
+                    self._moved = True
+            if self._moved:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and not self._moved:
+            self.clicked.emit()
+        self._drag_pos  = None
+        self._press_pos = None
+        self._moved     = False
+
+
 # ─── 전체 위젯 관리자 ─────────────────────────────────────────────────────────
 class WidgetManager:
     def __init__(self, app: QApplication):
@@ -1856,6 +1933,11 @@ class WidgetManager:
         self.master_widget: MasterWidget | None = None
         self.master_visible: bool = True
         self.master_pos: list | None = None   # None → 기본 위치
+        # 토글 버튼 (몰컴 모드용 빠른 숨기기/표시)
+        self.hide_all_btn: ToggleButton | None = None
+        self.hide_master_btn: ToggleButton | None = None
+        self.hide_all_btn_pos: list | None = None
+        self.hide_master_btn_pos: list | None = None
 
         self._load_config()
         self._setup_tray()
@@ -1872,6 +1954,11 @@ class WidgetManager:
                 self.master_widget.hide()
             elif self.master_visible:
                 self.master_widget.show()
+        # 동그라미 토글 버튼도 함께 숨김/표시 (다시 켜기는 트레이로만 가능)
+        if self.hide_all_btn:
+            self.hide_all_btn.hide() if self.is_hidden else self.hide_all_btn.show()
+        if self.hide_master_btn:
+            self.hide_master_btn.hide() if self.is_hidden else self.hide_master_btn.show()
         self.toggle_act.setText("👀   표시하기" if self.is_hidden else "🙈   숨기기")
 
     # ── 위치 초기화 ───────────────────────────────────────────────────────
@@ -2042,6 +2129,16 @@ class WidgetManager:
                     self.master_pos = [int(pos[0]), int(pos[1])]
                 except (TypeError, ValueError):
                     self.master_pos = None
+            # 토글 버튼 위치
+            toggles = data.get("toggles") or {}
+            for key, attr in (("hide_all_pos", "hide_all_btn_pos"),
+                              ("hide_master_pos", "hide_master_btn_pos")):
+                pos = toggles.get(key)
+                if isinstance(pos, list) and len(pos) == 2:
+                    try:
+                        setattr(self, attr, [int(pos[0]), int(pos[1])])
+                    except (TypeError, ValueError):
+                        pass
 
     def _save_config(self):
         data = {
@@ -2049,6 +2146,10 @@ class WidgetManager:
             "master": {
                 "visible": self.master_visible,
                 "pos": self.master_pos,
+            },
+            "toggles": {
+                "hide_all_pos":    self.hide_all_btn_pos,
+                "hide_master_pos": self.hide_master_btn_pos,
             },
         }
         try:
@@ -2066,6 +2167,12 @@ class WidgetManager:
         if self.master_widget:
             mpos = self.master_widget.pos()
             self.master_pos = [mpos.x(), mpos.y()]
+        if self.hide_all_btn:
+            p = self.hide_all_btn.pos()
+            self.hide_all_btn_pos = [p.x(), p.y()]
+        if self.hide_master_btn:
+            p = self.hide_master_btn.pos()
+            self.hide_master_btn_pos = [p.x(), p.y()]
         self._save_config()
 
     # ── 위젯 생성 ──────────────────────────────────────────────────────────
@@ -2076,6 +2183,35 @@ class WidgetManager:
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
             self._spawn_widget(s, default_x, default_y, stagger_idx=i)
         self._spawn_master()
+        self._spawn_toggle_buttons()
+
+    def _spawn_toggle_buttons(self):
+        """몰컴 모드용 빠른 숨기기 토글 버튼 두 개를 화면에 띄움."""
+        # 전체 위젯 숨기기/표시
+        self.hide_all_btn = ToggleButton("🙈", "위젯 전체 숨기기/표시")
+        self.hide_all_btn.clicked.connect(self.toggle_visibility)
+
+        # 마스터 위젯 숨기기/표시
+        self.hide_master_btn = ToggleButton("👑", "마스터 위젯 숨기기/표시")
+        self.hide_master_btn.clicked.connect(self.toggle_master_visibility)
+
+        # 위치: 저장된 위치 우선, 없으면 화면 우상단 (마스터 위젯과 안 겹치게 좌측으로)
+        primary = QApplication.primaryScreen()
+        geo = primary.availableGeometry()
+        margin = 12
+        btn_size = ToggleButton.SIZE
+        # 기본 위치: 우상단 모서리에 가로로 나란히 (전체 토글이 더 우측)
+        default_all_x    = geo.x() + geo.width() - btn_size - margin
+        default_all_y    = geo.y() + margin
+        default_master_x = default_all_x - btn_size - margin
+        default_master_y = default_all_y
+
+        pa = self.hide_all_btn_pos or [default_all_x, default_all_y]
+        pm = self.hide_master_btn_pos or [default_master_x, default_master_y]
+        self.hide_all_btn.move(pa[0], pa[1])
+        self.hide_master_btn.move(pm[0], pm[1])
+        self.hide_all_btn.show()
+        self.hide_master_btn.show()
 
     def _spawn_widget(self, stock: dict, def_x=60, def_y=60, stagger_idx: int = 0):
         code = stock["code"]
