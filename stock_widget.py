@@ -560,10 +560,17 @@ class SparklineWidget(QWidget):
         def y_of(price: float) -> float:
             return pad + (1 - (price - mn) / rng) * h
 
+        # x축은 거래시간 전체(09:00~15:30, 약 391분봉) 기준으로 절대 매핑.
+        # 단, 장 초반에 너무 좁아 보이지 않도록 최소 가시 영역(15%) 보장.
+        TOTAL_BARS = 391
+        MIN_VISIBLE_RATIO = 0.15
+        actual_ratio = (len(prices) - 1) / (TOTAL_BARS - 1)
+        visible_ratio = min(max(actual_ratio, MIN_VISIBLE_RATIO), 1.0)
+
         n = len(prices)
         pts: list[QPointF] = []
         for i, p in enumerate(prices):
-            x = pad + (i / (n - 1)) * w
+            x = pad + (i / (n - 1)) * visible_ratio * w
             pts.append(QPointF(x, y_of(p)))
 
         # area fill (라인 아래 반투명 채움)
