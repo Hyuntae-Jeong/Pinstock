@@ -241,3 +241,19 @@ gh release create v0.X.Y \
 Draft 로 만들어 GitHub 웹에서 검토 후 **Publish release** 클릭.
 
 > 🔒 **코드 서명**: macOS·Windows 둘 다 서명을 하지 않으므로 사용자가 첫 실행 시 보안 경고를 한 번 우회해야 합니다. 위 "[다운로드 / 설치](#-다운로드--설치-일반-사용자)" 섹션의 안내 참고.
+
+---
+
+## 📜 License
+
+MIT License — 자유롭게 사용·수정·재배포할 수 있습니다.
+자세한 내용은 [LICENSE](LICENSE) 참조.
+
+## 💬 피드백 & 기여
+
+이 프로젝트는 취미로 만든 사이드 프로젝트입니다.
+누구나 이슈 등록 / PR 제출 환영합니다!
+
+- 🐛 **버그 발견**: [Bug Report](https://github.com/Hyuntae-Jeong/Pinstock/issues/new?template=bug_report.yml)
+- 💡 **기능 제안**: [Feature Request](https://github.com/Hyuntae-Jeong/Pinstock/issues/new?template=feature_request.yml)
+- 🔧 **직접 기여**: Fork → branch → PR (자세한 가이드는 추후 `CONTRIBUTING.md` 참고)

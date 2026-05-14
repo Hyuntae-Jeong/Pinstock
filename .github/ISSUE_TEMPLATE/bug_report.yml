@@ -1,0 +1,41 @@
+name: 🐛 Bug Report
+description: 버그를 발견했을 때
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 어떤 문제가 발생했나요?
+      description: 무엇이 잘못됐는지 한 두 문장으로 설명해주세요.
+      placeholder: 예) 위젯을 더블클릭하면 앱이 종료됨
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 재현 방법
+      description: 어떤 순서로 조작하면 문제가 발생하는지 적어주세요.
+      placeholder: |
+        1. 트레이 아이콘 우클릭 → '종목 추가'
+        2. 종목코드 005930 입력 후 확인
+        3. 생성된 위젯을 더블클릭
+        4. 앱이 종료됨
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대한 동작
+      placeholder: 예) 위젯이 확장되어 평단가·수량이 표시되어야 함
+  - type: input
+    id: env
+    attributes:
+      label: 환경 (OS · Python · Pinstock 버전)
+      placeholder: Windows 11 · Python 3.12 · Pinstock v0.5.0
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: 스크린샷 / 로그 (선택)
+      description: 가능하면 스크린샷이나 콘솔 에러 메시지를 함께 올려주세요.
