@@ -14,6 +14,9 @@ build/
 dist/
 *.spec
 !pinstock.spec
+# 레포 루트에 압축 푼 Windows 빌드 결과물
+/Pinstock.exe
+/_internal/
 
 # 개인 데이터 (보유 종목/평단가/수량)
 stocks.json
