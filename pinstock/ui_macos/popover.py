@@ -6,7 +6,7 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QMenu,
+    QScrollArea, QFrame, QMenu, QSlider,
 )
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QScreen
@@ -39,6 +39,7 @@ class StockRow(QWidget):
         self.current_price: int = 0
         self.is_expanded: bool = False
         self._prev_close: float = 0.0
+        self.assets_hidden: bool = False
         self.setFixedHeight(self.COMPACT_H)
         self._build_ui()
 
@@ -194,6 +195,14 @@ class StockRow(QWidget):
         self.prate_val.setText(f"{sign}{prate:.2f}%")
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
 
+    def set_assets_hidden(self, hidden: bool):
+        self.assets_hidden = hidden
+        # 숨김 진입 시 이미 펼쳐있던 행은 자동으로 접는다.
+        if hidden and self.is_expanded:
+            self.is_expanded = False
+            self.expand_panel.hide()
+            self.setFixedHeight(self.COMPACT_H)
+
     # ── 확장 / 축소 ───────────────────────────────────────────────────────
     def toggle_expand(self):
         self.is_expanded = not self.is_expanded
@@ -208,6 +217,8 @@ class StockRow(QWidget):
     # ── 마우스 이벤트 ────────────────────────────────────────────────────
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.assets_hidden:
+                return
             self.toggle_expand()
 
     def contextMenuEvent(self, event):
@@ -229,11 +240,16 @@ class PortfolioSummary(QWidget):
     총 매입금액 / 평가금액 / 평가손익 / 수익률 을 2×2 그리드로 표시."""
 
     H = 92
+    MASK = "•••••"
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(self.H)
         self.setStyleSheet("background: transparent;")
+        self._total_invest: int = 0
+        self._total_eval: int = 0
+        self._has_data: bool = False
+        self._assets_hidden: bool = False
 
         grid = QGridLayout(self)
         grid.setContentsMargins(14, 12, 14, 12)
@@ -266,6 +282,45 @@ class PortfolioSummary(QWidget):
         return val_lbl
 
     def update_metrics(self, total_invest: int, total_eval: int):
+        self._total_invest = total_invest
+        self._total_eval   = total_eval
+        self._has_data     = True
+        self._render()
+
+    def clear_metrics(self):
+        self._total_invest = 0
+        self._total_eval   = 0
+        self._has_data     = False
+        self._render()
+
+    def set_assets_hidden(self, hidden: bool):
+        self._assets_hidden = hidden
+        self._render()
+
+    def _render(self):
+        muted = f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
+
+        if self._assets_hidden:
+            mask = self.MASK
+            self.invest_val.setText(mask)
+            self.eval_val.setText(mask)
+            self.profit_val.setText(mask)
+            self.profit_val.setStyleSheet(muted)
+            self.prate_val.setText(mask)
+            self.prate_val.setStyleSheet(muted)
+            return
+
+        if not self._has_data:
+            self.invest_val.setText("0 원")
+            self.eval_val.setText("0 원")
+            self.profit_val.setText("─")
+            self.profit_val.setStyleSheet(muted)
+            self.prate_val.setText("─")
+            self.prate_val.setStyleSheet(muted)
+            return
+
+        total_invest = self._total_invest
+        total_eval   = self._total_eval
         profit = total_eval - total_invest
         prate  = (profit / total_invest * 100.0) if total_invest else 0.0
 
@@ -283,26 +338,19 @@ class PortfolioSummary(QWidget):
         self.prate_val.setText(f"{sign}{prate:.2f}%")
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold;")
 
-    def clear_metrics(self):
-        self.invest_val.setText("0 원")
-        self.eval_val.setText("0 원")
-        self.profit_val.setText("─")
-        self.profit_val.setStyleSheet(f"color: {C['subtext']}; font-size: 13px; font-weight: bold;")
-        self.prate_val.setText("─")
-        self.prate_val.setStyleSheet(f"color: {C['subtext']}; font-size: 13px; font-weight: bold;")
-
 
 # ─── 팝오버 메인 ─────────────────────────────────────────────────────────────
 class Popover(QWidget):
     """메뉴바 아이콘 아래에 펼쳐지는 팝오버 패널.
     Qt.Popup 윈도우 — 외부 클릭 시 자동으로 닫힘."""
 
-    W       = 360
-    MAX_H   = 640
-    MIN_H   = 420    # 종목이 적어도 시원하게 — 빈 상태에도 안내문이 잘 보이게
-    RADIUS  = 12
-    OUTER_M = 8      # 카드 바깥 마진 (그림자/여백)
-    ACTION_H = 44    # 하단 액션 바 높이
+    W        = 360
+    MAX_H    = 640
+    MIN_H    = 420    # 종목이 적어도 시원하게 — 빈 상태에도 안내문이 잘 보이게
+    RADIUS   = 12
+    OUTER_M  = 8      # 카드 바깥 마진 (그림자/여백)
+    ACTION_H   = 44   # 하단 액션 바 높이
+    CONTROLS_H = 28   # 액션 바 위 설정(투명도 슬라이더) 행 높이
 
     add_stock_requested      = pyqtSignal()
     manage_stocks_requested  = pyqtSignal()
@@ -311,6 +359,11 @@ class Popover(QWidget):
     quit_requested           = pyqtSignal()
     edit_requested           = pyqtSignal(str)   # code
     delete_requested         = pyqtSignal(str)   # code
+    assets_hidden_changed    = pyqtSignal(bool)
+    opacity_changed          = pyqtSignal(float)   # 0.6 ~ 1.0
+
+    OPACITY_MIN = 60   # 슬라이더 정수 단위 (퍼센트). 60% 미만은 가독성 저하로 차단.
+    OPACITY_MAX = 100
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -320,6 +373,7 @@ class Popover(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.rows: dict[str, StockRow] = {}
+        self._assets_hidden: bool = False
         self._build_ui()
 
     def _build_ui(self):
@@ -387,6 +441,46 @@ class Popover(QWidget):
         sep2.setStyleSheet(f"background: {C['border']}; max-height: 1px; border: none;")
         root.addWidget(sep2)
 
+        # ── 설정 바: 투명도 슬라이더 ──────────────────────────────────────
+        controls_row = QWidget(self.card)
+        controls_row.setStyleSheet("background: transparent;")
+        controls_row.setFixedHeight(self.CONTROLS_H)
+        ch = QHBoxLayout(controls_row)
+        ch.setContentsMargins(14, 4, 14, 4)
+        ch.setSpacing(8)
+
+        opacity_caption = QLabel("투명도")
+        opacity_caption.setFont(QFont(_FONT_FAMILY, 10))
+        opacity_caption.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
+        ch.addWidget(opacity_caption)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(self.OPACITY_MIN, self.OPACITY_MAX)
+        self.opacity_slider.setValue(self.OPACITY_MAX)
+        self.opacity_slider.setToolTip("팝오버 투명도")
+        self.opacity_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 3px;
+                background: {C['surface2']};
+                border-radius: 1px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {C['subtext']};
+                border-radius: 1px;
+            }}
+            QSlider::handle:horizontal {{
+                width: 10px;
+                height: 10px;
+                margin: -4px 0;
+                background: {C['text']};
+                border-radius: 5px;
+            }}
+        """)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
+        ch.addWidget(self.opacity_slider, 1)
+
+        root.addWidget(controls_row)
+
         # ── 하단: 액션 바 ────────────────────────────────────────────────
         action_row = QWidget(self.card)
         action_row.setStyleSheet("background: transparent;")
@@ -417,7 +511,12 @@ class Popover(QWidget):
         hl.addWidget(make_btn("📋", "종목 관리",   self.manage_stocks_requested.emit))
         hl.addWidget(make_btn("📤", "Excel 내보내기", self.export_requested.emit))
         hl.addWidget(make_btn("📥", "Excel 가져오기", self.import_requested.emit))
+
         hl.addStretch()
+
+        self.toggle_assets_btn = make_btn("👁", "자산 정보 숨기기", self._on_toggle_assets)
+        hl.addWidget(self.toggle_assets_btn)
+
         hl.addWidget(make_btn("❌", "종료", self.quit_requested.emit))
 
         root.addWidget(action_row)
@@ -441,6 +540,7 @@ class Popover(QWidget):
             if s.get("hidden", False):
                 continue
             row = StockRow(s)
+            row.assets_hidden = self._assets_hidden
             row.edit_requested.connect(self.edit_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
             self.rows[s["code"]] = row
@@ -479,12 +579,55 @@ class Popover(QWidget):
         else:
             rows_h = 120   # empty_lbl 안내 영역
 
-        # PortfolioSummary + 구분선 2개 + 종목 영역 + 액션 바
+        # PortfolioSummary + 구분선 2개 + 종목 영역 + 설정 바 + 액션 바
         # + 카드 위/아래 outer margin (각각 OUTER_M)
         return (
-            PortfolioSummary.H + 1 + rows_h + 1 + self.ACTION_H
+            PortfolioSummary.H + 1 + rows_h + 1
+            + self.CONTROLS_H + self.ACTION_H
             + self.OUTER_M * 2
         )
+
+    # ── 자산 정보 숨김 ────────────────────────────────────────────────────
+    def set_assets_hidden(self, hidden: bool):
+        """외부(매니저)에서 상태 동기화. 시그널은 emit 하지 않는다."""
+        if self._assets_hidden == hidden:
+            self._apply_assets_btn_visual()
+            return
+        self._assets_hidden = hidden
+        self.summary.set_assets_hidden(hidden)
+        for row in self.rows.values():
+            row.set_assets_hidden(hidden)
+        self._apply_assets_btn_visual()
+
+    def _on_toggle_assets(self):
+        self._assets_hidden = not self._assets_hidden
+        self.summary.set_assets_hidden(self._assets_hidden)
+        for row in self.rows.values():
+            row.set_assets_hidden(self._assets_hidden)
+        self._apply_assets_btn_visual()
+        self.assets_hidden_changed.emit(self._assets_hidden)
+
+    def _apply_assets_btn_visual(self):
+        if self._assets_hidden:
+            self.toggle_assets_btn.setText("🙈")
+            self.toggle_assets_btn.setToolTip("자산 정보 표시")
+        else:
+            self.toggle_assets_btn.setText("👁")
+            self.toggle_assets_btn.setToolTip("자산 정보 숨기기")
+
+    # ── 투명도 ────────────────────────────────────────────────────────────
+    def set_opacity(self, value: float):
+        """외부(매니저)에서 초기값 동기화. 시그널은 emit 하지 않는다."""
+        pct = max(self.OPACITY_MIN, min(self.OPACITY_MAX, int(round(value * 100))))
+        self.opacity_slider.blockSignals(True)
+        self.opacity_slider.setValue(pct)
+        self.opacity_slider.blockSignals(False)
+        self.setWindowOpacity(pct / 100.0)
+
+    def _on_opacity_slider_changed(self, pct: int):
+        opacity = pct / 100.0
+        self.setWindowOpacity(opacity)
+        self.opacity_changed.emit(opacity)
 
     def show_below(self, anchor_global_pos: QPoint, anchor_width: int = 0):
         """anchor_global_pos 아래에 팝오버를 표시. 화면 우상단 메뉴바 아이콘 기준."""
@@ -495,9 +638,9 @@ class Popover(QWidget):
         self.setFixedSize(target_w, target_h)
 
         # 메뉴바 아이콘 가운데 아래로 떨어뜨림 (Qt 트레이는 geometry 가 비어있는 경우가
-        # 있어 anchor 좌표 기준으로 보정)
+        # 있어 anchor 좌표 기준으로 보정). 메뉴바와 살짝 떨어뜨리기 위해 10px 갭.
         x = anchor_global_pos.x() + anchor_width // 2 - target_w // 2
-        y = anchor_global_pos.y() + 4
+        y = anchor_global_pos.y() + 10
 
         # 화면 경계 안으로 보정
         from PyQt6.QtWidgets import QApplication

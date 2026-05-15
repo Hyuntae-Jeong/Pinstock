@@ -58,6 +58,10 @@ class WidgetManager:
         self.hide_master_btn: ToggleButton | None = None
         self.hide_all_btn_pos: list | None = None
         self.hide_master_btn_pos: list | None = None
+        # macOS 팝오버에서 쓰는 자산 정보 숨김 / 팝오버 투명도 — Windows 에서는
+        # UI 노출은 없고 round-trip 보존만 한다 (한쪽에서 저장하면 다른쪽에서도 유지되도록).
+        self.assets_hidden: bool = False
+        self.popover_opacity: float = 1.0
 
         self._load_config()
         self._setup_tray()
@@ -306,6 +310,12 @@ class WidgetManager:
                         setattr(self, attr, [int(pos[0]), int(pos[1])])
                     except (TypeError, ValueError):
                         pass
+            self.assets_hidden = bool(data.get("assets_hidden", False))
+            try:
+                opacity = float(data.get("popover_opacity", 1.0))
+                self.popover_opacity = max(0.6, min(1.0, opacity))
+            except (TypeError, ValueError):
+                self.popover_opacity = 1.0
 
     def _save_config(self):
         data = {
@@ -318,6 +328,8 @@ class WidgetManager:
                 "hide_all_pos":    self.hide_all_btn_pos,
                 "hide_master_pos": self.hide_master_btn_pos,
             },
+            "assets_hidden": self.assets_hidden,
+            "popover_opacity": self.popover_opacity,
         }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
