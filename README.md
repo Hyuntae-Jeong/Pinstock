@@ -75,6 +75,8 @@ pip install -r requirements.txt
 python -m pinstock
 ```
 
+> 💡 **Windows 원클릭 실행**: 위 4단계까지 끝낸 뒤 [`Pinstock.vbs`](Pinstock.vbs) 를 더블클릭하면 PowerShell 을 열지 않아도 venv 의 `pythonw.exe -m pinstock` 으로 콘솔창 없이 백그라운드 실행됩니다. 우클릭 → "바탕화면에 바로 가기 만들기" 또는 "작업 표시줄에 고정" 으로 더 편하게 띄울 수 있습니다.
+
 ---
 
 ## 🖱️ 사용법
