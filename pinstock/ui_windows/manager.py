@@ -313,7 +313,8 @@ class WidgetManager:
             self.assets_hidden = bool(data.get("assets_hidden", False))
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
-                self.popover_opacity = max(0.6, min(1.0, opacity))
+                # Windows 는 10–100% 까지 허용 (macOS 는 자체적으로 60% 미만은 60% 로 clamp).
+                self.popover_opacity = max(0.1, min(1.0, opacity))
             except (TypeError, ValueError):
                 self.popover_opacity = 1.0
 
@@ -389,6 +390,8 @@ class WidgetManager:
         pm = self.hide_master_btn_pos or [default_master_x, default_master_y]
         self.hide_all_btn.move(pa[0], pa[1])
         self.hide_master_btn.move(pm[0], pm[1])
+        self.hide_all_btn.setWindowOpacity(self.popover_opacity)
+        self.hide_master_btn.setWindowOpacity(self.popover_opacity)
         # 전체 토글은 항상 보임 (전체 숨김 상태일 때만 같이 숨겨짐)
         if not self.is_hidden:
             self.hide_all_btn.show()
@@ -405,6 +408,7 @@ class WidgetManager:
 
         pos = stock.get("pos", [def_x, def_y])
         w.move(pos[0], pos[1])
+        w.setWindowOpacity(self.popover_opacity)
         # 종목별 hidden 표시 + 전체 숨김 상태 둘 다 고려
         if not stock.get("hidden", False) and not self.is_hidden:
             w.show()
@@ -419,6 +423,8 @@ class WidgetManager:
     def _spawn_master(self):
         if self.master_widget is None:
             self.master_widget = MasterWidget(width=self.uniform_w)
+            self.master_widget.set_opacity(self.popover_opacity)
+            self.master_widget.opacity_changed.connect(self._on_opacity_changed)
 
         # 위치: 저장된 위치가 있으면 사용, 없으면 종목 위젯들 위에 적당히 둠
         if self.master_pos:
@@ -431,8 +437,28 @@ class WidgetManager:
         else:
             self.master_widget.hide()
 
+        # 마스터 자체에 저장된 투명도 적용 (set_opacity는 슬라이더만 동기화함)
+        self.master_widget.setWindowOpacity(self.popover_opacity)
+
         # 초기 표시: 현재가 아직 없으면 0/─ 으로 둠 → 30초 이내 자동 갱신
         self._recompute_master()
+
+    # ── 투명도 동기화 ─────────────────────────────────────────────────────
+    def _apply_opacity_to_all(self, opacity: float):
+        """마스터 + 모든 종목 위젯 + 토글 버튼에 동일 투명도 적용."""
+        if self.master_widget:
+            self.master_widget.setWindowOpacity(opacity)
+        for w in self.widgets.values():
+            w.setWindowOpacity(opacity)
+        if self.hide_all_btn:
+            self.hide_all_btn.setWindowOpacity(opacity)
+        if self.hide_master_btn:
+            self.hide_master_btn.setWindowOpacity(opacity)
+
+    def _on_opacity_changed(self, opacity: float):
+        self.popover_opacity = opacity
+        self._apply_opacity_to_all(opacity)
+        self._save_config()
 
     def _master_toggle_text(self) -> str:
         return "📊   마스터 위젯 숨기기" if self.master_visible else "📊   마스터 위젯 표시"

@@ -2,8 +2,9 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QApplication,
+    QSlider,
 )
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal
 
 from .theme import C
 
@@ -12,11 +13,20 @@ from .theme import C
 class MasterWidget(QWidget):
     """포트폴리오 전체 요약을 표시하는 마스터 위젯.
     총 매입금액 / 평가금액 / 평가손익 / 수익률 4개 지표를 2×2 그리드로 표시.
-    개별 종목 위젯과 동일한 다크 카드 스타일이며 드래그로 이동 가능."""
+    개별 종목 위젯과 동일한 다크 카드 스타일이며 드래그로 이동 가능.
+    우측 하단에 전체 위젯 투명도를 조절하는 슬라이더."""
 
-    H      = 96    # compact 카드 높이 (2×2 요약 그리드)
-    RADIUS = 13
+    GRID_H   = 96    # 2×2 요약 그리드 영역 높이
+    FOOTER_H = 20    # 우측 하단 투명도 슬라이더 영역 높이
+    H        = GRID_H + FOOTER_H   # compact 카드 전체 높이
+    RADIUS   = 13
     DRAG_THRESHOLD = 4
+
+    # 투명도 슬라이더 범위 (퍼센트). Windows 는 macOS(60–100) 보다 넓게 10–100.
+    OPACITY_MIN = 10
+    OPACITY_MAX = 100
+
+    opacity_changed = pyqtSignal(float)   # 0.6 ~ 1.0
 
     def __init__(self, width: int):
         super().__init__()
@@ -49,7 +59,7 @@ class MasterWidget(QWidget):
 
         # 상단 compact: 2x2 그리드 (제목 없음, 1행/2행 사이를 살짝 띄움)
         self.compact = QWidget(self.card)
-        self.compact.setGeometry(0, 0, self.W, self.H)
+        self.compact.setGeometry(0, 0, self.W, self.GRID_H)
         self.compact.setStyleSheet("background: transparent;")
         grid = QGridLayout(self.compact)
         grid.setContentsMargins(14, 12, 14, 12)
@@ -61,10 +71,62 @@ class MasterWidget(QWidget):
         self.profit_val = self._make_cell(grid, 1, 0, "평가손익", bold=True)
         self.prate_val  = self._make_cell(grid, 1, 1, "수익률",   bold=True)
 
+        # 우측 하단 투명도 슬라이더 푸터
+        self.footer = QWidget(self.card)
+        self.footer.setGeometry(0, self.GRID_H, self.W, self.FOOTER_H)
+        self.footer.setStyleSheet("background: transparent;")
+        self._build_opacity_slider(self.footer)
+
         # 확장 패널 (클릭 시 종목별 손익 표시) — 초기 숨김
         self.expand_panel = QWidget(self.card)
         self.expand_panel.setStyleSheet("background: transparent;")
         self.expand_panel.hide()
+
+    # ── 투명도 슬라이더 (우측 하단) ───────────────────────────────────────
+    def _build_opacity_slider(self, parent: QWidget):
+        hl = QHBoxLayout(parent)
+        hl.setContentsMargins(14, 2, 14, 6)
+        hl.setSpacing(6)
+        hl.addStretch(1)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(self.OPACITY_MIN, self.OPACITY_MAX)
+        self.opacity_slider.setValue(self.OPACITY_MAX)
+        self.opacity_slider.setFixedWidth(90)
+        self.opacity_slider.setToolTip("위젯 투명도")
+        self.opacity_slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.opacity_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 3px;
+                background: {C['surface2']};
+                border-radius: 1px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {C['subtext']};
+                border-radius: 1px;
+            }}
+            QSlider::handle:horizontal {{
+                width: 10px;
+                height: 10px;
+                margin: -4px 0;
+                background: {C['text']};
+                border-radius: 5px;
+            }}
+        """)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
+        hl.addWidget(self.opacity_slider, 0)
+
+    def set_opacity(self, value: float):
+        """외부(매니저)에서 초기값 동기화. 시그널은 emit 하지 않는다.
+        창 자체의 투명도는 매니저가 일괄 적용한다."""
+        pct = max(self.OPACITY_MIN, min(self.OPACITY_MAX, int(round(value * 100))))
+        self.opacity_slider.blockSignals(True)
+        self.opacity_slider.setValue(pct)
+        self.opacity_slider.blockSignals(False)
+
+    def _on_opacity_slider_changed(self, pct: int):
+        opacity = pct / 100.0
+        self.opacity_changed.emit(opacity)
 
     def _make_cell(self, grid: QGridLayout, row: int, col: int,
                    key_text: str, bold: bool = False) -> QLabel:
@@ -94,7 +156,8 @@ class MasterWidget(QWidget):
         self.setFixedWidth(base_w)
         cur_h = self.height()
         self.card.setGeometry(0, 0, base_w, cur_h)
-        self.compact.setGeometry(0, 0, base_w, self.H)
+        self.compact.setGeometry(0, 0, base_w, self.GRID_H)
+        self.footer.setGeometry(0, self.GRID_H, base_w, self.FOOTER_H)
         if self.is_expanded:
             panel_h = cur_h - self.H
             self.expand_panel.setGeometry(0, self.H, base_w, panel_h)
