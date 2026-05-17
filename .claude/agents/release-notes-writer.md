@@ -84,8 +84,11 @@ gh release view <TARGET_TAG> --repo Hyuntae-Jeong/Pinstock
 - ...
 
 ## 📦 다운로드
-- **macOS**: `Pinstock-macos.zip` — 첫 실행 시 "확인되지 않은 개발자" 경고 → 우클릭 → 열기
-- **Windows**: `Pinstock-windows.zip` — 압축 풀고 `Pinstock.vbs` 더블클릭
+- **macOS**: `Pinstock-mac-<TAG>.zip`
+  1. 압축을 풀고 앱 아이콘을 Finder의 **응용 프로그램** 폴더로 드래그
+  2. 첫 실행 시 "확인되지 않은 개발자" 경고가 뜹니다 (창에는 "그래도 열기"가 보이지 않음)
+  3. **시스템 설정 → 개인정보 보호 및 보안** 으로 이동, 맨 아래까지 스크롤 → **"그래도 열기"** 클릭
+- **Windows**: `Pinstock-win-<TAG>.zip` — 압축 풀고 `Pinstock.exe` 더블클릭
 
 **New Contributor**: @user (첫 기여)  ← 외부 첫 기여자 있을 때만
 
@@ -135,8 +138,11 @@ gh release edit <TAG> --repo Hyuntae-Jeong/Pinstock --notes-file /tmp/release_no
 - MIT 라이선스 및 Issue/PR 템플릿 추가
 
 ## 📦 다운로드
-- **macOS**: `Pinstock-macos.zip` — 첫 실행 시 "확인되지 않은 개발자" 경고 → 우클릭 → 열기
-- **Windows**: `Pinstock-windows.zip` — 압축 풀고 `Pinstock.vbs` 더블클릭
+- **macOS**: `Pinstock-mac-v0.1.2.zip`
+  1. 압축을 풀고 앱 아이콘을 Finder의 **응용 프로그램** 폴더로 드래그
+  2. 첫 실행 시 "확인되지 않은 개발자" 경고가 뜹니다 (창에는 "그래도 열기"가 보이지 않음)
+  3. **시스템 설정 → 개인정보 보호 및 보안** 으로 이동, 맨 아래까지 스크롤 → **"그래도 열기"** 클릭
+- **Windows**: `Pinstock-win-v0.1.2.zip` — 압축 풀고 `Pinstock.exe` 더블클릭
 
 **New Contributor**: @wawds123 (첫 기여)
 
