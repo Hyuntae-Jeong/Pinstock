@@ -11,7 +11,7 @@
     </tr>
     <tr>
       <td><img src="docs/screenshot-widgets.png" alt="Windows 화면 우상단에 종목별 위젯이 세로로 정렬된 모습. 장 외 시간에는 sparkline 자리에 최근 30일 일봉 캔들 차트가 표시된다." width="320"></td>
-      <td><img src="docs/screenshot-macos.png" alt="macOS 메뉴바 ₩ 아이콘을 클릭하면 펼쳐지는 팝오버 패널. 상단 포트폴리오 요약 + 종목별 현재가·등락률·sparkline + 하단 액션 바." width="320"></td>
+      <td><img src="docs/screenshot-macos.png" alt="macOS 메뉴바 Pinstock 아이콘을 클릭하면 펼쳐지는 팝오버 패널. 상단 포트폴리오 요약 + 종목별 현재가·등락률·sparkline + 하단 액션 바." width="320"></td>
     </tr>
   </table>
 </p>
@@ -41,7 +41,7 @@
    2. **시스템 설정 → 개인정보 보호 및 보안** 열기 → 아래로 스크롤.
    3. **"'Pinstock' 사용이 차단되었습니다…"** 메시지 옆 **"그래도 열기"** 버튼 클릭 → 암호/Touch ID 인증.
    4. 다시 `Pinstock.app` 더블클릭 → 새 팝업의 **"열기"** 클릭.
-4. 메뉴바에 ₩ 아이콘이 나타나면 끝. 이후엔 그냥 더블클릭으로 실행됩니다.
+4. 메뉴바에 Pinstock 아이콘이 나타나면 끝. 이후엔 그냥 더블클릭으로 실행됩니다.
 
 > 📝 macOS 15 (Sequoia) 이상부터는 Apple 이 *"우클릭 → 열기"* 단축 우회를 제거해서, **시스템 설정** 경로로만 첫 실행이 가능합니다. (이 앱은 무료 배포라 Apple Developer ID 코드 서명이 없습니다.)
 
@@ -49,9 +49,11 @@
 1. `Pinstock-win-vX.Y.Z.zip` 다운로드 → 우클릭 → 압축 풀기.
 2. 풀린 `Pinstock` 폴더 전체를 원하는 위치(예: `C:\Program Files\Pinstock\` 또는 바탕화면)로 옮기고, 안의 `Pinstock.exe` 더블클릭.
 3. **첫 실행**: "Windows 가 PC를 보호했습니다" 경고 → **"추가 정보" → "실행"** 클릭.
-4. 시스템 트레이에 ₩ 아이콘 + 화면 우상단에 위젯 표시.
+4. 시스템 트레이에 Pinstock 아이콘 + 화면 우상단에 위젯 표시.
 
 > 자세한 안내·알려진 제약은 [최신 릴리즈 노트](https://github.com/Hyuntae-Jeong/Pinstock/releases/latest) 참고.
+
+> 💡 **이미 Pinstock 을 쓰고 있나요?** 기존 버전에서 새 버전으로 업데이트하는 절차는 [UPGRADE.md](UPGRADE.md) 참고.
 
 ---
 
@@ -106,7 +108,7 @@ python -m pinstock
 ### macOS — 메뉴바 + 팝오버
 | 동작 | 설명 |
 |------|------|
-| **메뉴바 ₩ 아이콘 클릭** | 팝오버 패널 펼침 / 접기 |
+| **메뉴바 Pinstock 아이콘 클릭** | 팝오버 패널 펼침 / 접기 |
 | 팝오버의 종목 행 **좌클릭** | 평단가·수량·손익 펼침 |
 | 팝오버의 종목 행 **우클릭** | 수정 / 삭제 메뉴 |
 | 팝오버 **밖 클릭** | 자동으로 닫힘 (macOS native popover 패턴) |
@@ -161,7 +163,7 @@ pinstock/
 │   ├── theme.py           다크 테마 색상 + QSS
 │   └── manager.py         Windows 전체 매니저
 └── ui_macos/              macOS: 메뉴바 + 팝오버
-    ├── menubar.py         메뉴바 ₩ 아이콘 + 토글 트리거
+    ├── menubar.py         메뉴바 Pinstock 아이콘 + 토글 트리거
     ├── popover.py         팝오버 패널 (요약 + 종목 리스트 + 액션 바)
     └── manager.py         macOS 매니저 + 종목별 폴링 워커
 ```

@@ -83,6 +83,11 @@ gh release view <TARGET_TAG> --repo Hyuntae-Jeong/Pinstock
 - <문서 변경 한 줄>
 - ...
 
+## 🔄 이전 버전에서 업데이트
+이미 Pinstock 을 쓰고 있다면 → [UPGRADE.md](https://github.com/Hyuntae-Jeong/Pinstock/blob/main/UPGRADE.md) 참고
+
+> **중요**: 업데이트 절차 자체는 절대 릴리즈 노트에 인라인으로 옮겨 적지 마세요. `UPGRADE.md` 가 단일 소스이며, 릴리즈 노트는 위 한 줄 링크만 둡니다. 그 버전에서 알아두면 좋은 *해당 버전 한정* 변경사항(예: "Dock 아이콘 표시 시작") 만 짧게 본 섹션 또는 🐛 섹션에 한 줄 추가하세요.
+
 ## 📦 다운로드
 - **macOS**: `Pinstock-mac-<TAG>.zip`
   1. 압축을 풀고 앱 아이콘을 Finder의 **응용 프로그램** 폴더로 드래그
@@ -136,6 +141,9 @@ gh release edit <TAG> --repo Hyuntae-Jeong/Pinstock --notes-file /tmp/release_no
 - CONTRIBUTING.md 추가 및 README 기여 섹션 연결
 - macOS 15+ Gatekeeper 우회 가이드 보강
 - MIT 라이선스 및 Issue/PR 템플릿 추가
+
+## 🔄 이전 버전에서 업데이트
+이미 Pinstock 을 쓰고 있다면 → [UPGRADE.md](https://github.com/Hyuntae-Jeong/Pinstock/blob/main/UPGRADE.md) 참고
 
 ## 📦 다운로드
 - **macOS**: `Pinstock-mac-v0.1.2.zip`
