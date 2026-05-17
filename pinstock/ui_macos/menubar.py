@@ -1,6 +1,7 @@
 """macOS 메뉴바 아이콘 + 팝오버 토글 트리거.
 
-시스템 라이트/다크 모드에 따라 적절한 SVG 아이콘으로 자동 전환.
+NSImage 템플릿 이미지로 등록해 메뉴바 배경(=바탕화면 톤)에 맞춰
+시스템이 자동으로 밝게/어둡게 색을 반전하도록 한다.
 """
 
 import sys
@@ -24,8 +25,9 @@ def _resolve_icons_dir() -> Path:
 
 
 _ICONS_DIR = _resolve_icons_dir()
-_ICON_LIGHT = _ICONS_DIR / "menubar_light.svg"   # 라이트 모드: 검정 단색
-_ICON_DARK  = _ICONS_DIR / "menubar_dark.svg"    # 다크 모드:   흰색 단색
+# 단색(검정) SVG. setIsMask(True) 를 통해 NSImage 템플릿으로 등록되면
+# 시스템이 알파만 보존한 채 배경 톤에 맞춰 색을 자동 처리한다.
+_ICON_TEMPLATE = _ICONS_DIR / "menubar_light.svg"
 
 
 # ─── 메뉴바 아이콘 ──────────────────────────────────────────────────────────
@@ -45,46 +47,17 @@ class MenuBarIcon(QObject):
         self.tray.setToolTip("Pinstock")
         self.tray.activated.connect(self._on_activated)
 
-        # 시스템 테마 따라 아이콘 결정
-        self._apply_icon_for_current_scheme()
-
-        # 시스템 모드 변경 감지 (Qt 6.5+) — 실시간 전환
-        try:
-            app.styleHints().colorSchemeChanged.connect(
-                self._on_color_scheme_changed
-            )
-        except (AttributeError, TypeError):
-            pass   # Qt 6.5 미만: 시작 시점 모드만 반영
-
-        self.tray.show()
-
-    # ── 아이콘 ────────────────────────────────────────────────────────────
-    def _on_color_scheme_changed(self, *_args):
-        self._apply_icon_for_current_scheme()
-
-    def _apply_icon_for_current_scheme(self):
-        is_dark = self._is_dark_mode()
-        svg_path = _ICON_DARK if is_dark else _ICON_LIGHT
-        if svg_path.exists():
-            self.tray.setIcon(self._render_svg_icon(svg_path))
+        if _ICON_TEMPLATE.exists():
+            icon = self._render_svg_icon(_ICON_TEMPLATE)
+            icon.setIsMask(True)   # NSImage 템플릿 등록 → 메뉴바 배경에 맞춰 자동 반전
+            self.tray.setIcon(icon)
         else:
             # SVG 누락 시 fallback: 기존 ₩ 원형 아이콘
             self.tray.setIcon(self._make_fallback_icon())
 
-    @staticmethod
-    def _is_dark_mode() -> bool:
-        """Qt styleHints 기반 시스템 다크 모드 판정.
-        Qt 6.5 미만이거나 결과가 Unknown 이면 기본값으로 다크 가정."""
-        try:
-            scheme = QApplication.instance().styleHints().colorScheme()
-            if scheme == Qt.ColorScheme.Light:
-                return False
-            if scheme == Qt.ColorScheme.Dark:
-                return True
-        except (AttributeError, TypeError):
-            pass
-        return True   # Unknown 이면 다크 (대부분의 사용자 환경)
+        self.tray.show()
 
+    # ── 아이콘 렌더링 ─────────────────────────────────────────────────────
     @staticmethod
     def _render_svg_icon(svg_path: Path) -> QIcon:
         """SVG 를 22pt/44pt 높이 기준으로 렌더링해 QIcon 반환 (Retina 대응).
