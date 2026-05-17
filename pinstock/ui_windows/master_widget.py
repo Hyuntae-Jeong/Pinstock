@@ -586,6 +586,13 @@ class MasterWidget(QWidget):
         self._resize_to_expanded()
         self.expand_panel.show()
         self._ensure_on_screen()   # 확장 후 화면 밖이면 위로 이동
+        # 확장된 마스터는 항상 종목 위젯들보다 위에 — _ensure_on_screen 이 화면 안일 때
+        # raise 안 하므로 여기서 명시적으로 z-order 보장. 슬라이더/자물쇠도 따라 올림.
+        self.raise_()
+        if hasattr(self, "slider_window"):
+            self.slider_window.raise_()
+        if hasattr(self, "lock_overlay") and self.lock_overlay.isVisible():
+            self.lock_overlay.raise_()
 
     def collapse(self):
         if not self.is_expanded:
