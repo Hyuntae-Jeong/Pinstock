@@ -372,6 +372,7 @@ class Popover(QWidget):
     delete_requested         = pyqtSignal(str)   # code
     assets_hidden_changed    = pyqtSignal(bool)
     opacity_changed          = pyqtSignal(float)   # 0.6 ~ 1.0
+    closed_by_user           = pyqtSignal()      # ESC 등 사용자 명시적 닫기
 
     OPACITY_MIN = 60   # 슬라이더 정수 단위 (퍼센트). 60% 미만은 가독성 저하로 차단.
     OPACITY_MAX = 100
@@ -678,6 +679,7 @@ class Popover(QWidget):
     # ── 키보드 ────────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
+            self.closed_by_user.emit()
             self.hide()
             return
         super().keyPressEvent(event)

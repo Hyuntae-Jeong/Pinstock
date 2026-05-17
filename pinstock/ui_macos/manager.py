@@ -12,7 +12,7 @@ import copy
 import shutil
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog
 
 from ..core.api import fetch_stock, fetch_minute_chart, fetch_daily_chart
@@ -85,6 +85,19 @@ class MacAppManager(QObject):
     def __init__(self, app: QApplication):
         super().__init__()
         self.app = app
+        # 사용자가 popover 를 "보고 싶어 하는" 상태인지 명시적으로 추적.
+        # 트레이로 열면 True, 트레이 토글/ESC 로 닫으면 False. NSPanel 의
+        # hidesOnDeactivate 같은 시스템 자동 hide 는 건드리지 않는다.
+        # 앱이 다시 active 가 될 때 이 값이 True 이면 popover 를 강제 복귀시켜
+        # macOS 의 "inactive 앱 첫 클릭은 앱 깨우기로만 소비" 동작으로 인한
+        # "씹힘" 을 우회한다. (isVisible() 시점 의존이면 NSPanel 자동 hide 가
+        # ApplicationDeactivate 이벤트보다 먼저 발화해 항상 False 로 읽혀서
+        # 불안정함 — 그래서 사용자 의도 기반으로 분리)
+        self._user_wants_popover_visible: bool = False
+        self._popover_just_re_shown: bool = False
+        app.installEventFilter(self)
+        app.applicationStateChanged.connect(self._on_app_state_changed)
+
         self.stocks: list[dict] = []
         self.fetchers: dict[str, StockFetcher] = {}
         self.current_prices: dict[str, int] = {}
@@ -118,6 +131,7 @@ class MacAppManager(QObject):
         self.popover.delete_requested.connect(self._on_delete_request)
         self.popover.assets_hidden_changed.connect(self._on_assets_hidden_changed)
         self.popover.opacity_changed.connect(self._on_opacity_changed)
+        self.popover.closed_by_user.connect(self._on_popover_closed_by_user)
 
         # 로드한 자산 숨김 / 팝오버 투명도 상태를 팝오버에 한 번 주입
         self.popover.set_assets_hidden(self.assets_hidden)
@@ -131,12 +145,62 @@ class MacAppManager(QObject):
         for i, s in enumerate(self.stocks):
             self._spawn_fetcher(s["code"], stagger_idx=i)
 
+    # ── 앱 active/inactive 트랜지션 ───────────────────────────────────────
+    # ApplicationActivate 이벤트와 applicationStateChanged 시그널 양쪽에
+    # 같은 핸들러를 걸어 belt-and-suspenders. macOS Qt 버전 / 활성화 경로
+    # (트레이 클릭 vs cmd+tab) 에 따라 둘 중 하나만 발화하는 경우가 있어
+    # 한쪽이라도 잡히면 사용자가 "씹힘" 을 경험하지 않게 한다.
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.ApplicationActivate:
+            self._maybe_re_show_popover()
+        return False
+
+    def _on_app_state_changed(self, state):
+        if state == Qt.ApplicationState.ApplicationActive:
+            self._maybe_re_show_popover()
+        elif state == Qt.ApplicationState.ApplicationInactive:
+            # NSPanel 의 hidesOnDeactivate 가 Cocoa 레벨에서 popover 를
+            # 시각적으로 숨기는데, Qt 의 isVisible() 은 그걸 모르고 True 인
+            # 채로 남는다 (desync). 그 상태에서 다음 트레이 클릭이 토글로
+            # 오면 isVisible=True 로 읽혀 "이미 열려있네 → HIDE" 로 잘못
+            # 동작 (사용자에겐 "씹힘"). 우리가 명시적으로 hide() 를 호출해
+            # Qt state 를 Cocoa 와 강제 동기화한다. _user_wants_popover_visible
+            # 은 건드리지 않으므로 다음 Active 전환 시 자동 복귀가 가능.
+            if self.popover.isVisible():
+                self.popover.hide()
+
+    def _maybe_re_show_popover(self):
+        if not self._user_wants_popover_visible:
+            return
+        if self.popover.isVisible() or self._popover_just_re_shown:
+            return   # 이미 떠있거나 방금 한 번 재표시했음 (중복 호출 방지)
+        anchor_pos, anchor_w = self.menubar._anchor_position()
+        self.popover.show_below(anchor_pos, anchor_w)
+        # 같은 트레이 클릭이 늦게 activated 를 fire 시키면 토글-닫기로
+        # 동작해버리니, 짧은 시간 동안 토글을 가드한다.
+        self._popover_just_re_shown = True
+        QTimer.singleShot(200, self._clear_just_re_shown)
+
+    def _clear_just_re_shown(self):
+        self._popover_just_re_shown = False
+
+    def _on_popover_closed_by_user(self):
+        # ESC 등으로 사용자가 직접 닫음 → 다음 ApplicationActivate 에서 자동
+        # 복귀하지 않도록 의도 클리어.
+        self._user_wants_popover_visible = False
+
     # ── 팝오버 토글 ───────────────────────────────────────────────────────
     def _on_toggle_popover(self, anchor_pos, anchor_w):
+        if self._popover_just_re_shown:
+            # ApplicationActivate 핸들러가 방금 popover 를 띄웠음 — 같은
+            # 트레이 클릭의 activated 가 토글-닫기로 동작하지 않도록 무시.
+            return
         if self.popover.isVisible():
             self.popover.hide()
+            self._user_wants_popover_visible = False
         else:
             self.popover.show_below(anchor_pos, anchor_w)
+            self._user_wants_popover_visible = True
 
     # ── 폴링 워커 관리 ─────────────────────────────────────────────────────
     def _spawn_fetcher(self, code: str, stagger_idx: int = 0):
