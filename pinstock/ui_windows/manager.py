@@ -11,7 +11,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMenu, QSystemTrayIcon, QMessageBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import (
     QIcon, QAction, QPixmap, QPainter, QFont, QColor, QBrush, QPen,
 )
@@ -62,6 +62,12 @@ class WidgetManager:
         # UI 노출은 없고 round-trip 보존만 한다 (한쪽에서 저장하면 다른쪽에서도 유지되도록).
         self.assets_hidden: bool = False
         self.popover_opacity: float = 1.0
+
+        # 투명도 슬라이더가 멈춘 뒤에만 click-through 토글 + 설정 저장 — 50% 경계를
+        # 지날 때 setWindowFlag 로 윈도우가 재생성되며 발생하던 멈칫을 없앤다.
+        self._opacity_settle_timer = QTimer()
+        self._opacity_settle_timer.setSingleShot(True)
+        self._opacity_settle_timer.timeout.connect(self._on_opacity_settle)
 
         self._load_config()
         self._setup_tray()
@@ -428,6 +434,12 @@ class WidgetManager:
             self.master_widget = MasterWidget(width=self.uniform_w)
             self.master_widget.set_opacity(self.popover_opacity)
             self.master_widget.opacity_changed.connect(self._on_opacity_changed)
+            # 시작 시 저장된 투명도가 임계치 이하면 show 전에 미리 click-through 활성화
+            # (슬라이더는 별도 윈도우라 영향 없음).
+            if self._is_click_through_opacity(self.popover_opacity):
+                self.master_widget.setWindowFlag(
+                    Qt.WindowType.WindowTransparentForInput, True
+                )
 
         # 위치: 저장된 위치가 있으면 사용, 없으면 종목 위젯들 위에 적당히 둠
         if self.master_pos:
@@ -465,10 +477,18 @@ class WidgetManager:
             self.hide_master_btn.setWindowOpacity(opacity)
 
     def _apply_click_through(self, opacity: float):
-        """종목 위젯에만 클릭 통과 모드 토글. 마스터/토글 버튼은 항상 클릭 가능."""
+        """종목 위젯 + 마스터 카드에 OS-레벨 click-through 토글.
+        슬라이더는 별도 top-level 윈도우라 마스터가 통과 상태여도 그대로 조작 가능,
+        자물쇠 오버레이는 항상 WindowTransparentForInput 라 변동 없음.
+        토글 버튼은 항상 클릭 가능."""
         enabled = self._is_click_through_opacity(opacity)
         flag = Qt.WindowType.WindowTransparentForInput
-        for w in self.widgets.values():
+
+        targets = list(self.widgets.values())
+        if self.master_widget:
+            targets.append(self.master_widget)
+
+        for w in targets:
             if bool(w.windowFlags() & flag) == enabled:
                 continue
             # 플래그 변경은 윈도우를 재생성하므로 위치/표시를 복원해줘야 한다.
@@ -481,8 +501,14 @@ class WidgetManager:
 
     def _on_opacity_changed(self, opacity: float):
         self.popover_opacity = opacity
+        # 투명도 자체는 즉시 반영 (가벼움).
         self._apply_opacity_to_all(opacity)
-        self._apply_click_through(opacity)
+        # click-through 토글(setWindowFlag 로 윈도우 재생성)과 디스크 저장은
+        # 슬라이더가 멈춘 뒤로 미뤄 50% 경계에서의 멈칫을 제거.
+        self._opacity_settle_timer.start(180)
+
+    def _on_opacity_settle(self):
+        self._apply_click_through(self.popover_opacity)
         self._save_config()
 
     def _master_toggle_text(self) -> str:

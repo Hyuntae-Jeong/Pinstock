@@ -1,5 +1,7 @@
 """포트폴리오 요약 마스터 위젯."""
 
+import sys
+
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QApplication,
     QSlider, QStyle, QStyleOptionSlider,
@@ -8,6 +10,54 @@ from PyQt6.QtCore import Qt, QPoint, QRectF, pyqtSignal
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor
 
 from .theme import C
+
+
+# ─── Win11 DWM 자동 테두리/그림자/둥근 모서리 차단 ───────────────────────────
+def _disable_win11_dwm_chrome(hwnd: int) -> None:
+    """Windows 가 top-level 윈도우에 기본 적용하는
+    그림자(드롭 섀도) · 얇은 테두리 · 둥근 모서리 효과를 끈다."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # 1. 윈도우 클래스의 CS_DROPSHADOW 비트 제거 → 시스템 드롭 섀도 차단.
+        #    (이 클래스의 다른 Qt 윈도우들도 함께 그림자 빠짐 — 일반적으로 무난)
+        GCL_STYLE = -26
+        CS_DROPSHADOW = 0x00020000
+        user32 = ctypes.windll.user32
+        try:
+            get_long = user32.GetClassLongPtrW
+            set_long = user32.SetClassLongPtrW
+        except AttributeError:
+            get_long = user32.GetClassLongW
+            set_long = user32.SetClassLongW
+        get_long.restype = ctypes.c_size_t
+        set_long.restype = ctypes.c_size_t
+        cur = get_long(hwnd, GCL_STYLE)
+        if cur & CS_DROPSHADOW:
+            set_long(hwnd, GCL_STYLE, cur & ~CS_DROPSHADOW)
+
+        # 2. DWM NC 렌더링 정책 비활성화 — 일부 환경에서 추가 그림자/테두리 차단.
+        # DWMWA_NCRENDERING_POLICY = 2, DWMNCRP_DISABLED = 1
+        v = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 2, ctypes.byref(v), ctypes.sizeof(v)
+        )
+        # 3. Win11 둥근 모서리 끔
+        # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_DONOTROUND = 1
+        v = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 33, ctypes.byref(v), ctypes.sizeof(v)
+        )
+        # 4. Win11 테두리 색 없음
+        # DWMWA_BORDER_COLOR = 34, DWMWA_COLOR_NONE = 0xFFFFFFFE
+        v = ctypes.c_uint32(0xFFFFFFFE)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 34, ctypes.byref(v), ctypes.sizeof(v)
+        )
+    except Exception:
+        pass
 
 
 # ─── 잠금 상태에서 핸들이 자물쇠로 변하는 슬라이더 ──────────────────────────
@@ -76,6 +126,57 @@ class _OpacitySlider(QSlider):
         painter.drawArc(QRectF(shackle_x, shackle_y, shackle_w, shackle_h), 0, 180 * 16)
 
 
+# ─── 투명도 슬라이더 전용 윈도우 ──────────────────────────────────────────────
+class _SliderWindow(QFrame):
+    """투명도 슬라이더만 담는 별도 top-level 윈도우.
+    마스터에 WindowTransparentForInput 가 켜져도 슬라이더는 별개 윈도우라
+    그대로 클릭/조작 가능. setWindowOpacity 도 호출 안 해 항상 100% 불투명.
+    배경 완전 투명 + DWM 그림자/테두리 차단."""
+
+    WIDTH          = 90
+    HEIGHT         = 20   # 풋터 높이와 동일 — 풋터 안에 자연스럽게 겹침
+    PADDING_TOP    = 2
+    PADDING_BOTTOM = 6
+
+    def __init__(self, opacity_min: int, opacity_max: int):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setStyleSheet("background: transparent; border: none;")
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
+
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(0, self.PADDING_TOP, 0, self.PADDING_BOTTOM)
+        hl.setSpacing(0)
+
+        self.opacity_slider = _OpacitySlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(opacity_min, opacity_max)
+        self.opacity_slider.setValue(opacity_max)
+        self.opacity_slider.setFixedWidth(self.WIDTH)
+        self.opacity_slider.setToolTip("위젯 투명도")
+        self.opacity_slider.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # 슬라이더 자체 배경도 투명 — 뒤로 마스터 카드(faded) 가 자연스럽게 비치게.
+        groove = (
+            "QSlider { background: transparent; }\n"
+            + MasterWidget._GROOVE_QSS.format(**C)
+        )
+        self.opacity_slider.set_styles(
+            normal_qss=groove + MasterWidget._NORMAL_HANDLE_QSS.format(**C),
+            locked_qss=groove + MasterWidget._LOCKED_HANDLE_QSS.format(**C),
+        )
+        hl.addWidget(self.opacity_slider)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        _disable_win11_dwm_chrome(int(self.winId()))
+
+
 # ─── 포트폴리오 요약 마스터 위젯 ─────────────────────────────────────────────
 class MasterWidget(QWidget):
     """포트폴리오 전체 요약을 표시하는 마스터 위젯.
@@ -92,8 +193,11 @@ class MasterWidget(QWidget):
     # 투명도 슬라이더 범위 (퍼센트). Windows 는 macOS(60–100) 보다 넓게 10–100.
     OPACITY_MIN = 10
     OPACITY_MAX = 100
-    # 이 값(퍼센트) 이하면 종목 위젯이 클릭 통과 모드로 들어가고 슬라이더 핸들이 자물쇠로 바뀜.
+    # 이 값(퍼센트) 이하면 종목 위젯 + 마스터 카드가 클릭 통과 모드로 들어가고
+    # 슬라이더 핸들이 자물쇠로 바뀜.
     LOCK_THRESHOLD = 50
+
+    SLIDER_RIGHT_MARGIN = 14   # 카드 우측 여백과 동일 (슬라이더 윈도우 우측 정렬용)
 
     opacity_changed = pyqtSignal(float)   # 0.1 ~ 1.0
 
@@ -141,16 +245,21 @@ class MasterWidget(QWidget):
         self.profit_val = self._make_cell(grid, 1, 0, "평가손익", bold=True)
         self.prate_val  = self._make_cell(grid, 1, 1, "수익률",   bold=True)
 
-        # 우측 하단 투명도 슬라이더 푸터
+        # 우측 하단 투명도 슬라이더 풋터 — 슬라이더 자체는 별도 top-level 윈도우로 분리.
+        # (마스터가 click-through 상태여도 슬라이더는 그대로 조작 가능하도록.)
         self.footer = QWidget(self.card)
         self.footer.setGeometry(0, self.GRID_H, self.W, self.FOOTER_H)
         self.footer.setStyleSheet("background: transparent;")
-        self._build_opacity_slider(self.footer)
 
         # 확장 패널 (클릭 시 종목별 손익 표시) — 초기 숨김
         self.expand_panel = QWidget(self.card)
         self.expand_panel.setStyleSheet("background: transparent;")
         self.expand_panel.hide()
+
+        # 투명도 슬라이더 (별도 top-level, 마스터 click-through 영향 안 받음).
+        self.slider_window = _SliderWindow(self.OPACITY_MIN, self.OPACITY_MAX)
+        self.opacity_slider = self.slider_window.opacity_slider
+        self.opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
 
     # ── 투명도 슬라이더 (우측 하단) ───────────────────────────────────────
     _GROOVE_QSS = """
@@ -184,27 +293,6 @@ class MasterWidget(QWidget):
         }}
     """
 
-    def _build_opacity_slider(self, parent: QWidget):
-        hl = QHBoxLayout(parent)
-        hl.setContentsMargins(14, 2, 14, 6)
-        hl.setSpacing(6)
-        hl.addStretch(1)
-
-        self.opacity_slider = _OpacitySlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(self.OPACITY_MIN, self.OPACITY_MAX)
-        self.opacity_slider.setValue(self.OPACITY_MAX)
-        self.opacity_slider.setFixedWidth(90)
-        self.opacity_slider.setToolTip("위젯 투명도")
-        self.opacity_slider.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        groove = self._GROOVE_QSS.format(**C)
-        self.opacity_slider.set_styles(
-            normal_qss=groove + self._NORMAL_HANDLE_QSS.format(**C),
-            locked_qss=groove + self._LOCKED_HANDLE_QSS.format(**C),
-        )
-        self.opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
-        hl.addWidget(self.opacity_slider, 0)
-
     def set_opacity(self, value: float):
         """외부(매니저)에서 초기값 동기화. 시그널은 emit 하지 않는다.
         창 자체의 투명도는 매니저가 일괄 적용한다."""
@@ -222,8 +310,43 @@ class MasterWidget(QWidget):
     def _sync_lock_visual(self, pct: int):
         locked = pct <= self.LOCK_THRESHOLD
         self.opacity_slider.set_locked(locked)
-        # 잠금 모드에서는 본체 드래그로 위치 이동 불가. 슬라이더/클릭-토글은 그대로 작동.
+        # 잠금 모드면 매니저가 마스터/종목 위젯을 click-through 로 토글한다.
+        # _drag_locked 는 디바운스 직전(아직 플래그 적용 전) 짧은 사이의 방어.
         self._drag_locked = locked
+
+    def _sync_slider_window_pos(self):
+        """슬라이더 윈도우를 풋터 우측 끝에 정렬."""
+        if not hasattr(self, "slider_window"):
+            return
+        x = self.x() + self.W - self.SLIDER_RIGHT_MARGIN - _SliderWindow.WIDTH
+        y = self.y() + self.GRID_H
+        self.slider_window.move(x, y)
+
+    # ── 마스터 이동/표시 변화에 맞춰 슬라이더 윈도우 따라가기 ───────────────
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._sync_slider_window_pos()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_slider_window_pos()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_slider_window_pos()
+        if hasattr(self, "slider_window"):
+            self.slider_window.show()
+            self.slider_window.raise_()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if hasattr(self, "slider_window"):
+            self.slider_window.hide()
+
+    def closeEvent(self, event):
+        if hasattr(self, "slider_window"):
+            self.slider_window.close()
+        super().closeEvent(event)
 
     def _make_cell(self, grid: QGridLayout, row: int, col: int,
                    key_text: str, bold: bool = False) -> QLabel:
@@ -258,6 +381,8 @@ class MasterWidget(QWidget):
         if self.is_expanded:
             panel_h = cur_h - self.H
             self.expand_panel.setGeometry(0, self.H, base_w, panel_h)
+        # 폭이 바뀌면 슬라이더 윈도우의 우측 정렬도 재계산
+        self._sync_slider_window_pos()
 
     # ── 지표 갱신 ────────────────────────────────────────────────────────
     def update_metrics(self, total_invest: int, total_eval: int):
@@ -454,8 +579,11 @@ class MasterWidget(QWidget):
                 self.move(event.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, event):
-        # 드래그가 아니었으면 = 클릭 → 종목 목록 토글
-        if event.button() == Qt.MouseButton.LeftButton and not self._moved:
+        # 드래그가 아니고 잠금 모드도 아닐 때만 클릭 → 종목 목록 토글.
+        # 잠금 모드면 마스터 본체는 어떤 클릭에도 반응하지 않음 (슬라이더는 별개 위젯이라 영향 없음).
+        if (event.button() == Qt.MouseButton.LeftButton
+                and not self._moved
+                and not self._drag_locked):
             self.toggle_expand()
         self._drag_pos  = None
         self._press_pos = None
