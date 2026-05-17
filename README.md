@@ -219,7 +219,7 @@ pip install pyinstaller
 ```
 
 ### 아이콘 (변경됐을 때만)
-원본 [`macos_stock_app_icon_v2.svg`](macos_stock_app_icon_v2.svg) 로부터 `assets/Pinstock.icns` (macOS) · `assets/Pinstock.ico` (Windows) 를 재생성합니다.
+원본 [`pinstock_icon.svg`](pinstock_icon.svg) 로부터 `assets/Pinstock.icns` (macOS) · `assets/Pinstock.ico` (Windows) 를 재생성합니다.
 ```bash
 python scripts/build_icon.py
 ```

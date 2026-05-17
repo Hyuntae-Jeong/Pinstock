@@ -1,0 +1,97 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e2a4a"/>
+      <stop offset="100%" stop-color="#0d1526"/>
+    </linearGradient>
+    <linearGradient id="shimmer" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2a3a6a"/>
+      <stop offset="100%" stop-color="#141e38"/>
+    </linearGradient>
+    <linearGradient id="cloudGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#5d78b0" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#2a3d6e" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff6b8a" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#ff6b8a" stop-opacity="0.0"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="55%" stop-color="#ffffff" stop-opacity="0.0"/>
+    </linearGradient>
+    <filter id="lineGlow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="7.5" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <clipPath id="iconClip">
+      <rect x="0" y="0" width="1024" height="1024" rx="232"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bgGrad)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#shimmer)" opacity="0.5"/>
+
+  <g clip-path="url(#iconClip)">
+    <!-- cloud silhouette with vertical gradient -->
+    <path d="M0,205 Q256,137 375,188 Q512,119 649,164 Q785,85 1024,109 L1024,0 L0,0 Z"
+          fill="url(#cloudGrad)"/>
+
+    <!-- chart fill -->
+    <path d="M0,853
+             C 41,847 75,860 102,847
+             S 164,826 205,840
+             S 273,792 314,799
+             S 382,744 423,758
+             S 492,717 533,683
+             S 608,717 642,669
+             S 717,587 758,601
+             S 826,505 874,457
+             S 956,382 1024,335
+             L 1024,1024 L 0,1024 Z" fill="url(#chartFill)"/>
+
+    <!-- chart line (outer glow) -->
+    <path d="M0,853
+             C 41,847 75,860 102,847
+             S 164,826 205,840
+             S 273,792 314,799
+             S 382,744 423,758
+             S 492,717 533,683
+             S 608,717 642,669
+             S 717,587 758,601
+             S 826,505 874,457
+             S 956,382 1024,335"
+          fill="none" stroke="#ff6b8a" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" filter="url(#lineGlow)"/>
+
+    <!-- chart line (inner highlight) -->
+    <path d="M0,853
+             C 41,847 75,860 102,847
+             S 164,826 205,840
+             S 273,792 314,799
+             S 382,744 423,758
+             S 492,717 533,683
+             S 608,717 642,669
+             S 717,587 758,601
+             S 826,505 874,457
+             S 956,382 1024,335"
+          fill="none" stroke="#ff9eb5" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- axis tick marks -->
+    <g stroke="#3a4e7a" stroke-width="4">
+      <line x1="109" y1="908" x2="109" y2="928"/>
+      <line x1="246" y1="908" x2="246" y2="928"/>
+      <line x1="382" y1="908" x2="382" y2="928"/>
+      <line x1="519" y1="908" x2="519" y2="928"/>
+      <line x1="655" y1="908" x2="655" y2="928"/>
+      <line x1="792" y1="908" x2="792" y2="928"/>
+      <line x1="928" y1="908" x2="928" y2="928"/>
+    </g>
+
+    <!-- endpoint marker (matches line endpoint exactly) -->
+    <circle cx="1024" cy="335" r="31" fill="#ff6b8a" opacity="0.25"/>
+    <circle cx="1024" cy="335" r="14" fill="#ff6b8a"/>
+  </g>
+
+  <rect x="0" y="0" width="1024" height="461" rx="232" fill="url(#gloss)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="none" stroke="#ffffff" stroke-width="2.7" stroke-opacity="0.14"/>
+</svg>

@@ -5,9 +5,7 @@
     python scripts/build_icon.py --macos    # .icns 만
     python scripts/build_icon.py --windows  # .ico 만
 
-원본 SVG (`macos_stock_app_icon_v2.svg`) 의 viewBox 는 680x380 이지만
-실제 아이콘 모양은 (190, 20, 300, 300) 영역에 있으므로 그 부분만 잘라서
-정사각형으로 렌더링한다.
+원본 SVG (`pinstock_icon.svg`) 는 정사각형 viewBox 이므로 그대로 렌더링한다.
 """
 
 import argparse
@@ -16,20 +14,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage, QPainter
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QApplication
 
 
 REPO = Path(__file__).resolve().parent.parent
-SVG = REPO / "macos_stock_app_icon_v2.svg"
+SVG = REPO / "pinstock_icon.svg"
 ASSETS = REPO / "assets"
 OUT_ICNS = ASSETS / "Pinstock.icns"
 OUT_ICO = ASSETS / "Pinstock.ico"
-
-# 원본 SVG 내 아이콘 모양의 정사각형 영역
-CROP = QRectF(190, 20, 300, 300)
 
 # macOS .icns 가 요구하는 iconset 파일 이름과 픽셀 크기
 ICNS_SIZES = [
@@ -101,7 +96,6 @@ def main() -> int:
 
     _ = QApplication.instance() or QApplication([])
     renderer = QSvgRenderer(str(SVG))
-    renderer.setViewBox(CROP)
 
     if do_macos:
         if sys.platform != "darwin":
