@@ -1,14 +1,23 @@
 # 📈 한국 주식 위젯 (Pinstock)
 
-실시간 한국 주식 현재가를 화면에 항상 띄워두는 미니 위젯 프로그램입니다.
+실시간 한국 주식 현재가를 화면에 항상 띄워두는 미니 위젯 프로그램입니다.  
 **Windows · macOS** 모두 지원하며 같은 `stocks.json` 데이터를 공유합니다.
 
 <p align="center">
-  <img src="docs/screenshot-widgets.png" alt="여러 종목 위젯이 세로로 정렬된 모습. 장 외 시간에는 sparkline 자리에 최근 30일 일봉 캔들 차트가 표시된다." width="320">
+  <table>
+    <tr>
+      <td align="center"><b>Windows</b></td>
+      <td align="center"><b>macOS</b></td>
+    </tr>
+    <tr>
+      <td><img src="docs/screenshot-widgets.png" alt="Windows 화면 우상단에 종목별 위젯이 세로로 정렬된 모습. 장 외 시간에는 sparkline 자리에 최근 30일 일봉 캔들 차트가 표시된다." width="320"></td>
+      <td><img src="docs/screenshot-macos.png" alt="macOS 메뉴바 ₩ 아이콘을 클릭하면 펼쳐지는 팝오버 패널. 상단 포트폴리오 요약 + 종목별 현재가·등락률·sparkline + 하단 액션 바." width="320"></td>
+    </tr>
+  </table>
 </p>
 
-> **Windows** — 화면 우상단에 종목별 위젯이 세로 정렬되며 드래그로 모니터 어디든 자유롭게 배치할 수 있습니다.
-> **macOS** — 상단 메뉴바의 ₩ 아이콘을 클릭하면 종목 리스트가 팝오버 패널로 펼쳐집니다.
+> **Windows** — 화면 우상단에 종목별 위젯이 세로 정렬되며 드래그로 모니터 어디든 자유롭게 배치할 수 있습니다.  
+> **macOS** — 상단 메뉴바의 아이콘을 클릭하면 종목 리스트가 팝오버 패널로 펼쳐집니다.
 > 두 OS 모두 장중에는 당일 분봉 sparkline 이, 장 외 시간·주말·공휴일에는 최근 30일 일봉 캔들 차트로 자동 폴백됩니다.
 
 ---
