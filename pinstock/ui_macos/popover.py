@@ -502,25 +502,34 @@ class Popover(QWidget):
         hl.setContentsMargins(8, 6, 8, 6)
         hl.setSpacing(4)
 
-        def make_btn(label: str, tooltip: str, slot) -> QPushButton:
+        def make_btn(label: str, tooltip: str, slot, *,
+                     color: str | None = None,
+                     weight: str = "normal",
+                     size: int = 16,
+                     padding: str = "6px 10px") -> QPushButton:
             b = QPushButton(label)
             b.setToolTip(tooltip)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent;
-                    color: {C['text']};
+                    color: {color or C['text']};
                     border: none;
                     border-radius: 6px;
-                    padding: 6px 10px;
-                    font-size: 16px;
+                    padding: {padding};
+                    font-size: {size}px;
+                    font-weight: {weight};
                 }}
                 QPushButton:hover {{ background: {C['surface']}; }}
             """)
             b.clicked.connect(slot)
             return b
 
-        hl.addWidget(make_btn("➕", "종목 추가",   self.add_stock_requested.emit))
+        # "+"는 텍스트 글리프라 emoji 색이 안 먹는다 → 초록색 강제로 "추가" 의미 강조
+        # padding 비대칭(top<bottom)으로 수학 축에 걸친 "+"의 시각 중심을 위로 보정
+        hl.addWidget(make_btn("+", "종목 추가", self.add_stock_requested.emit,
+                              color=C['green'], weight="bold", size=28,
+                              padding="4px 10px 8px 10px"))
         hl.addWidget(make_btn("📋", "종목 관리",   self.manage_stocks_requested.emit))
         hl.addWidget(make_btn("📤", "Excel 내보내기", self.export_requested.emit))
         hl.addWidget(make_btn("📥", "Excel 가져오기", self.import_requested.emit))
