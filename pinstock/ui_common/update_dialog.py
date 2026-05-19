@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 
 from ..__version__ import __version__
 from ..core import updater
-from .theme import C, DIALOG_STYLE
+from ..ui_windows.theme import C, DIALOG_STYLE
 
 
 # ─── 백그라운드 통신 신호 (메인 스레드로 안전하게 넘기기) ─────────────────

@@ -53,7 +53,7 @@ from .floating_widget import StockWidget
 from .master_widget import MasterWidget
 from .toggle_button import ToggleButton
 from .manage_dialog import StockDialog, ManageStocksDialog, ImportModeDialog
-from .update_dialog import UpdateDialog
+from ..ui_common.update_dialog import UpdateDialog
 
 
 # ─── 전체 위젯 관리자 ─────────────────────────────────────────────────────────
