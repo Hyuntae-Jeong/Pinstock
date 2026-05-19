@@ -193,6 +193,91 @@ class WidgetManager:
         if self.is_hidden:
             self.toggle_visibility()
 
+    # ── 마스터 화면에 모든 위젯 모으기 ─────────────────────────────────────
+    def gather_to_master_screen(self):
+        """모든 위젯을 마스터 위젯이 있는 화면으로 끌어모아 column-wrap 정렬.
+        멀티 모니터에 분산된 위젯을 한 화면에 모을 때 사용.
+        - 마스터 표시 중: 그 모니터 우상단에 마스터를 두고 아래로 column-wrap
+        - 마스터 없음/숨김: 주 모니터 우상단부터 column-wrap (fallback)"""
+        MARGIN_X      = 20
+        MARGIN_Y      = 60
+        MARGIN_BOTTOM = 20
+        GAP           = 4
+        COL_GAP       = 8
+
+        # 대상 화면 결정: 마스터 표시 중이면 그 모니터, 아니면 주 모니터
+        master_active = bool(self.master_widget and self.master_widget.isVisible())
+        if master_active:
+            mc = self.master_widget.frameGeometry().center()
+            target_screen = QApplication.screenAt(mc) or QApplication.primaryScreen()
+        else:
+            target_screen = QApplication.primaryScreen()
+
+        geo = target_screen.availableGeometry()
+        widget_w = self.uniform_w
+
+        # 마스터 위젯을 대상 화면 우상단 첫자리에 (표시 중일 때만)
+        master_offset = 0
+        mx = my = None
+        if master_active:
+            mx = geo.x() + geo.width() - self.master_widget.width() - MARGIN_X
+            my = geo.y() + MARGIN_Y
+            self.master_widget.move(mx, my)
+            self.master_pos = [mx, my]
+            master_offset = self.master_widget.height() + GAP
+
+        # 모든 종목 위젯을 대상 화면에 stocks 순서대로 column-wrap 정렬
+        col_top_y = geo.y() + MARGIN_Y + master_offset
+        step_y    = StockWidget.COMPACT_H + GAP
+        avail_h   = geo.y() + geo.height() - MARGIN_BOTTOM - col_top_y
+        max_per_col = max(1, avail_h // step_y)
+        first_col_x = geo.x() + geo.width() - widget_w - MARGIN_X
+
+        for i, s in enumerate(self.stocks):
+            w = self.widgets.get(s["code"])
+            if not w:
+                continue
+            col_idx = i // max_per_col
+            row_idx = i %  max_per_col
+            x = first_col_x - col_idx * (widget_w + COL_GAP)
+            y = col_top_y + row_idx * step_y
+            w.move(x, y)
+            s["pos"] = [x, y]
+
+        # 토글 버튼: 마스터 옆 > 마지막 종목 옆 > 대상 화면 우상단 fallback
+        btn_size = ToggleButton.SIZE
+        if master_active:
+            btn_x = mx - btn_size - GAP
+            top_y = my
+            bot_y = my + btn_size + GAP
+        elif self.stocks:
+            last_pos = self.stocks[-1].get("pos") or [0, 0]
+            btn_x = last_pos[0] - btn_size - GAP
+            top_y = last_pos[1]
+            bot_y = top_y + btn_size + GAP
+        else:
+            btn_x = geo.x() + geo.width() - btn_size - MARGIN_X
+            top_y = geo.y() + MARGIN_Y
+            bot_y = top_y + btn_size + GAP
+
+        if self.hide_all_btn:
+            self.hide_all_btn.move(btn_x, top_y)
+            self.hide_all_btn_pos = [btn_x, top_y]
+            if not self.is_hidden:
+                self.hide_all_btn.show()
+        if self.hide_master_btn:
+            self.hide_master_btn.move(btn_x, bot_y)
+            self.hide_master_btn_pos = [btn_x, bot_y]
+            if self.master_visible and not self.is_hidden:
+                self.hide_master_btn.show()
+            else:
+                self.hide_master_btn.hide()
+
+        self._save_config()
+        # 숨김 상태라면 자동으로 다시 표시
+        if self.is_hidden:
+            self.toggle_visibility()
+
     # ── 통일 너비 계산/적용 ───────────────────────────────────────────────
     def _calc_uniform_width(self) -> int:
         """모든 종목명 중 가장 긴 이름 기준 통일 너비."""
@@ -229,6 +314,7 @@ class WidgetManager:
         self.toggle_act = QAction("🙈   숨기기", menu)
         self.master_toggle_act = QAction(self._master_toggle_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
+        gather_act = QAction("🎯   마스터 화면에 정렬", menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
@@ -237,6 +323,7 @@ class WidgetManager:
         self.toggle_act.triggered.connect(self.toggle_visibility)
         self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
         reset_act.triggered.connect(self.reset_positions)
+        gather_act.triggered.connect(self.gather_to_master_screen)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
@@ -248,6 +335,7 @@ class WidgetManager:
         menu.addAction(self.toggle_act)
         menu.addAction(self.master_toggle_act)
         menu.addAction(reset_act)
+        menu.addAction(gather_act)
         menu.addSeparator()
         menu.addAction(quit_act)
 
