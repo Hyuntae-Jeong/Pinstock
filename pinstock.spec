@@ -15,11 +15,17 @@ IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
 
 APP_NAME = "Pinstock"
-APP_VERSION = "0.1.0"
 BUNDLE_ID = "com.hyuntae.pinstock"
 
 # spec 파일이 위치한 디렉토리를 프로젝트 루트로 본다.
 ROOT = Path(SPECPATH).resolve()
+
+# 버전은 pinstock/__version__.py 가 단일 진실값. CI 가 태그에서 추출해 덮어쓴다.
+_version_ns = {}
+exec((ROOT / "pinstock" / "__version__.py").read_text(encoding="utf-8"), _version_ns)
+APP_VERSION = _version_ns["__version__"]
+# macOS CFBundle 필드는 X.Y.Z 만 받음 → PEP 440 local part("+dev") 제거
+APP_VERSION_BUNDLE = APP_VERSION.split("+", 1)[0]
 
 ICON_MAC = str(ROOT / "assets" / "Pinstock.icns")
 ICON_WIN = str(ROOT / "assets" / "Pinstock.ico")
@@ -96,8 +102,8 @@ if IS_MAC:
             # 사용자에게 보이는 메타데이터
             "CFBundleName": APP_NAME,
             "CFBundleDisplayName": APP_NAME,
-            "CFBundleShortVersionString": APP_VERSION,
-            "CFBundleVersion": APP_VERSION,
+            "CFBundleShortVersionString": APP_VERSION_BUNDLE,
+            "CFBundleVersion": APP_VERSION_BUNDLE,
             # 네이버 금융 API 접근 — App Sandbox 안 쓰지만 명시
             "NSAppTransportSecurity": {
                 "NSAllowsArbitraryLoads": False,

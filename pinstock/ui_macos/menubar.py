@@ -39,6 +39,7 @@ class MenuBarIcon(QObject):
     """
 
     toggle_popover_requested = pyqtSignal(QPoint, int)   # anchor_global_pos, anchor_width
+    notification_clicked     = pyqtSignal()              # 토스트 클릭 (업데이트 알림 등)
 
     def __init__(self, app: QApplication, parent: QObject | None = None):
         super().__init__(parent)
@@ -46,6 +47,7 @@ class MenuBarIcon(QObject):
         self.tray = QSystemTrayIcon(self)
         self.tray.setToolTip("Pinstock")
         self.tray.activated.connect(self._on_activated)
+        self.tray.messageClicked.connect(self.notification_clicked.emit)
 
         if _ICON_TEMPLATE.exists():
             icon = self._render_svg_icon(_ICON_TEMPLATE)
@@ -104,6 +106,20 @@ class MenuBarIcon(QObject):
         ):
             anchor_pos, anchor_w = self._anchor_position()
             self.toggle_popover_requested.emit(anchor_pos, anchor_w)
+
+    # ── 알림 토스트 ───────────────────────────────────────────────────────
+    def show_notification(self, title: str, body: str, duration_ms: int = 7000):
+        """macOS 알림센터로 표시되는 토스트. 클릭 시 notification_clicked emit.
+
+        QSystemTrayIcon.showMessage 는 macOS 에서 자동으로 알림센터 항목으로
+        포워딩되므로 별도 Notification API 를 쓸 필요가 없다. 시스템 설정의
+        "알림 허용" 이 꺼져 있으면 조용히 무시된다.
+        """
+        self.tray.showMessage(
+            title, body,
+            QSystemTrayIcon.MessageIcon.Information,
+            duration_ms,
+        )
 
     def _anchor_position(self) -> tuple[QPoint, int]:
         """팝오버를 아래에 띄울 기준 좌표(= 트레이 아이콘 하단 중앙).

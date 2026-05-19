@@ -10,11 +10,14 @@ import os
 import json
 import copy
 import shutil
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 
 from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog
 
+from ..__version__ import __version__
+from ..core import updater
 from ..core.api import fetch_stock, fetch_minute_chart, fetch_daily_chart
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
@@ -23,9 +26,21 @@ from ..core.storage import (
 from ..ui_windows.manage_dialog import (
     StockDialog, ManageStocksDialog, ImportModeDialog,
 )
+from ..ui_common.update_dialog import UpdateDialog
 
 from .popover import Popover
 from .menubar import MenuBarIcon
+
+
+# ─── 자동 업데이트 체크 설정 (Windows 매니저와 동일) ──────────────────────
+_AUTO_CHECK_INTERVAL = timedelta(hours=24)
+_AUTO_CHECK_STARTUP_DELAY_MS = 10 * 1000      # 앱 시작 후 10초 뒤
+_PREV_ERROR_CHECK_DELAY_MS = 1500              # 시작 직후 1.5초
+
+
+class _UpdateCheckSignals(QObject):
+    """백그라운드 fetch 결과를 메인 스레드로 안전하게 옮기는 통로."""
+    done = pyqtSignal(object)   # ReleaseInfo or None
 
 
 # ─── 종목별 시세/차트 폴링 워커 ───────────────────────────────────────────────
@@ -114,6 +129,11 @@ class MacAppManager(QObject):
         self.hide_master_btn_pos: list | None = None
         self.assets_hidden: bool = False
         self.popover_opacity: float = 1.0
+        # 자동 업데이트 체크 상태
+        self.update_last_check_at: datetime | None = None
+        self._cached_release: updater.ReleaseInfo | None = None
+        self._update_signals = _UpdateCheckSignals()
+        self._update_signals.done.connect(self._on_auto_check_done)
         self._load_config()
 
         # UI
@@ -122,10 +142,12 @@ class MacAppManager(QObject):
 
         # 시그널 연결
         self.menubar.toggle_popover_requested.connect(self._on_toggle_popover)
+        self.menubar.notification_clicked.connect(self.open_update_dialog)
         self.popover.add_stock_requested.connect(self.open_add_dialog)
         self.popover.manage_stocks_requested.connect(self.open_manage_dialog)
         self.popover.export_requested.connect(self.open_export_dialog)
         self.popover.import_requested.connect(self.open_import_dialog)
+        self.popover.check_update_requested.connect(self.open_update_dialog)
         self.popover.quit_requested.connect(self.app.quit)
         self.popover.edit_requested.connect(self._on_edit_request)
         self.popover.delete_requested.connect(self._on_delete_request)
@@ -144,6 +166,11 @@ class MacAppManager(QObject):
         # 종목별 폴링 시작
         for i, s in enumerate(self.stocks):
             self._spawn_fetcher(s["code"], stagger_idx=i)
+
+        # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
+        QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_previous_update_error)
+        # 시작 10초 뒤 — 자동 업데이트 체크 (throttle/can_self_update 검사 후 실제 호출)
+        QTimer.singleShot(_AUTO_CHECK_STARTUP_DELAY_MS, self._maybe_run_auto_update_check)
 
     # ── 앱 active/inactive 트랜지션 ───────────────────────────────────────
     # ApplicationActivate 이벤트와 applicationStateChanged 시그널 양쪽에
@@ -317,6 +344,14 @@ class MacAppManager(QObject):
                 self.popover_opacity = max(0.6, min(1.0, opacity))
             except (TypeError, ValueError):
                 self.popover_opacity = 1.0
+            # 자동 업데이트 메타 — last_check_at 만 (24h throttle 용)
+            upd = data.get("update") or {}
+            last_at = upd.get("last_check_at")
+            if isinstance(last_at, str):
+                try:
+                    self.update_last_check_at = datetime.fromisoformat(last_at)
+                except ValueError:
+                    self.update_last_check_at = None
 
     def _save_config(self):
         # Windows 와 호환되는 스키마 — Mac 에서는 의미 없는 필드도 보존만 함
@@ -333,6 +368,10 @@ class MacAppManager(QObject):
             "assets_hidden": self.assets_hidden,
             "popover_opacity": self.popover_opacity,
         }
+        if self.update_last_check_at is not None:
+            data["update"] = {
+                "last_check_at": self.update_last_check_at.isoformat(timespec="seconds"),
+            }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -571,3 +610,71 @@ class MacAppManager(QObject):
 
         for i, s in enumerate(self.stocks):
             self._spawn_fetcher(s["code"], stagger_idx=i)
+
+    # ── 업데이트 확인 ─────────────────────────────────────────────────────
+    # Windows WidgetManager 와 1:1 대응되는 패턴 — 다이얼로그가 manager 캐시를
+    # 갱신하도록 콜백을 넘겨주고, throttle/뱃지/토스트는 manager 가 책임진다.
+    def open_update_dialog(self):
+        dlg = UpdateDialog(on_release_seen=self._on_release_seen)
+        dlg.exec()
+
+    def _on_release_seen(self, release: updater.ReleaseInfo):
+        """UpdateDialog 가 API 조회에 성공했을 때 호출."""
+        self.update_last_check_at = datetime.now()
+        self._cached_release = release
+        self._save_config()
+        self._refresh_update_badge()
+
+    def _maybe_run_auto_update_check(self):
+        """시작 시/주기적 체크 진입점. throttle + can_self_update 검사."""
+        if not updater.can_self_update():
+            return
+        now = datetime.now()
+        if (
+            self.update_last_check_at is not None
+            and (now - self.update_last_check_at) < _AUTO_CHECK_INTERVAL
+        ):
+            return
+
+        def worker():
+            rel = updater.fetch_latest_release()
+            self._update_signals.done.emit(rel)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_auto_check_done(self, release):
+        """백그라운드 fetch 완료 — 메인 스레드에서 호출됨."""
+        if release is None:
+            # 실패는 silent. last_check_at 갱신 안 함 → 다음 실행 때 재시도.
+            return
+        self.update_last_check_at = datetime.now()
+        self._cached_release = release
+        self._save_config()
+        self._refresh_update_badge()
+        if updater.is_newer(__version__, release.version):
+            self._show_update_toast(release)
+
+    def _refresh_update_badge(self):
+        """팝오버 🔄 버튼에 새 버전 표시 토글."""
+        has_update = (
+            self._cached_release is not None
+            and updater.is_newer(__version__, self._cached_release.version)
+        )
+        self.popover.set_update_available(has_update)
+
+    def _show_update_toast(self, release: updater.ReleaseInfo):
+        """macOS 알림센터 토스트 — 클릭하면 menubar.notification_clicked → open_update_dialog."""
+        self.menubar.show_notification(
+            "Pinstock 업데이트 가능",
+            f"새 버전 {release.tag} 가 있습니다. 클릭하여 확인하세요.",
+        )
+
+    def _check_previous_update_error(self):
+        """이전 실행에서 헬퍼가 남긴 에러 로그가 있으면 사용자에게 한 번 보여주고 삭제."""
+        log = updater.read_and_clear_last_error()
+        if not log:
+            return
+        QMessageBox.warning(
+            None,
+            "이전 업데이트 실패",
+            updater.humanize_error(log) + "\n\n오류 원문:\n" + log,
+        )
