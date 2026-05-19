@@ -39,6 +39,7 @@ from .floating_widget import StockWidget
 from .master_widget import MasterWidget
 from .toggle_button import ToggleButton
 from .manage_dialog import StockDialog, ManageStocksDialog, ImportModeDialog
+from .update_dialog import UpdateDialog
 
 
 # ─── 전체 위젯 관리자 ─────────────────────────────────────────────────────────
@@ -378,6 +379,7 @@ class WidgetManager:
         self.master_toggle_act = QAction(self._master_toggle_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
         gather_act = QAction("🎯   마스터 화면에 정렬", menu)
+        update_act = QAction("🔄   업데이트 확인", menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
@@ -387,6 +389,7 @@ class WidgetManager:
         self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
         reset_act.triggered.connect(self.reset_positions)
         gather_act.triggered.connect(self.gather_to_master_screen)
+        update_act.triggered.connect(self.open_update_dialog)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
@@ -400,6 +403,7 @@ class WidgetManager:
         menu.addAction(reset_act)
         menu.addAction(gather_act)
         menu.addSeparator()
+        menu.addAction(update_act)
         menu.addAction(quit_act)
 
         self.tray.setContextMenu(menu)
@@ -749,6 +753,11 @@ class WidgetManager:
         # 숨김 상태에서 새 종목을 추가한 경우 자동으로 표시 상태로 전환
         if self.is_hidden:
             self.toggle_visibility()
+
+    # ── 업데이트 확인 ─────────────────────────────────────────────────────
+    def open_update_dialog(self):
+        dlg = UpdateDialog()
+        dlg.exec()
 
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
     def open_manage_dialog(self):

@@ -51,11 +51,16 @@ def _parse(version: str) -> tuple[int, ...]:
 
 
 def is_newer(current: str, latest: str) -> bool:
-    """latest 가 current 보다 높은 버전이면 True. 개발 빌드는 항상 False."""
-    if is_dev_build(current):
-        return False
+    """latest 가 current 보다 높은 버전이면 True. 순수 버전 비교.
+
+    PEP 440 로컬 식별자(+xxx)는 비교에서 제외 — placeholder("0.0.0+dev") 도
+    자연스럽게 0.0.0 으로 본다. "자동 업데이트를 트리거해도 되는가" 는 별개
+    질문이므로 호출측에서 `can_self_update()` 와 함께 사용할 것.
+    """
+    cur = current.split("+", 1)[0]
+    lat = latest.split("+", 1)[0]
     try:
-        return _parse(latest) > _parse(current)
+        return _parse(lat) > _parse(cur)
     except ValueError:
         return False
 
