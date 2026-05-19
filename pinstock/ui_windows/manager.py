@@ -5,16 +5,28 @@ import sys
 import json
 import copy
 import shutil
+import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QApplication, QMenu, QSystemTrayIcon, QMessageBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal
 from PyQt6.QtGui import (
     QIcon, QAction, QPixmap, QPainter, QFont, QColor, QBrush, QPen,
 )
+
+
+# ─── 자동 업데이트 체크 설정 ──────────────────────────────────────────────
+_AUTO_CHECK_INTERVAL = timedelta(hours=24)
+_AUTO_CHECK_STARTUP_DELAY_MS = 10 * 1000      # 앱 시작 후 10초 뒤
+_PREV_ERROR_CHECK_DELAY_MS = 1500              # 시작 직후 1.5초
+
+
+class _UpdateCheckSignals(QObject):
+    """백그라운드 fetch 결과를 메인 스레드로 안전하게 옮기는 통로."""
+    done = pyqtSignal(object)   # ReleaseInfo or None
 
 
 def _resolve_app_icon() -> QIcon:
@@ -29,6 +41,8 @@ def _resolve_app_icon() -> QIcon:
         return QIcon(str(ico))
     return QIcon()
 
+from ..__version__ import __version__
+from ..core import updater
 from ..core.api import fetch_stock
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
@@ -70,9 +84,20 @@ class WidgetManager:
         self._opacity_settle_timer.setSingleShot(True)
         self._opacity_settle_timer.timeout.connect(self._on_opacity_settle)
 
+        # 자동 업데이트 체크 상태
+        self.update_last_check_at: datetime | None = None
+        self._cached_release: updater.ReleaseInfo | None = None
+        self._update_signals = _UpdateCheckSignals()
+        self._update_signals.done.connect(self._on_auto_check_done)
+
         self._load_config()
         self._setup_tray()
         self._spawn_all()
+
+        # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
+        QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_previous_update_error)
+        # 시작 10초 뒤 — 자동 업데이트 체크 (throttle/can_self_update 검사 후 실제 호출)
+        QTimer.singleShot(_AUTO_CHECK_STARTUP_DELAY_MS, self._maybe_run_auto_update_check)
 
     # ── 전체 위젯 표시/숨김 토글 ─────────────────────────────────────────
     def toggle_visibility(self):
@@ -379,7 +404,7 @@ class WidgetManager:
         self.master_toggle_act = QAction(self._master_toggle_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
         gather_act = QAction("🎯   마스터 화면에 정렬", menu)
-        update_act = QAction("🔄   업데이트 확인", menu)
+        self.update_act = QAction("🔄   업데이트 확인", menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
@@ -389,7 +414,7 @@ class WidgetManager:
         self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
         reset_act.triggered.connect(self.reset_positions)
         gather_act.triggered.connect(self.gather_to_master_screen)
-        update_act.triggered.connect(self.open_update_dialog)
+        self.update_act.triggered.connect(self.open_update_dialog)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
@@ -403,11 +428,14 @@ class WidgetManager:
         menu.addAction(reset_act)
         menu.addAction(gather_act)
         menu.addSeparator()
-        menu.addAction(update_act)
+        menu.addAction(self.update_act)
         menu.addAction(quit_act)
 
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
+        # 업데이트 토스트 클릭 → 업데이트 다이얼로그
+        # (현재 showMessage 는 업데이트 알림 한 종류뿐이라 단일 핸들러로 충분)
+        self.tray.messageClicked.connect(self.open_update_dialog)
         self.tray.show()
 
     def _on_tray_activated(self, reason):
@@ -478,6 +506,14 @@ class WidgetManager:
                 self.popover_opacity = max(0.1, min(1.0, opacity))
             except (TypeError, ValueError):
                 self.popover_opacity = 1.0
+            # 자동 업데이트 메타 — last_check_at 만 (24h throttle 용)
+            upd = data.get("update") or {}
+            last_at = upd.get("last_check_at")
+            if isinstance(last_at, str):
+                try:
+                    self.update_last_check_at = datetime.fromisoformat(last_at)
+                except ValueError:
+                    self.update_last_check_at = None
 
     def _save_config(self):
         data = {
@@ -493,6 +529,10 @@ class WidgetManager:
             "assets_hidden": self.assets_hidden,
             "popover_opacity": self.popover_opacity,
         }
+        if self.update_last_check_at is not None:
+            data["update"] = {
+                "last_check_at": self.update_last_check_at.isoformat(timespec="seconds"),
+            }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -756,8 +796,76 @@ class WidgetManager:
 
     # ── 업데이트 확인 ─────────────────────────────────────────────────────
     def open_update_dialog(self):
-        dlg = UpdateDialog()
+        # 수동 체크 — 다이얼로그가 fetch 한 결과를 manager 캐시에도 반영해서
+        # 트레이 뱃지/throttle 이 즉시 갱신되도록 콜백 전달
+        dlg = UpdateDialog(on_release_seen=self._on_release_seen)
         dlg.exec()
+
+    def _on_release_seen(self, release: updater.ReleaseInfo):
+        """UpdateDialog 가 API 조회에 성공했을 때 호출."""
+        self.update_last_check_at = datetime.now()
+        self._cached_release = release
+        self._save_config()
+        self._refresh_update_badge()
+
+    def _maybe_run_auto_update_check(self):
+        """시작 시/주기적 체크 진입점. throttle + can_self_update 검사."""
+        if not updater.can_self_update():
+            return
+        now = datetime.now()
+        if (
+            self.update_last_check_at is not None
+            and (now - self.update_last_check_at) < _AUTO_CHECK_INTERVAL
+        ):
+            return
+        # 백그라운드 fetch
+        def worker():
+            rel = updater.fetch_latest_release()
+            self._update_signals.done.emit(rel)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_auto_check_done(self, release):
+        """백그라운드 fetch 완료 — 메인 스레드에서 호출됨."""
+        if release is None:
+            # 실패는 silent. last_check_at 갱신 안 함 → 다음 실행 때 재시도.
+            return
+        self.update_last_check_at = datetime.now()
+        self._cached_release = release
+        self._save_config()
+        self._refresh_update_badge()
+        if updater.is_newer(__version__, release.version):
+            self._show_update_toast(release)
+
+    def _refresh_update_badge(self):
+        """트레이 메뉴의 '업데이트 확인' 액션 텍스트에 새 버전 표시 점 토글."""
+        if not hasattr(self, "update_act"):
+            return
+        has_update = (
+            self._cached_release is not None
+            and updater.is_newer(__version__, self._cached_release.version)
+        )
+        suffix = "  ●" if has_update else ""
+        self.update_act.setText("🔄   업데이트 확인" + suffix)
+
+    def _show_update_toast(self, release: updater.ReleaseInfo):
+        """Windows 트레이 토스트 — 클릭하면 messageClicked → open_update_dialog."""
+        self.tray.showMessage(
+            "Pinstock 업데이트 가능",
+            f"새 버전 {release.tag} 가 있습니다. 클릭하여 확인하세요.",
+            QSystemTrayIcon.MessageIcon.Information,
+            7000,
+        )
+
+    def _check_previous_update_error(self):
+        """이전 실행에서 헬퍼가 남긴 에러 로그가 있으면 사용자에게 한 번 보여주고 삭제."""
+        log = updater.read_and_clear_last_error()
+        if not log:
+            return
+        QMessageBox.warning(
+            None,
+            "이전 업데이트 실패",
+            updater.humanize_error(log) + "\n\n오류 원문:\n" + log,
+        )
 
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
     def open_manage_dialog(self):

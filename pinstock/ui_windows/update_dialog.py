@@ -12,7 +12,7 @@
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
@@ -43,7 +43,13 @@ _S_ERROR = "error"
 class UpdateDialog(QDialog):
     """업데이트 확인 + 다운로드 + 적용을 한 모달에서 처리."""
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        on_release_seen: Optional[Callable[[updater.ReleaseInfo], None]] = None,
+    ):
+        """on_release_seen: API 조회 성공 시 호출되는 콜백. manager 가 last_check_at /
+        cached_release 를 갱신하여 트레이 뱃지/throttle 을 업데이트할 때 사용."""
         super().__init__(parent)
         self.setWindowTitle("업데이트 확인")
         self.setMinimumWidth(460)
@@ -54,6 +60,7 @@ class UpdateDialog(QDialog):
         self._signals.download_progress.connect(self._on_download_progress)
         self._signals.download_done.connect(self._on_download_done)
 
+        self._on_release_seen = on_release_seen
         self._release: Optional[updater.ReleaseInfo] = None
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
@@ -199,6 +206,12 @@ class UpdateDialog(QDialog):
             self._show_error("최신 버전 정보를 가져오지 못했습니다. 네트워크 상태를 확인해주세요.")
             return
         self._release = release
+        # manager 의 캐시/throttle 갱신
+        if self._on_release_seen is not None:
+            try:
+                self._on_release_seen(release)
+            except Exception as e:
+                print(f"[update_dialog] on_release_seen 콜백 오류: {e}")
         if updater.is_newer(__version__, release.version):
             self._set_state(_S_UPDATE_AVAILABLE)
         else:
