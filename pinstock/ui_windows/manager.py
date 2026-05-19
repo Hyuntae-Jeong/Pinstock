@@ -122,9 +122,12 @@ class WidgetManager:
             self.master_pos = [mx, my]
             master_offset = self.master_widget.height() + GAP
 
-        # 위젯을 현재 속한 모니터별로 그룹화 (stocks 순서 보존)
+        # 위젯을 현재 속한 모니터별로 그룹화 (stocks 순서 보존).
+        # 숨김(hidden=True) 종목은 자리를 차지하지 않도록 제외 — 빈 슬롯 방지.
         groups: dict = {}
         for s in self.stocks:
+            if s.get("hidden", False):
+                continue
             w = self.widgets.get(s["code"])
             if not w:
                 continue
@@ -153,16 +156,20 @@ class WidgetManager:
 
         # 토글 버튼 위치:
         # 1) 마스터 표시 중 → 마스터 왼쪽에 위/아래
-        # 2) 마스터 없거나 숨김 + 종목 있음 → 맨 마지막 종목 위젯 왼쪽에 위/아래
+        # 2) 마스터 없거나 숨김 + 표시 종목 있음 → 마지막 표시 종목 위젯 왼쪽에 위/아래
         # 3) 둘 다 없음 → 화면 우상단 fallback
         btn_size = ToggleButton.SIZE
+        last_visible = next(
+            (s for s in reversed(self.stocks) if not s.get("hidden", False)),
+            None,
+        )
         if self.master_widget and self.master_widget.isVisible():
             btn_x = mx - btn_size - GAP
             top_y = my
             bot_y = my + btn_size + GAP
-        elif self.stocks:
-            # 마지막 종목 위젯 위치 (방금 위에서 self.stocks[-1]["pos"]에 저장됨)
-            last_pos = self.stocks[-1].get("pos") or [0, 0]
+        elif last_visible:
+            # 마지막 표시 종목 위젯 위치 (방금 위에서 pos 가 갱신됨)
+            last_pos = last_visible.get("pos") or [0, 0]
             btn_x = last_pos[0] - btn_size - GAP
             top_y = last_pos[1]
             bot_y = top_y + btn_size + GAP
@@ -226,17 +233,19 @@ class WidgetManager:
             self.master_pos = [mx, my]
             master_offset = self.master_widget.height() + GAP
 
-        # 모든 종목 위젯을 대상 화면에 stocks 순서대로 column-wrap 정렬
+        # 표시 종목만 stocks 순서대로 column-wrap 정렬 (숨김은 빈 슬롯 방지를 위해 제외)
+        visible_items = [
+            (s, self.widgets[s["code"]])
+            for s in self.stocks
+            if not s.get("hidden", False) and s["code"] in self.widgets
+        ]
         col_top_y = geo.y() + MARGIN_Y + master_offset
         step_y    = StockWidget.COMPACT_H + GAP
         avail_h   = geo.y() + geo.height() - MARGIN_BOTTOM - col_top_y
         max_per_col = max(1, avail_h // step_y)
         first_col_x = geo.x() + geo.width() - widget_w - MARGIN_X
 
-        for i, s in enumerate(self.stocks):
-            w = self.widgets.get(s["code"])
-            if not w:
-                continue
+        for i, (s, w) in enumerate(visible_items):
             col_idx = i // max_per_col
             row_idx = i %  max_per_col
             x = first_col_x - col_idx * (widget_w + COL_GAP)
@@ -244,14 +253,18 @@ class WidgetManager:
             w.move(x, y)
             s["pos"] = [x, y]
 
-        # 토글 버튼: 마스터 옆 > 마지막 종목 옆 > 대상 화면 우상단 fallback
+        # 토글 버튼: 마스터 옆 > 마지막 표시 종목 옆 > 대상 화면 우상단 fallback
         btn_size = ToggleButton.SIZE
+        last_visible = next(
+            (s for s in reversed(self.stocks) if not s.get("hidden", False)),
+            None,
+        )
         if master_active:
             btn_x = mx - btn_size - GAP
             top_y = my
             bot_y = my + btn_size + GAP
-        elif self.stocks:
-            last_pos = self.stocks[-1].get("pos") or [0, 0]
+        elif last_visible:
+            last_pos = last_visible.get("pos") or [0, 0]
             btn_x = last_pos[0] - btn_size - GAP
             top_y = last_pos[1]
             bot_y = top_y + btn_size + GAP
@@ -277,6 +290,56 @@ class WidgetManager:
         # 숨김 상태라면 자동으로 다시 표시
         if self.is_hidden:
             self.toggle_visibility()
+
+    # ── 숨김 해제 종목 맨 밑 배치 ─────────────────────────────────────────
+    def _append_below_last_visible(self, newly_visible: list[dict]):
+        """hidden=True → False 로 막 전환된 종목들을, 현재 표시 중인 마지막
+        위젯 아래(같은 column → 화면 밑단 넘으면 왼쪽 새 column)에 순서대로 배치.
+        기존 표시 위젯이 하나도 없으면 reset_positions 로 fallback."""
+        MARGIN_Y      = 60
+        MARGIN_BOTTOM = 20
+        GAP           = 4
+        COL_GAP       = 8
+        step_y   = StockWidget.COMPACT_H + GAP
+        widget_w = self.uniform_w
+
+        # 이번에 새로 표시되는 종목 자신은 anchor 후보에서 제외
+        new_codes = {s["code"] for s in newly_visible}
+        anchor = None
+        for s in reversed(self.stocks):
+            if s.get("hidden", False) or s["code"] in new_codes:
+                continue
+            w = self.widgets.get(s["code"])
+            if w:
+                anchor = (s, w)
+                break
+
+        if anchor is None:
+            # 기존에 표시 위젯이 없으면 전체 정렬로 fallback
+            self.reset_positions()
+            return
+
+        s_anchor, w_anchor = anchor
+        pos_anchor = s_anchor.get("pos") or [w_anchor.x(), w_anchor.y()]
+        screen = (
+            QApplication.screenAt(w_anchor.frameGeometry().center())
+            or QApplication.primaryScreen()
+        )
+        geo = screen.availableGeometry()
+        bottom_limit = geo.y() + geo.height() - MARGIN_BOTTOM
+
+        x, y = pos_anchor[0], pos_anchor[1]
+        for s in newly_visible:
+            w = self.widgets.get(s["code"])
+            if not w:
+                continue
+            y = y + step_y
+            if y + StockWidget.COMPACT_H > bottom_limit:
+                # 다음 column (왼쪽으로)
+                x = x - widget_w - COL_GAP
+                y = geo.y() + MARGIN_Y
+            w.move(x, y)
+            s["pos"] = [x, y]
 
     # ── 통일 너비 계산/적용 ───────────────────────────────────────────────
     def _calc_uniform_width(self) -> int:
@@ -705,6 +768,8 @@ class WidgetManager:
 
         old_map = {s["code"]: s for s in self.stocks}
         new_map = {s["code"]: s for s in new_stocks}
+        # 변경 전 hidden 스냅샷 — hidden=True → False 전환을 잡아내기 위함
+        prev_hidden = {s["code"]: bool(s.get("hidden", False)) for s in self.stocks}
 
         # 삭제된 종목: 위젯 닫고 제거
         for code in list(old_map):
@@ -722,6 +787,7 @@ class WidgetManager:
                 added_idx += 1
 
         # 기존 종목: 평단가/수량/hidden 변경 반영
+        newly_visible: list[dict] = []   # 이번에 hidden=True→False 로 다시 표시된 종목
         for s in new_stocks:
             code = s["code"]
             if code in old_map and code in self.widgets:
@@ -737,10 +803,16 @@ class WidgetManager:
                         w.hide()
                     else:
                         w.show()
+                # 숨김 → 표시 전환 추적 (정렬 직후 빈 자리에 끼우지 않고 맨 밑에 배치)
+                if prev_hidden.get(code, False) and not w.data["hidden"]:
+                    newly_visible.append(s)
 
         # 순서 + 저장 + 너비 재계산
         self.stocks = new_stocks
         self._apply_uniform_width()
+        # 다시 표시된 종목들은 마지막 표시 위젯 아래로 배치 (사이 빈 칸에 끼우지 않음)
+        if newly_visible:
+            self._append_below_last_visible(newly_visible)
         self._save_config()
         self._recompute_master()
 
