@@ -24,6 +24,20 @@ def _normalize_us_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
 
 
+def _parse_yahoo_chart(symbol: str, range_: str = "1d", interval: str = "5m") -> dict | None:
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}"
+        f"?range={range_}&interval={interval}"
+    )
+    r = _SESSION.get(url, timeout=5)
+    if r.status_code != 200:
+        return None
+    payload = r.json().get("chart", {})
+    if payload.get("error"):
+        return None
+    return (payload.get("result") or [None])[0]
+
+
 # ─── 네이버 금융 API ───────────────────────────────────────────────────────────
 def fetch_stock(code: str) -> dict | None:
     """네이버 금융 모바일 API로 현재가 조회"""
@@ -101,6 +115,98 @@ def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict 
         return None
 
 
+# ─── Yahoo Finance 원달러 환율 API ─────────────────────────────────────────
+def fetch_usd_krw_rate() -> dict | None:
+    """Yahoo Finance API로 원달러 환율(USD/KRW)을 조회한다.
+
+    반환:
+    {'pair', 'rate', 'change_rate', 'change_price', 'currency', 'source'}
+    """
+    try:
+        result = _parse_yahoo_chart("USDKRW=X", range_="1d", interval="5m")
+        if not result:
+            return _fetch_usd_krw_rate_naver()
+        meta = result.get("meta", {}) or {}
+        rate = _to_float(meta.get("regularMarketPrice"))
+        prev_close = _to_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
+        if rate <= 0:
+            closes = [
+                _to_float(v)
+                for v in (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [])
+                if v is not None
+            ]
+            closes = [v for v in closes if v > 0]
+            rate = closes[-1] if closes else 0.0
+        if rate <= 0:
+            return _fetch_usd_krw_rate_naver()
+
+        change_price = rate - prev_close if prev_close else 0.0
+        change_rate = (change_price / prev_close * 100.0) if prev_close else 0.0
+        return {
+            "pair":         "USD/KRW",
+            "rate":         rate,
+            "change_rate":  change_rate,
+            "change_price": change_price,
+            "currency":     "KRW",
+            "source":       "Yahoo Finance",
+        }
+    except Exception as e:
+        print(f"[fetch_usd_krw_rate] 오류: {e}")
+        return _fetch_usd_krw_rate_naver()
+
+
+def fetch_usd_krw_chart(range_: str = "1d", interval: str = "5m") -> dict | None:
+    """Yahoo Finance API로 원달러 환율 시계열을 조회한다.
+    반환: {'rates': [float, ...], 'open': float} or None"""
+    try:
+        result = _parse_yahoo_chart("USDKRW=X", range_=range_, interval=interval)
+        if not result:
+            return None
+        quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
+        rates = [_to_float(v) for v in (quote_data.get("close") or []) if v is not None]
+        opens = [_to_float(v) for v in (quote_data.get("open") or []) if v is not None]
+        rates = [v for v in rates if v > 0]
+        opens = [v for v in opens if v > 0]
+        if len(rates) < 2:
+            return None
+        return {
+            "rates": rates,
+            "open":  opens[0] if opens else rates[0],
+        }
+    except Exception as e:
+        print(f"[fetch_usd_krw_chart] 오류: {e}")
+        return None
+
+
+def _fetch_usd_krw_rate_naver() -> dict | None:
+    url = "https://api.stock.naver.com/marketindex/exchange/FX_USDKRW"
+    try:
+        r = _SESSION.get(url, timeout=5)
+        if r.status_code != 200:
+            return None
+        info = (r.json().get("exchangeInfo") or {})
+        rate = _to_float(info.get("closePrice"))
+        if rate <= 0:
+            return None
+        change_price = _to_float(info.get("fluctuations"))
+        change_rate = _to_float(info.get("fluctuationsRatio"))
+        fluct_type = (info.get("fluctuationsType") or {}).get("code")
+        if str(fluct_type) in {"5", "FALLING"}:
+            change_price = -abs(change_price)
+            change_rate = -abs(change_rate)
+        return {
+            "pair":         "USD/KRW",
+            "rate":         rate,
+            "change_rate":  change_rate,
+            "change_price": change_price,
+            "currency":     "KRW",
+            "source":       "Naver Finance",
+        }
+    except Exception as e:
+        print(f"[_fetch_usd_krw_rate_naver] 오류: {e}")
+        return None
+
+
 # ─── Yahoo Finance 미국 주식 API ────────────────────────────────────────────
 def search_us_stocks(query: str, limit: int = 10) -> list[dict]:
     """Yahoo Finance 검색 API로 미국 주식/ETF 후보를 조회한다.
@@ -160,15 +266,8 @@ def fetch_us_stock(symbol: str) -> dict | None:
     if not symbol:
         return None
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}?range=1d&interval=5m"
     try:
-        r = _SESSION.get(url, timeout=5)
-        if r.status_code != 200:
-            return _fetch_us_stock_naver(symbol)
-        payload = r.json().get("chart", {})
-        if payload.get("error"):
-            return _fetch_us_stock_naver(symbol)
-        result = (payload.get("result") or [None])[0]
+        result = _parse_yahoo_chart(symbol, range_="1d", interval="5m")
         if not result:
             return _fetch_us_stock_naver(symbol)
         meta = result.get("meta", {}) or {}
@@ -206,15 +305,8 @@ def fetch_us_minute_chart(symbol: str) -> dict | None:
     if not symbol:
         return None
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}?range=1d&interval=5m"
     try:
-        r = _SESSION.get(url, timeout=5)
-        if r.status_code != 200:
-            return _fetch_us_minute_chart_naver(symbol)
-        payload = r.json().get("chart", {})
-        if payload.get("error"):
-            return _fetch_us_minute_chart_naver(symbol)
-        result = (payload.get("result") or [None])[0]
+        result = _parse_yahoo_chart(symbol, range_="1d", interval="5m")
         if not result:
             return _fetch_us_minute_chart_naver(symbol)
         quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
@@ -240,15 +332,8 @@ def fetch_us_daily_chart(symbol: str, range_: str = "3mo", max_candles: int = 30
     if not symbol:
         return None
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}?range={range_}&interval=1d"
     try:
-        r = _SESSION.get(url, timeout=5)
-        if r.status_code != 200:
-            return _fetch_us_daily_chart_naver(symbol, max_candles=max_candles)
-        payload = r.json().get("chart", {})
-        if payload.get("error"):
-            return _fetch_us_daily_chart_naver(symbol, max_candles=max_candles)
-        result = (payload.get("result") or [None])[0]
+        result = _parse_yahoo_chart(symbol, range_=range_, interval="1d")
         if not result:
             return _fetch_us_daily_chart_naver(symbol, max_candles=max_candles)
         quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
