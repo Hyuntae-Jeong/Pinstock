@@ -252,8 +252,10 @@ if errorlevel 1 (
 )
 
 REM 3) recreate install dir and extract zip
+REM   Windows 10 1803+ 내장 tar.exe(bsdtar) 만 ZIP 을 지원. PATH 가 Git Bash 의 GNU tar
+REM   를 먼저 잡는 경우가 있어 시스템 tar 의 절대 경로로 박는다.
 mkdir "%INSTALL_DIR%"
-tar -xf "%NEW_ZIP%" -C "%INSTALL_DIR%"
+"%SystemRoot%\System32\tar.exe" -xf "%NEW_ZIP%" -C "%INSTALL_DIR%"
 if errorlevel 1 (
     >"%ERR_LOG%" echo ERR_EXTRACT zip=%NEW_ZIP%
     goto rollback
