@@ -13,6 +13,7 @@ from PyQt6.QtGui import QFont, QFontMetrics, QScreen
 
 from ..ui_windows.theme import C, TRAY_MENU_STYLE
 from ..ui_windows.chart_widget import SparklineWidget
+from ..core.portfolio import stock_metrics
 
 
 # macOS 시스템 한글 폰트 (Malgun Gothic 의 Mac 대체)
@@ -36,7 +37,8 @@ class StockRow(QWidget):
     def __init__(self, stock_data: dict, parent=None):
         super().__init__(parent)
         self.data = stock_data
-        self.current_price: int = 0
+        self.current_price: float = 0
+        self.usd_krw_rate: float | None = None
         self.is_expanded: bool = False
         self._prev_close: float = 0.0
         self.assets_hidden: bool = False
@@ -168,6 +170,10 @@ class StockRow(QWidget):
 
         self._refresh_detail()
 
+    def set_usd_krw_rate(self, rate: float | None):
+        self.usd_krw_rate = rate
+        self._refresh_detail()
+
     def apply_minute(self, prices: list, open_price: float):
         self.sparkline.set_data(prices, open_price, self._prev_close)
 
@@ -178,10 +184,11 @@ class StockRow(QWidget):
         avg    = int(self.data.get("avg_price", 0))
         qty    = int(self.data.get("quantity", 0))
         price  = self.current_price or avg
-        invest = avg * qty
-        eval_  = price * qty
-        profit = eval_ - invest
-        prate  = (profit / invest * 100) if invest else 0
+        metrics = stock_metrics(self.data, price, self.usd_krw_rate)
+        invest = metrics["invest"]
+        eval_ = metrics["eval"]
+        profit = metrics["profit"]
+        prate = metrics["profit_rate"]
 
         sign  = "+" if profit >= 0 else ""
         color = C["red"] if profit >= 0 else C["blue"]
@@ -388,6 +395,7 @@ class Popover(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.rows: dict[str, StockRow] = {}
         self._assets_hidden: bool = False
+        self._usd_krw_rate: float | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -564,6 +572,7 @@ class Popover(QWidget):
                 continue
             row = StockRow(s)
             row.assets_hidden = self._assets_hidden
+            row.set_usd_krw_rate(self._usd_krw_rate)
             row.edit_requested.connect(self.edit_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
             self.rows[s["code"]] = row
@@ -579,6 +588,11 @@ class Popover(QWidget):
         row = self.rows.get(code)
         if row:
             row.apply_price(result)
+
+    def set_usd_krw_rate(self, rate: float | None):
+        self._usd_krw_rate = rate
+        for row in self.rows.values():
+            row.set_usd_krw_rate(rate)
 
     def update_stock_minute(self, code: str, prices: list, open_price: float):
         row = self.rows.get(code)

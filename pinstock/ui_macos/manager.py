@@ -15,7 +15,8 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog
 
-from ..core.api import fetch_stock, fetch_minute_chart, fetch_daily_chart
+from ..core.api import fetch_stock, fetch_minute_chart, fetch_daily_chart, fetch_usd_krw_rate
+from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
@@ -100,7 +101,8 @@ class MacAppManager(QObject):
 
         self.stocks: list[dict] = []
         self.fetchers: dict[str, StockFetcher] = {}
-        self.current_prices: dict[str, int] = {}
+        self.current_prices: dict[str, float] = {}
+        self.usd_krw_rate: float | None = None
         # 마지막 폴링 결과 캐시. set_stocks() 가 행 위젯을 폐기·재생성하면
         # 차트가 다음 60초 폴링 전까지 비어보여서, 직후에 다시 주입해 채운다.
         self.last_price_result: dict[str, dict] = {}
@@ -115,6 +117,9 @@ class MacAppManager(QObject):
         self.assets_hidden: bool = False
         self.popover_opacity: float = 1.0
         self._load_config()
+
+        self.fx_timer = QTimer(self)
+        self.fx_timer.timeout.connect(self._fetch_usd_krw_rate)
 
         # UI
         self.popover = Popover()
@@ -144,6 +149,7 @@ class MacAppManager(QObject):
         # 종목별 폴링 시작
         for i, s in enumerate(self.stocks):
             self._spawn_fetcher(s["code"], stagger_idx=i)
+        self._sync_fx_timer()
 
     # ── 앱 active/inactive 트랜지션 ───────────────────────────────────────
     # ApplicationActivate 이벤트와 applicationStateChanged 시그널 양쪽에
@@ -225,7 +231,7 @@ class MacAppManager(QObject):
             if s["code"] == code:
                 s["name"] = result["name"]
                 break
-        self.current_prices[code] = int(result["price"])
+        self.current_prices[code] = float(result["price"])
         self.last_price_result[code] = result
         self.popover.update_stock_price(code, result)
         self._recompute_summary()
@@ -268,17 +274,31 @@ class MacAppManager(QObject):
             self.popover.update_summary(0, 0)
             return
 
-        total_invest = 0
-        total_eval   = 0
-        for s in self.stocks:
-            if s.get("hidden", False):
-                continue
-            avg = int(s.get("avg_price", 0))
-            qty = int(s.get("quantity", 0))
-            total_invest += avg * qty
-            price = self.current_prices.get(s["code"], avg)
-            total_eval += price * qty
-        self.popover.update_summary(total_invest, total_eval)
+        totals = portfolio_totals(
+            self.stocks,
+            current_prices=self.current_prices,
+            usd_krw_rate=self.usd_krw_rate,
+        )
+        self.popover.update_summary(totals["total_invest"], totals["total_eval"])
+
+    def _fetch_usd_krw_rate(self):
+        result = fetch_usd_krw_rate()
+        if not result:
+            return
+        self.usd_krw_rate = float(result["rate"])
+        self.popover.set_usd_krw_rate(self.usd_krw_rate)
+        self._recompute_summary()
+
+    def _sync_fx_timer(self):
+        if any(is_us_stock(s) for s in self.stocks):
+            if not self.fx_timer.isActive():
+                self.fx_timer.start(60_000)
+            if self.usd_krw_rate is None:
+                self._fetch_usd_krw_rate()
+        else:
+            self.fx_timer.stop()
+            self.usd_krw_rate = None
+            self.popover.set_usd_krw_rate(None)
 
     # ── 설정 파일 ──────────────────────────────────────────────────────────
     def _load_config(self):
@@ -363,8 +383,9 @@ class MacAppManager(QObject):
 
         d["name"] = result["name"]
         self.stocks.append(d)
-        self.current_prices[code] = int(result["price"])
+        self.current_prices[code] = float(result["price"])
         self._save_config()
+        self._sync_fx_timer()
 
         # 팝오버 재구성 + 폴링 시작
         self._sync_popover_stocks()
@@ -377,6 +398,7 @@ class MacAppManager(QObject):
         dlg = ManageStocksDialog(
             stocks=copy.deepcopy(self.stocks),
             current_prices=current_prices,
+            usd_krw_rate=self.usd_krw_rate,
         )
         if not dlg.exec():
             return
@@ -399,6 +421,7 @@ class MacAppManager(QObject):
                 added_idx += 1
 
         self.stocks = new_stocks
+        self._sync_fx_timer()
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()
@@ -435,6 +458,7 @@ class MacAppManager(QObject):
         self.stocks = [s for s in self.stocks if s["code"] != code]
         self._kill_fetcher(code)
         self.current_prices.pop(code, None)
+        self._sync_fx_timer()
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()
@@ -457,7 +481,7 @@ class MacAppManager(QObject):
             path += ".xlsx"
 
         try:
-            export_stocks_to_excel(self.stocks, path, self.current_prices)
+            export_stocks_to_excel(self.stocks, path, self.current_prices, self.usd_krw_rate)
         except ImportError:
             QMessageBox.critical(
                 None, "라이브러리 없음",
@@ -568,6 +592,7 @@ class MacAppManager(QObject):
         self.current_prices.clear()
 
         self.stocks = normalize_stocks_schema(new_stocks)
+        self._sync_fx_timer()
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()

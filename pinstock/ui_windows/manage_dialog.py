@@ -10,6 +10,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from ..core.api import fetch_stock
+from ..core.portfolio import stock_metrics
 from .theme import C, DIALOG_STYLE
 from .form_widgets import (
     AutoSelectLineEdit, AutoSelectSpinBox, ArrowSpinBox, ToggleSwitch,
@@ -216,10 +217,12 @@ class ManageStocksDialog(QDialog):
 
     COLS = ["종목명", "종목코드", "평단가", "수량", "평가손익", "표시"]
 
-    def __init__(self, stocks: list[dict], current_prices: dict | None = None, parent=None):
+    def __init__(self, stocks: list[dict], current_prices: dict | None = None,
+                 usd_krw_rate: float | None = None, parent=None):
         super().__init__(parent)
         self._stocks: list[dict] = stocks   # 호출측에서 deepcopy 해서 전달
         self._current_prices: dict = current_prices or {}   # {code: 현재가}
+        self._usd_krw_rate = usd_krw_rate
         self._suppress_change: bool = False   # itemChanged 재귀 차단용
 
         self.setWindowTitle("종목 관리")
@@ -354,9 +357,8 @@ class ManageStocksDialog(QDialog):
         avg   = f"{avg_p:,} 원"
         qty   = f"{qty_n:,} 주"
 
-        # 평가손익 = (현재가 - 평단가) * 수량. 현재가 없으면 평단가 fallback → 0
-        cur_p  = int(self._current_prices.get(code, avg_p))
-        profit = (cur_p - avg_p) * qty_n
+        metrics = stock_metrics(s, self._current_prices.get(code, avg_p), self._usd_krw_rate)
+        profit = metrics["profit"]
         if profit > 0:
             profit_text  = f"+{profit:,} 원"
             profit_color = C['red']    # 이익 = 빨강 (한국 컨벤션)
@@ -473,9 +475,8 @@ class ManageStocksDialog(QDialog):
         s = self._stocks[row]
         code = s["code"]
         avg = int(s.get("avg_price", 0))
-        qty = int(s.get("quantity", 0))
-        cur = int(self._current_prices.get(code, avg))
-        profit = (cur - avg) * qty
+        metrics = stock_metrics(s, self._current_prices.get(code, avg), self._usd_krw_rate)
+        profit = metrics["profit"]
 
         if profit > 0:
             text, color = f"+{profit:,} 원", C['red']
@@ -505,9 +506,8 @@ class ManageStocksDialog(QDialog):
     def _sort_by_profit_desc(self):
         def key_for(s: dict):
             avg = int(s.get("avg_price", 0))
-            qty = int(s.get("quantity", 0))
-            cur = int(self._current_prices.get(s["code"], avg))
-            return (cur - avg) * qty
+            metrics = stock_metrics(s, self._current_prices.get(s["code"], avg), self._usd_krw_rate)
+            return metrics["profit"]
         self._stocks.sort(key=key_for, reverse=True)
         self._rebuild_table()
 

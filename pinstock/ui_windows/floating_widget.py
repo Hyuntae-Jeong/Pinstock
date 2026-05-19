@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
 
 from ..core.api import fetch_stock, fetch_minute_chart, fetch_daily_chart
+from ..core.portfolio import stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .chart_widget import SparklineWidget
 from .manage_dialog import StockDialog
@@ -28,7 +29,8 @@ class StockWidget(QWidget):
     def __init__(self, stock_data: dict, width: int | None = None, stagger_idx: int = 0):
         super().__init__()
         self.data = stock_data          # code, name, avg_price, quantity, pos
-        self.current_price: int = 0
+        self.current_price: float = 0
+        self.usd_krw_rate: float | None = None
         self.is_expanded: bool = False
         self._drag_pos = None
         self._press_pos = None    # 좌클릭 시작 위치 (드래그/클릭 구분용)
@@ -217,6 +219,11 @@ class StockWidget(QWidget):
             self._apply_price(result)
             self.price_updated.emit(self.data["code"])
 
+    def set_usd_krw_rate(self, rate: float | None):
+        self.usd_krw_rate = rate
+        if self.current_price:
+            self._update_detail(self.current_price)
+
     def _fetch_chart(self):
         """sparkline 갱신 (60초 주기) — 당일 분봉 우선, 비어있으면 최근 일봉 폴백."""
         chart = fetch_minute_chart(self.data["code"])
@@ -251,13 +258,14 @@ class StockWidget(QWidget):
 
         self._update_detail(price)
 
-    def _update_detail(self, price: int):
-        avg    = self.data.get("avg_price", 0)
-        qty    = self.data.get("quantity", 0)
-        invest = avg * qty
-        eval_  = price * qty
-        profit = eval_ - invest
-        prate  = (profit / invest * 100) if invest else 0
+    def _update_detail(self, price: float):
+        avg = self.data.get("avg_price", 0)
+        qty = self.data.get("quantity", 0)
+        metrics = stock_metrics(self.data, price, self.usd_krw_rate)
+        invest = metrics["invest"]
+        eval_ = metrics["eval"]
+        profit = metrics["profit"]
+        prate = metrics["profit_rate"]
 
         sign  = "+" if profit >= 0 else ""
         color = C["red"] if profit >= 0 else C["blue"]

@@ -5,6 +5,8 @@ import sys
 import shutil
 from pathlib import Path
 
+from .portfolio import portfolio_totals
+
 
 # ─── 설정 파일 경로 (OS별 표준 디렉토리) ──────────────────────────────────────
 def _config_dir() -> Path:
@@ -110,12 +112,14 @@ EXCEL_COLUMNS = [
 
 # ─── Excel import/export ─────────────────────────────────────────────────────
 def export_stocks_to_excel(stocks: list[dict], path: str,
-                           current_prices: dict | None = None) -> None:
+                           current_prices: dict | None = None,
+                           usd_krw_rate: float | None = None) -> None:
     """보유 종목을 .xlsx 로 내보내기.
     - 종목코드는 텍스트 셀로 저장 (선행 0 보존: '005930', '0183J0').
     - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음.
-    - current_prices ({code: price}) 가 주어지면 시트 하단에 포트폴리오 요약
-      (총 매입금액 / 평가금액 / 평가손익 / 수익률) 을 빈 행 한 줄로 분리해서 추가.
+    - current_prices ({code: price}) 와 usd_krw_rate 가 주어지면 시트 하단에
+      포트폴리오 요약(총 매입금액 / 평가금액 / 평가손익 / 수익률)을 빈 행 한
+      줄로 분리해서 추가. 미국 주식은 원화 기준으로 합산한다.
       import 시에는 빈 행 이후의 행을 모두 무시하므로 라운드트립에 영향 없음."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment
@@ -158,19 +162,16 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
     # 종목 표와 빈 행 한 줄로 분리. import 측에서 빈 행 이후를 모두 무시하므로
     # 라운드트립 안전.
     if stocks:
-        total_invest = sum(
-            int(s.get("avg_price", 0)) * int(s.get("quantity", 0)) for s in stocks
+        totals = portfolio_totals(
+            stocks,
+            current_prices=current_prices,
+            usd_krw_rate=usd_krw_rate,
+            include_hidden=True,
         )
-        cp = current_prices or {}
-        total_eval = 0
-        for s in stocks:
-            avg = int(s.get("avg_price", 0))
-            qty = int(s.get("quantity", 0))
-            # 현재가가 없는 종목은 평단가로 폴백 (평가손익 0 으로 계산됨)
-            price = int(cp.get(s.get("code")) or avg)
-            total_eval += price * qty
-        profit = total_eval - total_invest
-        prate  = (profit / total_invest * 100.0) if total_invest else 0.0
+        total_invest = totals["total_invest"]
+        total_eval = totals["total_eval"]
+        profit = totals["profit"]
+        prate = totals["profit_rate"]
 
         # 빈 행 한 줄 띄우고 다음 행에 요약 헤더
         header_row = ws.max_row + 2

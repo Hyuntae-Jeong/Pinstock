@@ -29,7 +29,8 @@ def _resolve_app_icon() -> QIcon:
         return QIcon(str(ico))
     return QIcon()
 
-from ..core.api import fetch_stock
+from ..core.api import fetch_stock, fetch_usd_krw_rate
+from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
@@ -62,6 +63,7 @@ class WidgetManager:
         # UI 노출은 없고 round-trip 보존만 한다 (한쪽에서 저장하면 다른쪽에서도 유지되도록).
         self.assets_hidden: bool = False
         self.popover_opacity: float = 1.0
+        self.usd_krw_rate: float | None = None
 
         # 투명도 슬라이더가 멈춘 뒤에만 click-through 토글 + 설정 저장 — 50% 경계를
         # 지날 때 setWindowFlag 로 윈도우가 재생성되며 발생하던 멈칫을 없앤다.
@@ -69,9 +71,13 @@ class WidgetManager:
         self._opacity_settle_timer.setSingleShot(True)
         self._opacity_settle_timer.timeout.connect(self._on_opacity_settle)
 
+        self.fx_timer = QTimer()
+        self.fx_timer.timeout.connect(self._fetch_usd_krw_rate)
+
         self._load_config()
         self._setup_tray()
         self._spawn_all()
+        self._sync_fx_timer()
 
     # ── 전체 위젯 표시/숨김 토글 ─────────────────────────────────────────
     def toggle_visibility(self):
@@ -369,6 +375,7 @@ class WidgetManager:
             default_x = 60
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
             self._spawn_widget(s, default_x, default_y, stagger_idx=i)
+        self._sync_fx_timer()
         self._spawn_master()
         self._spawn_toggle_buttons()
 
@@ -412,6 +419,7 @@ class WidgetManager:
         w.deleted.connect(self._on_delete)
         w.edited.connect(self._on_edited)
         w.price_updated.connect(lambda _: self._recompute_master())
+        w.set_usd_krw_rate(self.usd_krw_rate)
 
         pos = stock.get("pos", [def_x, def_y])
         w.move(pos[0], pos[1])
@@ -534,34 +542,39 @@ class WidgetManager:
             self.master_widget.clear_metrics()
             return
 
-        total_invest = 0
-        total_eval   = 0
-        holdings: list[dict] = []
-        for s in self.stocks:
-            # 숨김 종목은 합산/holdings 모두 제외 (엑셀 내보내기엔 포함됨)
-            if s.get("hidden", False):
-                continue
-            avg = int(s.get("avg_price", 0))
-            qty = int(s.get("quantity", 0))
-            invest = avg * qty
-            total_invest += invest
+        current_prices = {
+            code: w.current_price
+            for code, w in self.widgets.items()
+            if w.current_price
+        }
+        totals = portfolio_totals(
+            self.stocks,
+            current_prices=current_prices,
+            usd_krw_rate=self.usd_krw_rate,
+        )
+        self.master_widget.update_metrics(totals["total_invest"], totals["total_eval"])
+        self.master_widget.update_holdings(totals["holdings"])
 
-            w = self.widgets.get(s["code"])
-            # 현재가가 아직 안 잡힌 종목은 평가금액에서 평단가로 임시 사용
-            price = w.current_price if (w and w.current_price) else avg
-            eval_v = price * qty
-            total_eval += eval_v
+    def _fetch_usd_krw_rate(self):
+        result = fetch_usd_krw_rate()
+        if not result:
+            return
+        self.usd_krw_rate = float(result["rate"])
+        for w in self.widgets.values():
+            w.set_usd_krw_rate(self.usd_krw_rate)
+        self._recompute_master()
 
-            profit = eval_v - invest
-            rate   = (profit / invest * 100.0) if invest else 0.0
-            holdings.append({
-                "name":        s.get("name", s["code"]),
-                "profit":      profit,
-                "profit_rate": rate,
-            })
-
-        self.master_widget.update_metrics(total_invest, total_eval)
-        self.master_widget.update_holdings(holdings)
+    def _sync_fx_timer(self):
+        if any(is_us_stock(s) for s in self.stocks):
+            if not self.fx_timer.isActive():
+                self.fx_timer.start(60_000)
+            if self.usd_krw_rate is None:
+                self._fetch_usd_krw_rate()
+        else:
+            self.fx_timer.stop()
+            self.usd_krw_rate = None
+            for w in self.widgets.values():
+                w.set_usd_krw_rate(None)
 
     # ── 종목 추가 ──────────────────────────────────────────────────────────
     def open_add_dialog(self):
@@ -586,6 +599,7 @@ class WidgetManager:
         d["name"] = result["name"]
         self.stocks.append(d)
         self._save_config()
+        self._sync_fx_timer()
 
         # 새 종목명이 더 길면 모든 위젯 너비 재조정 (새 위젯도 이 값으로 생성됨)
         self._apply_uniform_width()
@@ -604,13 +618,14 @@ class WidgetManager:
     def open_manage_dialog(self):
         # 평가손익 계산용 현재가 스냅샷
         current_prices = {
-            code: int(w.current_price)
+            code: w.current_price
             for code, w in self.widgets.items()
             if w.current_price
         }
         dlg = ManageStocksDialog(
             stocks=copy.deepcopy(self.stocks),
             current_prices=current_prices,
+            usd_krw_rate=self.usd_krw_rate,
         )
         if not dlg.exec():
             return
@@ -654,6 +669,7 @@ class WidgetManager:
 
         # 순서 + 저장 + 너비 재계산
         self.stocks = new_stocks
+        self._sync_fx_timer()
         self._apply_uniform_width()
         self._save_config()
         self._recompute_master()
@@ -687,7 +703,7 @@ class WidgetManager:
         }
 
         try:
-            export_stocks_to_excel(self.stocks, path, current_prices)
+            export_stocks_to_excel(self.stocks, path, current_prices, self.usd_krw_rate)
         except ImportError:
             QMessageBox.critical(
                 None, "라이브러리 없음",
@@ -832,6 +848,7 @@ class WidgetManager:
         self.stocks = [s for s in self.stocks if s["code"] != code]
         self.widgets.pop(code, None)
         self._save_config()
+        self._sync_fx_timer()
         # 가장 긴 종목이 삭제된 경우 남은 위젯들도 줄어들도록
         self._apply_uniform_width()
         self._recompute_master()
