@@ -78,12 +78,28 @@ def can_self_update() -> bool:
 
 
 def current_install_dir() -> Path:
-    """현재 실행 중인 Pinstock.exe (또는 .app) 가 들어있는 폴더.
+    """현재 설치본의 "교체 단위" 경로를 돌려준다.
+
+    - Windows: Pinstock.exe 가 들어있는 폴더 (Pinstock-win-vX.Y.Z/).
+    - macOS:   Pinstock.app 번들 그 자체 (예: /Applications/Pinstock.app).
+               PyInstaller frozen 빌드에서 sys.executable 은
+               `.../Pinstock.app/Contents/MacOS/Pinstock` 이므로 위로 거슬러 올라가
+               `.app` suffix 디렉토리를 찾아 반환한다.
 
     is_frozen_build() == False 인 상태에서 호출하면 파이썬 인터프리터 폴더가 잡힌다 —
     실수로 인터프리터 폴더를 건드리지 않도록 호출 전에 can_self_update() 를 확인할 것.
     """
-    return Path(sys.executable).parent
+    exe = Path(sys.executable)
+    if sys.platform == "darwin":
+        p = exe.parent
+        while p != p.parent:
+            if p.suffix == ".app":
+                return p
+            p = p.parent
+        # frozen 빌드인데 .app 을 못 찾으면 (예: 비표준 PyInstaller 배치)
+        # 최소한 인터프리터 폴더를 반환해 호출측이 sanity 체크할 수 있게 함.
+        return exe.parent
+    return exe.parent
 
 
 # ─── 플랫폼 자산 매칭 ─────────────────────────────────────────────────────
@@ -290,13 +306,96 @@ move "%OLD_DIR%" "%INSTALL_DIR%" >NUL
 exit /b 1
 """
 
+
+# ─── macOS 헬퍼 스크립트 ──────────────────────────────────────────────────
+# args: $1=MAIN_PID  $2=INSTALL_PATH (Pinstock.app 절대경로)  $3=NEW_ZIP  $4=ERR_LOG
+#
+# 흐름:
+#   1) MAIN_PID 가 사라질 때까지 대기 (최대 30초)
+#   2) INSTALL_PATH → INSTALL_PATH.old 로 mv (백업)
+#   3) ditto 로 ZIP 풀기 (Pinstock.app 의 부모 디렉토리에)
+#   4) Pinstock.app/Contents/MacOS 가 존재하면 성공 → quarantine 제거, .old 정리, 재실행
+#   5) 어디서든 실패하면 .old 복원 + ERR_LOG 기록
+# 주의:
+#   - unzip 절대 금지. CI 가 `ditto -c -k --keepParent` 로 만든 ZIP 은 .app 번들의
+#     확장속성/실행권한/심볼릭링크를 보존하는 형식이라 unzip 으로 풀면 깨진다.
+#   - ERR_LOG 는 ASCII 토큰만 (콘솔 codepage mismatch 회피용). 한글은 humanize_error 가 담당.
+_MACOS_UPDATER_SH = r"""#!/bin/bash
+# args: $1=MAIN_PID  $2=INSTALL_PATH  $3=NEW_ZIP  $4=ERR_LOG
+
+MAIN_PID="$1"
+INSTALL_PATH="$2"
+NEW_ZIP="$3"
+ERR_LOG="$4"
+OLD_PATH="${INSTALL_PATH}.old"
+
+# 1) 메인 프로세스 종료 대기 (최대 30s)
+TRIES=0
+while kill -0 "$MAIN_PID" 2>/dev/null; do
+    TRIES=$((TRIES + 1))
+    if [ "$TRIES" -ge 30 ]; then
+        echo "ERR_WAIT_TIMEOUT pid=$MAIN_PID" > "$ERR_LOG"
+        exit 1
+    fi
+    sleep 1
+done
+# 파일 핸들 해제 여유
+sleep 1
+
+# 2) 백업
+if [ -e "$OLD_PATH" ]; then
+    rm -rf "$OLD_PATH"
+fi
+if ! mv "$INSTALL_PATH" "$OLD_PATH"; then
+    echo "ERR_BACKUP_RENAME install_path=$INSTALL_PATH" > "$ERR_LOG"
+    exit 1
+fi
+
+# 3) ditto 로 풀기. ZIP 내부가 Pinstock.app/... 형태이므로 부모 디렉토리에 풀면 됨.
+PARENT_DIR="$(dirname "$INSTALL_PATH")"
+if ! ditto -xk "$NEW_ZIP" "$PARENT_DIR"; then
+    echo "ERR_EXTRACT zip=$NEW_ZIP" > "$ERR_LOG"
+    if [ -e "$INSTALL_PATH" ]; then
+        rm -rf "$INSTALL_PATH"
+    fi
+    mv "$OLD_PATH" "$INSTALL_PATH"
+    exit 1
+fi
+
+# 4) sanity check
+if [ ! -d "$INSTALL_PATH/Contents/MacOS" ]; then
+    echo "ERR_MISSING_EXE" > "$ERR_LOG"
+    if [ -e "$INSTALL_PATH" ]; then
+        rm -rf "$INSTALL_PATH"
+    fi
+    mv "$OLD_PATH" "$INSTALL_PATH"
+    exit 1
+fi
+
+# Gatekeeper quarantine 속성 제거 (방어적 — Python requests 다운로드에는 보통
+# com.apple.quarantine 이 안 붙지만, 외부 도구로 다운받은 케이스를 대비).
+xattr -dr com.apple.quarantine "$INSTALL_PATH" 2>/dev/null
+
+# 5) 재실행
+open "$INSTALL_PATH"
+
+# 6) 정리
+rm -rf "$OLD_PATH"
+rm -f "$NEW_ZIP"
+rm -f "$0"
+exit 0
+"""
+
+
 # 에러 코드 → 한글 메시지 매핑. updater 가 ERR_LOG 를 읽어 GUI 에 노출할 때 사용.
+# Windows / macOS 가 같은 ERR_ 토큰을 공유 (ERR_MISSING_EXE 는 양쪽이 의미만 미세하게
+# 다르되 메시지는 통합).
 ERROR_MESSAGES: dict[str, str] = {
     "ERR_WAIT_TIMEOUT":   "메인 앱이 30초 안에 종료되지 않아 업데이트를 중단했습니다.",
-    "ERR_BACKUP_RENAME":  "설치 폴더 이름을 바꾸지 못했습니다. 권한이 없거나(예: Program Files), "
-                          "탐색기 등 다른 프로세스가 폴더를 잡고 있을 수 있습니다.",
+    "ERR_BACKUP_RENAME":  "설치 폴더 이름을 바꾸지 못했습니다. 쓰기 권한이 없거나, "
+                          "다른 프로세스가 폴더를 잡고 있을 수 있습니다.",
     "ERR_EXTRACT":        "새 ZIP 파일을 압축 해제하지 못했습니다.",
-    "ERR_MISSING_EXE":    "새 설치본에서 Pinstock.exe 를 찾지 못했습니다. ZIP 이 손상되었을 수 있습니다.",
+    "ERR_MISSING_EXE":    "새 설치본에서 실행 파일을 찾지 못했습니다. ZIP 이 손상되었을 수 있습니다.",
 }
 
 
@@ -349,8 +448,42 @@ def launch_updater_windows(install_dir: Path, new_zip: Path) -> None:
     )
 
 
+def _write_macos_updater_script() -> Path:
+    sh_path = _temp_dir() / "pinstock-update.sh"
+    sh_path.write_text(_MACOS_UPDATER_SH, encoding="utf-8")
+    sh_path.chmod(0o755)
+    return sh_path
+
+
 def launch_updater_macos(install_dir: Path, new_zip: Path) -> None:
-    raise NotImplementedError("macOS 자동 업데이트는 Step 6 에서 구현 예정")
+    """헬퍼 .sh 를 분리 실행. 호출 직후 메인 앱은 즉시 종료해야 함.
+
+    `start_new_session=True` 는 POSIX setsid() 와 동일 — 부모(Pinstock.app) 가
+    종료돼도 헬퍼는 살아남는다. stdin/stdout/stderr 는 DEVNULL 로 막아 부모의
+    파이프가 끊겼을 때 SIGPIPE 로 죽지 않게 한다.
+
+    install_dir 은 `Pinstock.app` 의 절대경로 (current_install_dir() 가 .app
+    번들을 반환하므로 호출측은 그대로 넘기면 됨).
+    """
+    sh_path = _write_macos_updater_script()
+    pid = os.getpid()
+    err_log = _error_log_path()
+
+    subprocess.Popen(
+        [
+            "/bin/bash",
+            str(sh_path),
+            str(pid),
+            str(install_dir),
+            str(new_zip),
+            str(err_log),
+        ],
+        start_new_session=True,
+        close_fds=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def launch_updater(install_dir: Path, new_zip: Path) -> None:
