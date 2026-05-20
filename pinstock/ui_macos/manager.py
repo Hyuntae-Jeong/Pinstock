@@ -124,6 +124,7 @@ class MacAppManager(QObject):
         self.hide_master_btn_pos: list | None = None
         self.assets_hidden: bool = False
         self.popover_opacity: float = 1.0
+        self.popover_height: int | None = None
         self.market_filter: str = "ALL"
         self._load_config()
 
@@ -146,11 +147,13 @@ class MacAppManager(QObject):
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
         self.popover.assets_hidden_changed.connect(self._on_assets_hidden_changed)
         self.popover.opacity_changed.connect(self._on_opacity_changed)
+        self.popover.height_changed.connect(self._on_height_changed)
         self.popover.closed_by_user.connect(self._on_popover_closed_by_user)
 
         # 로드한 자산 숨김 / 팝오버 투명도 상태를 팝오버에 한 번 주입
         self.popover.set_assets_hidden(self.assets_hidden)
         self.popover.set_opacity(self.popover_opacity)
+        self.popover.set_preferred_height(self.popover_height)
         self.popover.set_market_filter(self.market_filter)
 
         # 초기 데이터 푸시
@@ -266,6 +269,10 @@ class MacAppManager(QObject):
         self.popover_opacity = opacity
         self._save_config()
 
+    def _on_height_changed(self, height: int):
+        self.popover_height = height
+        self._save_config()
+
     def _reapply_cached_data(self):
         """popover.set_stocks() 이후 새로 만들어진 행에 캐시된 가격/차트를 즉시 다시
         넣어 차트가 비어 보이는 시간을 없앤다."""
@@ -361,6 +368,14 @@ class MacAppManager(QObject):
                 self.popover_opacity = max(0.6, min(1.0, opacity))
             except (TypeError, ValueError):
                 self.popover_opacity = 1.0
+            try:
+                height = data.get("popover_height")
+                self.popover_height = (
+                    max(Popover.MIN_H, int(height))
+                    if height is not None else None
+                )
+            except (TypeError, ValueError):
+                self.popover_height = None
 
     def _save_config(self):
         # Windows 와 호환되는 스키마 — Mac 에서는 의미 없는 필드도 보존만 함
@@ -377,6 +392,7 @@ class MacAppManager(QObject):
             },
             "assets_hidden": self.assets_hidden,
             "popover_opacity": self.popover_opacity,
+            "popover_height": self.popover_height,
         }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:

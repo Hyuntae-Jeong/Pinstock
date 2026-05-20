@@ -409,12 +409,12 @@ class Popover(QWidget):
     """
 
     W        = 360
-    MAX_H    = 640
     MIN_H    = 420    # 종목이 적어도 시원하게 — 빈 상태에도 안내문이 잘 보이게
     RADIUS   = 12
     OUTER_M  = 8      # 카드 바깥 마진 (그림자/여백)
     ACTION_H   = 44   # 하단 액션 바 높이
     CONTROLS_H = 28   # 액션 바 위 설정(투명도 슬라이더) 행 높이
+    RESIZE_MARGIN = 10
 
     add_stock_requested      = pyqtSignal()
     manage_stocks_requested  = pyqtSignal()
@@ -426,6 +426,7 @@ class Popover(QWidget):
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
     assets_hidden_changed    = pyqtSignal(bool)
     opacity_changed          = pyqtSignal(float)   # 0.6 ~ 1.0
+    height_changed           = pyqtSignal(int)     # px
     closed_by_user           = pyqtSignal()      # ESC 등 사용자 명시적 닫기
 
     OPACITY_MIN = 60   # 슬라이더 정수 단위 (퍼센트). 60% 미만은 가독성 저하로 차단.
@@ -444,6 +445,11 @@ class Popover(QWidget):
         self._assets_hidden: bool = False
         self._usd_krw_rate: float | None = None
         self._market_filter: str = "ALL"
+        self._preferred_height: int | None = None
+        self._height_resizing: bool = False
+        self._resize_start_y: int = 0
+        self._resize_start_h: int = 0
+        self.setMouseTracking(True)
         self._build_ui()
 
     def _build_ui(self):
@@ -715,7 +721,7 @@ class Popover(QWidget):
     # ── 위치/표시 ────────────────────────────────────────────────────────
     def _calc_content_height(self) -> int:
         """현재 종목 수/확장 상태에 맞춘 컨텐츠 영역 높이 계산.
-        스크롤이 필요한 경우 MAX_H 안에서 잘리고 스크롤바가 뜬다."""
+        스크롤이 필요한 경우 현재 모니터 높이 안에서 잘리고 스크롤바가 뜬다."""
         if self.rows:
             rows_h = sum(
                 (r.EXPAND_H if r.is_expanded else r.COMPACT_H)
@@ -774,11 +780,24 @@ class Popover(QWidget):
         self.setWindowOpacity(opacity)
         self.opacity_changed.emit(opacity)
 
+    def set_preferred_height(self, height: int | None):
+        """외부(매니저)에서 초기 높이 설정을 동기화. None 이면 자동 높이."""
+        if height is None:
+            self._preferred_height = None
+            return
+        self._preferred_height = self._clamp_height(int(height))
+        if self.isVisible():
+            self.setFixedHeight(self._preferred_height)
+
     def show_below(self, anchor_global_pos: QPoint, anchor_width: int = 0):
         """anchor_global_pos 아래에 팝오버를 표시. 화면 우상단 메뉴바 아이콘 기준."""
         target_w = self.W + self.OUTER_M * 2
+        screen = QApplication.screenAt(anchor_global_pos) or QApplication.primaryScreen()
+        sg = screen.availableGeometry()
+        max_h = self._max_height_for_screen(screen)
         content_h = self._calc_content_height()
-        target_h = max(self.MIN_H, min(content_h, self.MAX_H))
+        auto_h = max(self.MIN_H, min(content_h, max_h))
+        target_h = self._clamp_height(self._preferred_height or auto_h, screen)
 
         self.setFixedSize(target_w, target_h)
 
@@ -788,8 +807,6 @@ class Popover(QWidget):
         y = anchor_global_pos.y() + 10
 
         # 화면 경계 안으로 보정
-        screen = QApplication.screenAt(anchor_global_pos) or QApplication.primaryScreen()
-        sg = screen.availableGeometry()
         x = max(sg.x() + 4, min(x, sg.x() + sg.width() - target_w - 4))
         y = max(sg.y() + 4, y)
 
@@ -797,6 +814,58 @@ class Popover(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _max_height_for_screen(self, screen: QScreen | None = None) -> int:
+        screen = screen or QApplication.screenAt(self.frameGeometry().center())
+        screen = screen or QApplication.primaryScreen()
+        return max(self.MIN_H, screen.availableGeometry().height())
+
+    def _clamp_height(self, height: int, screen: QScreen | None = None) -> int:
+        return max(self.MIN_H, min(int(height), self._max_height_for_screen(screen)))
+
+    def _in_height_resize_zone(self, pos) -> bool:
+        return self.height() - self.RESIZE_MARGIN <= int(pos.y()) <= self.height()
+
+    def mousePressEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._in_height_resize_zone(event.position())
+        ):
+            self._height_resizing = True
+            self._resize_start_y = int(event.globalPosition().y())
+            self._resize_start_h = self.height()
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._height_resizing:
+            delta = int(event.globalPosition().y()) - self._resize_start_y
+            height = self._clamp_height(self._resize_start_h + delta)
+            self._preferred_height = height
+            self.setFixedHeight(height)
+            event.accept()
+            return
+        if self._in_height_resize_zone(event.position()):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._height_resizing and event.button() == Qt.MouseButton.LeftButton:
+            self._height_resizing = False
+            self.unsetCursor()
+            self.height_changed.emit(self.height())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._height_resizing:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     # ── 키보드 ────────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
