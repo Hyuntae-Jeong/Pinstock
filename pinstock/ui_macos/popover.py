@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QMenu, QSlider, QApplication,
 )
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QScreen
 
 from ..ui_windows.theme import C, TRAY_MENU_STYLE
@@ -642,6 +642,7 @@ class Popover(QWidget):
             row.set_usd_krw_rate(self._usd_krw_rate)
             row.edit_requested.connect(self.edit_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
+            row.expanded_toggled.connect(self._on_row_expanded)
             self.rows[s["code"]] = row
             self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
 
@@ -670,6 +671,22 @@ class Popover(QWidget):
         row = self.rows.get(code)
         if row:
             row.apply_daily(candles)
+
+    # ── 행 확장 시 자동 스크롤 ────────────────────────────────────────────
+    def _on_row_expanded(self, code: str):
+        """종목 행이 펼쳐지면 펼친 내용이 스크롤 영역 아래로 잘리지 않도록
+        해당 행 전체가 보이는 위치까지 자동 스크롤한다 (접을 때는 무시)."""
+        row = self.rows.get(code)
+        if row is None or not row.is_expanded:
+            return
+        # 늘어난 행 높이가 레이아웃에 반영된 다음에 스크롤해야 위치가 맞다.
+        QTimer.singleShot(0, lambda: self._ensure_row_visible(code))
+
+    def _ensure_row_visible(self, code: str):
+        row = self.rows.get(code)
+        if row is None or not row.is_expanded:
+            return
+        self.scroll.ensureWidgetVisible(row, 0, 8)
 
     # ── 위치/표시 ────────────────────────────────────────────────────────
     def _calc_content_height(self) -> int:
