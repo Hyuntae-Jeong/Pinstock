@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QImage, QPainter
+from PyQt6.QtGui import QImage, QPainter, QPainterPath
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QApplication
 
@@ -43,6 +43,11 @@ ICNS_SIZES = [
 # Windows .ico 는 다중 해상도 PNG 를 한 파일에 담는 포맷
 ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
 
+# 아이콘 둥근 모서리 비율 — pinstock_icon.svg 의 rx=232 / viewBox 1024 와 일치.
+# QtSvg 가 SVG 의 clip-path(둥근 사각형)를 무시하므로, 렌더 시 painter 에서
+# 직접 같은 모양으로 클립해 구름/차트가 모서리 밖으로 새는 것을 막는다.
+CORNER_RADIUS_RATIO = 232.0 / 1024.0
+
 
 def render_square(renderer: QSvgRenderer, size: int) -> QImage:
     img = QImage(size, size, QImage.Format.Format_ARGB32)
@@ -50,6 +55,13 @@ def render_square(renderer: QSvgRenderer, size: int) -> QImage:
     painter = QPainter(img)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    # QtSvg 는 SVG clip-path(둥근 사각형)를 제대로 지원하지 않아 구름/차트가
+    # 모서리 밖으로 새어 아이콘 윗부분이 깨져 보였다. 여기서 동일한 둥근
+    # 사각형으로 강제 클립해 항상 squircle 안에 가둔다.
+    radius = CORNER_RADIUS_RATIO * size
+    clip = QPainterPath()
+    clip.addRoundedRect(0, 0, size, size, radius, radius)
+    painter.setClipPath(clip)
     renderer.render(painter)
     painter.end()
     return img
