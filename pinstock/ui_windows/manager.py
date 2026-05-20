@@ -5,16 +5,28 @@ import sys
 import json
 import copy
 import shutil
+import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QApplication, QMenu, QSystemTrayIcon, QMessageBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal
 from PyQt6.QtGui import (
     QIcon, QAction, QPixmap, QPainter, QFont, QColor, QBrush, QPen,
 )
+
+
+# ─── 자동 업데이트 체크 설정 ──────────────────────────────────────────────
+_AUTO_CHECK_INTERVAL = timedelta(hours=24)
+_AUTO_CHECK_STARTUP_DELAY_MS = 10 * 1000      # 앱 시작 후 10초 뒤
+_PREV_ERROR_CHECK_DELAY_MS = 1500              # 시작 직후 1.5초
+
+
+class _UpdateCheckSignals(QObject):
+    """백그라운드 fetch 결과를 메인 스레드로 안전하게 옮기는 통로."""
+    done = pyqtSignal(object)   # ReleaseInfo or None
 
 
 def _resolve_app_icon() -> QIcon:
@@ -29,6 +41,8 @@ def _resolve_app_icon() -> QIcon:
         return QIcon(str(ico))
     return QIcon()
 
+from ..__version__ import __version__
+from ..core import updater
 from ..core.api import fetch_usd_krw_rate
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
@@ -42,6 +56,7 @@ from .toggle_button import ToggleButton
 from .manage_dialog import (
     StockDialog, ManageStocksDialog, ImportModeDialog, fetch_quote_for_stock,
 )
+from ..ui_common.update_dialog import UpdateDialog
 
 
 # ─── 전체 위젯 관리자 ─────────────────────────────────────────────────────────
@@ -76,11 +91,21 @@ class WidgetManager:
 
         self.fx_timer = QTimer()
         self.fx_timer.timeout.connect(self._fetch_usd_krw_rate)
+        # 자동 업데이트 체크 상태
+        self.update_last_check_at: datetime | None = None
+        self._cached_release: updater.ReleaseInfo | None = None
+        self._update_signals = _UpdateCheckSignals()
+        self._update_signals.done.connect(self._on_auto_check_done)
 
         self._load_config()
         self._setup_tray()
         self._spawn_all()
         self._sync_fx_timer()
+
+        # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
+        QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_previous_update_error)
+        # 시작 10초 뒤 — 자동 업데이트 체크 (throttle/can_self_update 검사 후 실제 호출)
+        QTimer.singleShot(_AUTO_CHECK_STARTUP_DELAY_MS, self._maybe_run_auto_update_check)
 
     # ── 전체 위젯 표시/숨김 토글 ─────────────────────────────────────────
     def toggle_visibility(self):
@@ -133,7 +158,8 @@ class WidgetManager:
             self.master_pos = [mx, my]
             master_offset = self.master_widget.height() + GAP
 
-        # 위젯을 현재 속한 모니터별로 그룹화 (stocks 순서 보존)
+        # 위젯을 현재 속한 모니터별로 그룹화 (stocks 순서 보존).
+        # 숨김(hidden=True) 종목은 자리를 차지하지 않도록 제외 — 빈 슬롯 방지.
         groups: dict = {}
         for s in self.stocks:
             if not self._is_stock_visible(s):
@@ -166,7 +192,7 @@ class WidgetManager:
 
         # 토글 버튼 위치:
         # 1) 마스터 표시 중 → 마스터 왼쪽에 위/아래
-        # 2) 마스터 없거나 숨김 + 종목 있음 → 맨 마지막 종목 위젯 왼쪽에 위/아래
+        # 2) 마스터 없거나 숨김 + 표시 종목 있음 → 마지막 표시 종목 위젯 왼쪽에 위/아래
         # 3) 둘 다 없음 → 화면 우상단 fallback
         btn_size = ToggleButton.SIZE
         if self.master_widget and self.master_widget.isVisible():
@@ -197,6 +223,97 @@ class WidgetManager:
             self.hide_master_btn.move(btn_x, bot_y)
             self.hide_master_btn_pos = [btn_x, bot_y]
             # 마스터 토글은 마스터 표시 상태에 따름
+            if self.master_visible and not self.is_hidden:
+                self.hide_master_btn.show()
+            else:
+                self.hide_master_btn.hide()
+
+        self._save_config()
+        # 숨김 상태라면 자동으로 다시 표시
+        if self.is_hidden:
+            self.toggle_visibility()
+
+    # ── 마스터 화면에 모든 위젯 모으기 ─────────────────────────────────────
+    def gather_to_master_screen(self):
+        """모든 위젯을 마스터 위젯이 있는 화면으로 끌어모아 column-wrap 정렬.
+        멀티 모니터에 분산된 위젯을 한 화면에 모을 때 사용.
+        - 마스터 표시 중: 그 모니터 우상단에 마스터를 두고 아래로 column-wrap
+        - 마스터 없음/숨김: 주 모니터 우상단부터 column-wrap (fallback)"""
+        MARGIN_X      = 20
+        MARGIN_Y      = 60
+        MARGIN_BOTTOM = 20
+        GAP           = 4
+        COL_GAP       = 8
+
+        # 대상 화면 결정: 마스터 표시 중이면 그 모니터, 아니면 주 모니터
+        master_active = bool(self.master_widget and self.master_widget.isVisible())
+        if master_active:
+            mc = self.master_widget.frameGeometry().center()
+            target_screen = QApplication.screenAt(mc) or QApplication.primaryScreen()
+        else:
+            target_screen = QApplication.primaryScreen()
+
+        geo = target_screen.availableGeometry()
+        widget_w = self.uniform_w
+
+        # 마스터 위젯을 대상 화면 우상단 첫자리에 (표시 중일 때만)
+        master_offset = 0
+        mx = my = None
+        if master_active:
+            mx = geo.x() + geo.width() - self.master_widget.width() - MARGIN_X
+            my = geo.y() + MARGIN_Y
+            self.master_widget.move(mx, my)
+            self.master_pos = [mx, my]
+            master_offset = self.master_widget.height() + GAP
+
+        # 표시 종목만 stocks 순서대로 column-wrap 정렬 (숨김은 빈 슬롯 방지를 위해 제외)
+        visible_items = [
+            (s, self.widgets[s["code"]])
+            for s in self.stocks
+            if not s.get("hidden", False) and s["code"] in self.widgets
+        ]
+        col_top_y = geo.y() + MARGIN_Y + master_offset
+        step_y    = StockWidget.COMPACT_H + GAP
+        avail_h   = geo.y() + geo.height() - MARGIN_BOTTOM - col_top_y
+        max_per_col = max(1, avail_h // step_y)
+        first_col_x = geo.x() + geo.width() - widget_w - MARGIN_X
+
+        for i, (s, w) in enumerate(visible_items):
+            col_idx = i // max_per_col
+            row_idx = i %  max_per_col
+            x = first_col_x - col_idx * (widget_w + COL_GAP)
+            y = col_top_y + row_idx * step_y
+            w.move(x, y)
+            s["pos"] = [x, y]
+
+        # 토글 버튼: 마스터 옆 > 마지막 표시 종목 옆 > 대상 화면 우상단 fallback
+        btn_size = ToggleButton.SIZE
+        last_visible = next(
+            (s for s in reversed(self.stocks) if not s.get("hidden", False)),
+            None,
+        )
+        if master_active:
+            btn_x = mx - btn_size - GAP
+            top_y = my
+            bot_y = my + btn_size + GAP
+        elif last_visible:
+            last_pos = last_visible.get("pos") or [0, 0]
+            btn_x = last_pos[0] - btn_size - GAP
+            top_y = last_pos[1]
+            bot_y = top_y + btn_size + GAP
+        else:
+            btn_x = geo.x() + geo.width() - btn_size - MARGIN_X
+            top_y = geo.y() + MARGIN_Y
+            bot_y = top_y + btn_size + GAP
+
+        if self.hide_all_btn:
+            self.hide_all_btn.move(btn_x, top_y)
+            self.hide_all_btn_pos = [btn_x, top_y]
+            if not self.is_hidden:
+                self.hide_all_btn.show()
+        if self.hide_master_btn:
+            self.hide_master_btn.move(btn_x, bot_y)
+            self.hide_master_btn_pos = [btn_x, bot_y]
             if self.master_visible and not self.is_hidden:
                 self.hide_master_btn.show()
             else:
@@ -273,6 +390,8 @@ class WidgetManager:
         self.toggle_act = QAction("🙈   숨기기", menu)
         self.master_toggle_act = QAction(self._master_toggle_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
+        gather_act = QAction("🎯   마스터 화면에 정렬", menu)
+        self.update_act = QAction("🔄   업데이트 확인", menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
@@ -281,6 +400,8 @@ class WidgetManager:
         self.toggle_act.triggered.connect(self.toggle_visibility)
         self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
         reset_act.triggered.connect(self.reset_positions)
+        gather_act.triggered.connect(self.gather_to_master_screen)
+        self.update_act.triggered.connect(self.open_update_dialog)
         quit_act.triggered.connect(self.app.quit)
 
         menu.addAction(add_act)
@@ -292,11 +413,16 @@ class WidgetManager:
         menu.addAction(self.toggle_act)
         menu.addAction(self.master_toggle_act)
         menu.addAction(reset_act)
+        menu.addAction(gather_act)
         menu.addSeparator()
+        menu.addAction(self.update_act)
         menu.addAction(quit_act)
 
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
+        # 업데이트 토스트 클릭 → 업데이트 다이얼로그
+        # (현재 showMessage 는 업데이트 알림 한 종류뿐이라 단일 핸들러로 충분)
+        self.tray.messageClicked.connect(self.open_update_dialog)
         self.tray.show()
 
     def _on_tray_activated(self, reason):
@@ -367,6 +493,14 @@ class WidgetManager:
                 self.popover_opacity = max(0.1, min(1.0, opacity))
             except (TypeError, ValueError):
                 self.popover_opacity = 1.0
+            # 자동 업데이트 메타 — last_check_at 만 (24h throttle 용)
+            upd = data.get("update") or {}
+            last_at = upd.get("last_check_at")
+            if isinstance(last_at, str):
+                try:
+                    self.update_last_check_at = datetime.fromisoformat(last_at)
+                except ValueError:
+                    self.update_last_check_at = None
 
     def _save_config(self):
         self.stocks = normalize_stocks_schema(self.stocks)
@@ -383,6 +517,10 @@ class WidgetManager:
             "assets_hidden": self.assets_hidden,
             "popover_opacity": self.popover_opacity,
         }
+        if self.update_last_check_at is not None:
+            data["update"] = {
+                "last_check_at": self.update_last_check_at.isoformat(timespec="seconds"),
+            }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -703,6 +841,79 @@ class WidgetManager:
         # 숨김 상태에서 새 종목을 추가한 경우 자동으로 표시 상태로 전환
         if self.is_hidden:
             self.toggle_visibility()
+
+    # ── 업데이트 확인 ─────────────────────────────────────────────────────
+    def open_update_dialog(self):
+        # 수동 체크 — 다이얼로그가 fetch 한 결과를 manager 캐시에도 반영해서
+        # 트레이 뱃지/throttle 이 즉시 갱신되도록 콜백 전달
+        dlg = UpdateDialog(on_release_seen=self._on_release_seen)
+        dlg.exec()
+
+    def _on_release_seen(self, release: updater.ReleaseInfo):
+        """UpdateDialog 가 API 조회에 성공했을 때 호출."""
+        self.update_last_check_at = datetime.now()
+        self._cached_release = release
+        self._save_config()
+        self._refresh_update_badge()
+
+    def _maybe_run_auto_update_check(self):
+        """시작 시/주기적 체크 진입점. throttle + can_self_update 검사."""
+        if not updater.can_self_update():
+            return
+        now = datetime.now()
+        if (
+            self.update_last_check_at is not None
+            and (now - self.update_last_check_at) < _AUTO_CHECK_INTERVAL
+        ):
+            return
+        # 백그라운드 fetch
+        def worker():
+            rel = updater.fetch_latest_release()
+            self._update_signals.done.emit(rel)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_auto_check_done(self, release):
+        """백그라운드 fetch 완료 — 메인 스레드에서 호출됨."""
+        if release is None:
+            # 실패는 silent. last_check_at 갱신 안 함 → 다음 실행 때 재시도.
+            return
+        self.update_last_check_at = datetime.now()
+        self._cached_release = release
+        self._save_config()
+        self._refresh_update_badge()
+        if updater.is_newer(__version__, release.version):
+            self._show_update_toast(release)
+
+    def _refresh_update_badge(self):
+        """트레이 메뉴의 '업데이트 확인' 액션 텍스트에 새 버전 표시 점 토글."""
+        if not hasattr(self, "update_act"):
+            return
+        has_update = (
+            self._cached_release is not None
+            and updater.is_newer(__version__, self._cached_release.version)
+        )
+        suffix = "  ●" if has_update else ""
+        self.update_act.setText("🔄   업데이트 확인" + suffix)
+
+    def _show_update_toast(self, release: updater.ReleaseInfo):
+        """Windows 트레이 토스트 — 클릭하면 messageClicked → open_update_dialog."""
+        self.tray.showMessage(
+            "Pinstock 업데이트 가능",
+            f"새 버전 {release.tag} 가 있습니다. 클릭하여 확인하세요.",
+            QSystemTrayIcon.MessageIcon.Information,
+            7000,
+        )
+
+    def _check_previous_update_error(self):
+        """이전 실행에서 헬퍼가 남긴 에러 로그가 있으면 사용자에게 한 번 보여주고 삭제."""
+        log = updater.read_and_clear_last_error()
+        if not log:
+            return
+        QMessageBox.warning(
+            None,
+            "이전 업데이트 실패",
+            updater.humanize_error(log) + "\n\n오류 원문:\n" + log,
+        )
 
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
     def open_manage_dialog(self):

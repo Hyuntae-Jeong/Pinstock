@@ -420,6 +420,7 @@ class Popover(QWidget):
     manage_stocks_requested  = pyqtSignal()
     export_requested         = pyqtSignal()
     import_requested         = pyqtSignal()
+    check_update_requested   = pyqtSignal()      # 🔄 액션 바 버튼 클릭
     quit_requested           = pyqtSignal()
     edit_requested           = pyqtSignal(str)   # code
     delete_requested         = pyqtSignal(str)   # code
@@ -607,6 +608,13 @@ class Popover(QWidget):
         self.toggle_assets_btn = make_btn("👁", "자산 정보 숨기기", self._on_toggle_assets)
         hl.addWidget(self.toggle_assets_btn)
 
+        # 업데이트 확인. 새 버전이 발견되면 manager 가 set_update_available(True) 로
+        # 툴팁에 "(새 버전 있음)" 을 붙이는 식으로 뱃지를 표시한다.
+        self.update_btn = make_btn("🔄", "업데이트 확인",
+                                   self.check_update_requested.emit)
+        self._update_tooltip_base = "업데이트 확인"
+        hl.addWidget(self.update_btn)
+
         hl.addWidget(make_btn("❌", "종료", self.quit_requested.emit))
 
         root.addWidget(action_row)
@@ -663,6 +671,18 @@ class Popover(QWidget):
             return True
         market = "US" if is_us_stock(stock) else "KR"
         return market == self._market_filter
+
+    # ── 업데이트 뱃지 ────────────────────────────────────────────────────
+    def set_update_available(self, available: bool):
+        """🔄 버튼에 새 버전 표시. 텍스트 뒤 작은 점 추가 + 툴팁 확장."""
+        if not hasattr(self, "update_btn"):
+            return
+        if available:
+            self.update_btn.setText("🔄●")
+            self.update_btn.setToolTip(self._update_tooltip_base + "  (새 버전 있음)")
+        else:
+            self.update_btn.setText("🔄")
+            self.update_btn.setToolTip(self._update_tooltip_base)
 
     # ── 데이터 동기화 ────────────────────────────────────────────────────
     def set_stocks(self, stocks: list[dict]):
