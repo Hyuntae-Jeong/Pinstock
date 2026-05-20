@@ -35,7 +35,7 @@ class MenuBarIcon(QObject):
     """macOS 메뉴바 캔들스틱 아이콘 트리거.
 
     좌/우 클릭 모두 popover 토글로 처리한다 (Mac 메뉴바 native 패턴).
-    종료는 popover 안의 ❌ 버튼으로.
+    종목 추가/관리 등 액션은 상단 네이티브 앱 메뉴바(manager 가 구성)에 있다.
     """
 
     toggle_popover_requested = pyqtSignal(QPoint, int)   # anchor_global_pos, anchor_width

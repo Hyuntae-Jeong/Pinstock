@@ -14,7 +14,7 @@ import threading
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog
+from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog, QMenuBar
 
 from ..__version__ import __version__
 from ..core import updater
@@ -154,26 +154,22 @@ class MacAppManager(QObject):
         # UI
         self.popover = Popover()
         self.menubar = MenuBarIcon(app, parent=self)
+        self._build_app_menu()
 
         # 시그널 연결
         self.menubar.toggle_popover_requested.connect(self._on_toggle_popover)
         self.menubar.notification_clicked.connect(self.open_update_dialog)
-        self.popover.add_stock_requested.connect(self.open_add_dialog)
-        self.popover.manage_stocks_requested.connect(self.open_manage_dialog)
-        self.popover.export_requested.connect(self.open_export_dialog)
-        self.popover.import_requested.connect(self.open_import_dialog)
-        self.popover.check_update_requested.connect(self.open_update_dialog)
-        self.popover.quit_requested.connect(self.app.quit)
+        self.popover.toggle_assets_requested.connect(self._toggle_assets_hidden)
         self.popover.edit_requested.connect(self._on_edit_request)
         self.popover.delete_requested.connect(self._on_delete_request)
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
-        self.popover.assets_hidden_changed.connect(self._on_assets_hidden_changed)
         self.popover.opacity_changed.connect(self._on_opacity_changed)
         self.popover.height_changed.connect(self._on_height_changed)
         self.popover.closed_by_user.connect(self._on_popover_closed_by_user)
 
         # 로드한 자산 숨김 / 팝오버 투명도 상태를 팝오버에 한 번 주입
         self.popover.set_assets_hidden(self.assets_hidden)
+        self.app_assets_action.setChecked(self.assets_hidden)
         self.popover.set_opacity(self.popover_opacity)
         self.popover.set_preferred_height(self.popover_height)
         self.popover.set_market_filter(self.market_filter)
@@ -191,6 +187,35 @@ class MacAppManager(QObject):
         QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_previous_update_error)
         # 시작 10초 뒤 — 자동 업데이트 체크 (throttle/can_self_update 검사 후 실제 호출)
         QTimer.singleShot(_AUTO_CHECK_STARTUP_DELAY_MS, self._maybe_run_auto_update_check)
+
+    # ── 상단 네이티브 앱 메뉴바 ───────────────────────────────────────────
+    def _build_app_menu(self):
+        """화면 상단 앱 이름('Pinstock') 옆에 뜨는 네이티브 메뉴바.
+
+        부모 없는 QMenuBar 는 macOS 에서 앱 전역 메뉴바가 된다. 앱이 활성
+        (frontmost) 상태일 때만 보이며, 트레이 아이콘 클릭 시 앱이 활성화되므로
+        팝오버를 띄운 직후 사용 가능하다.
+        """
+        self.app_menubar = QMenuBar()
+
+        stock_menu = self.app_menubar.addMenu("종목")
+        stock_menu.addAction("종목 추가", self.open_add_dialog)
+        stock_menu.addAction("종목 관리", self.open_manage_dialog)
+
+        file_menu = self.app_menubar.addMenu("파일")
+        file_menu.addAction("Excel 내보내기", self.open_export_dialog)
+        file_menu.addAction("Excel 가져오기", self.open_import_dialog)
+
+        view_menu = self.app_menubar.addMenu("보기")
+        self.app_assets_action = view_menu.addAction(
+            "자산 정보 숨기기", self._toggle_assets_hidden
+        )
+        self.app_assets_action.setCheckable(True)
+
+        help_menu = self.app_menubar.addMenu("도움말")
+        self.app_update_action = help_menu.addAction(
+            "업데이트 확인", self.open_update_dialog
+        )
 
     # ── 앱 active/inactive 트랜지션 ───────────────────────────────────────
     # ApplicationActivate 이벤트와 applicationStateChanged 시그널 양쪽에
@@ -288,8 +313,12 @@ class MacAppManager(QObject):
         self.last_minute_data.pop(code, None)
         self.popover.update_stock_daily(code, candles)
 
-    def _on_assets_hidden_changed(self, hidden: bool):
-        self.assets_hidden = hidden
+    def _toggle_assets_hidden(self):
+        """자산 숨김 토글 — 메뉴바 메뉴 / 팝오버 상단 카드 클릭 양쪽에서 호출.
+        팝오버와 메뉴 체크 상태를 함께 동기화하고 설정에 저장한다."""
+        self.assets_hidden = not self.assets_hidden
+        self.popover.set_assets_hidden(self.assets_hidden)
+        self.app_assets_action.setChecked(self.assets_hidden)
         self._save_config()
 
     def _on_opacity_changed(self, opacity: float):
@@ -724,12 +753,14 @@ class MacAppManager(QObject):
             self._show_update_toast(release)
 
     def _refresh_update_badge(self):
-        """팝오버 🔄 버튼에 새 버전 표시 토글."""
+        """메뉴바 '업데이트 확인' 항목에 새 버전 표시 토글."""
         has_update = (
             self._cached_release is not None
             and updater.is_newer(__version__, self._cached_release.version)
         )
-        self.popover.set_update_available(has_update)
+        self.app_update_action.setText(
+            "업데이트 확인  (새 버전 있음)" if has_update else "업데이트 확인"
+        )
 
     def _show_update_toast(self, release: updater.ReleaseInfo):
         """macOS 알림센터 토스트 — 클릭하면 menubar.notification_clicked → open_update_dialog."""

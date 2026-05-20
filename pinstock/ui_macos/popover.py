@@ -295,10 +295,14 @@ class PortfolioSummary(QWidget):
     H = 92
     MASK = "•••••"
 
+    clicked = pyqtSignal()   # 카드 클릭 → 자산 숨김 토글
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(self.H)
         self.setStyleSheet("background: transparent;")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("클릭하여 자산 정보 숨기기 / 표시")
         self._total_invest: int = 0
         self._total_eval: int = 0
         self._has_data: bool = False
@@ -313,6 +317,13 @@ class PortfolioSummary(QWidget):
         self.eval_val   = self._make_cell(grid, 0, 1, "평가금액")
         self.profit_val = self._make_cell(grid, 1, 0, "평가손익", bold=True)
         self.prate_val  = self._make_cell(grid, 1, 1, "수익률",   bold=True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def _make_cell(self, grid: QGridLayout, row: int, col: int,
                    key_text: str, bold: bool = False) -> QLabel:
@@ -412,21 +423,14 @@ class Popover(QWidget):
     MIN_H    = 420    # 종목이 적어도 시원하게 — 빈 상태에도 안내문이 잘 보이게
     RADIUS   = 12
     OUTER_M  = 8      # 카드 바깥 마진 (그림자/여백)
-    ACTION_H   = 44   # 하단 액션 바 높이
-    CONTROLS_H = 28   # 액션 바 위 설정(투명도 슬라이더) 행 높이
+    CONTROLS_H = 34   # 하단 설정(필터/투명도 슬라이더) 행 높이
     RESIZE_MARGIN = 10
 
-    add_stock_requested      = pyqtSignal()
-    manage_stocks_requested  = pyqtSignal()
-    export_requested         = pyqtSignal()
-    import_requested         = pyqtSignal()
-    check_update_requested   = pyqtSignal()      # 🔄 액션 바 버튼 클릭
-    quit_requested           = pyqtSignal()
+    toggle_assets_requested  = pyqtSignal()      # 상단 요약 카드 클릭 → 자산 숨김 토글
     edit_requested           = pyqtSignal(str)   # code
     delete_requested         = pyqtSignal(str)   # code
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
-    assets_hidden_changed    = pyqtSignal(bool)
-    opacity_changed          = pyqtSignal(float)   # 0.6 ~ 1.0
+    opacity_changed          = pyqtSignal(float)   # 0.1 ~ 1.0
     height_changed           = pyqtSignal(int)     # px
     closed_by_user           = pyqtSignal()      # ESC 등 사용자 명시적 닫기
 
@@ -474,6 +478,7 @@ class Popover(QWidget):
 
         # ── 상단: 포트폴리오 요약 ────────────────────────────────────────
         self.summary = PortfolioSummary(self.card)
+        self.summary.clicked.connect(self.toggle_assets_requested.emit)
         root.addWidget(self.summary)
 
         sep1 = QFrame()
@@ -523,7 +528,7 @@ class Popover(QWidget):
         controls_row.setStyleSheet("background: transparent;")
         controls_row.setFixedHeight(self.CONTROLS_H)
         ch = QHBoxLayout(controls_row)
-        ch.setContentsMargins(14, 4, 14, 4)
+        ch.setContentsMargins(14, 7, 14, 7)
         ch.setSpacing(8)
 
         self.market_filter_buttons: dict[str, QPushButton] = {}
@@ -558,62 +563,6 @@ class Popover(QWidget):
         ch.addWidget(self.opacity_slider, 1)
 
         root.addWidget(controls_row)
-
-        # ── 하단: 액션 바 ────────────────────────────────────────────────
-        action_row = QWidget(self.card)
-        action_row.setStyleSheet("background: transparent;")
-        action_row.setFixedHeight(44)
-        hl = QHBoxLayout(action_row)
-        hl.setContentsMargins(8, 6, 8, 6)
-        hl.setSpacing(4)
-
-        def make_btn(label: str, tooltip: str, slot, *,
-                     color: str | None = None,
-                     weight: str = "normal",
-                     size: int = 16,
-                     padding: str = "6px 10px") -> QPushButton:
-            b = QPushButton(label)
-            b.setToolTip(tooltip)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent;
-                    color: {color or C['text']};
-                    border: none;
-                    border-radius: 6px;
-                    padding: {padding};
-                    font-size: {size}px;
-                    font-weight: {weight};
-                }}
-                QPushButton:hover {{ background: {C['surface']}; }}
-            """)
-            b.clicked.connect(slot)
-            return b
-
-        # "+"는 텍스트 글리프라 emoji 색이 안 먹는다 → 초록색 강제로 "추가" 의미 강조
-        # padding 비대칭(top<bottom)으로 수학 축에 걸친 "+"의 시각 중심을 위로 보정
-        hl.addWidget(make_btn("+", "종목 추가", self.add_stock_requested.emit,
-                              color=C['green'], weight="bold", size=28,
-                              padding="4px 10px 8px 10px"))
-        hl.addWidget(make_btn("📋", "종목 관리",   self.manage_stocks_requested.emit))
-        hl.addWidget(make_btn("📤", "Excel 내보내기", self.export_requested.emit))
-        hl.addWidget(make_btn("📥", "Excel 가져오기", self.import_requested.emit))
-
-        hl.addStretch()
-
-        self.toggle_assets_btn = make_btn("👁", "자산 정보 숨기기", self._on_toggle_assets)
-        hl.addWidget(self.toggle_assets_btn)
-
-        # 업데이트 확인. 새 버전이 발견되면 manager 가 set_update_available(True) 로
-        # 툴팁에 "(새 버전 있음)" 을 붙이는 식으로 뱃지를 표시한다.
-        self.update_btn = make_btn("🔄", "업데이트 확인",
-                                   self.check_update_requested.emit)
-        self._update_tooltip_base = "업데이트 확인"
-        hl.addWidget(self.update_btn)
-
-        hl.addWidget(make_btn("❌", "종료", self.quit_requested.emit))
-
-        root.addWidget(action_row)
 
     def _make_market_filter_btn(self, text: str, market: str) -> QPushButton:
         btn = QPushButton(text)
@@ -667,18 +616,6 @@ class Popover(QWidget):
             return True
         market = "US" if is_us_stock(stock) else "KR"
         return market == self._market_filter
-
-    # ── 업데이트 뱃지 ────────────────────────────────────────────────────
-    def set_update_available(self, available: bool):
-        """🔄 버튼에 새 버전 표시. 텍스트 뒤 작은 점 추가 + 툴팁 확장."""
-        if not hasattr(self, "update_btn"):
-            return
-        if available:
-            self.update_btn.setText("🔄●")
-            self.update_btn.setToolTip(self._update_tooltip_base + "  (새 버전 있음)")
-        else:
-            self.update_btn.setText("🔄")
-            self.update_btn.setToolTip(self._update_tooltip_base)
 
     # ── 데이터 동기화 ────────────────────────────────────────────────────
     def set_stocks(self, stocks: list[dict]):
@@ -746,41 +683,24 @@ class Popover(QWidget):
         else:
             rows_h = 120   # empty_lbl 안내 영역
 
-        # PortfolioSummary + 구분선 2개 + 종목 영역 + 설정 바 + 액션 바
+        # PortfolioSummary + 구분선 2개 + 종목 영역 + 설정 바
         # + 카드 위/아래 outer margin (각각 OUTER_M)
         return (
             PortfolioSummary.H + 1 + rows_h + 1
-            + self.CONTROLS_H + self.ACTION_H
+            + self.CONTROLS_H
             + self.OUTER_M * 2
         )
 
     # ── 자산 정보 숨김 ────────────────────────────────────────────────────
     def set_assets_hidden(self, hidden: bool):
-        """외부(매니저)에서 상태 동기화. 시그널은 emit 하지 않는다."""
+        """자산 표시/숨김 상태 적용. 시그널은 emit 하지 않는다.
+        토글은 매니저가 중앙에서 처리하며 (메뉴 / 상단 카드 클릭) 이 메서드로 반영한다."""
         if self._assets_hidden == hidden:
-            self._apply_assets_btn_visual()
             return
         self._assets_hidden = hidden
         self.summary.set_assets_hidden(hidden)
         for row in self.rows.values():
             row.set_assets_hidden(hidden)
-        self._apply_assets_btn_visual()
-
-    def _on_toggle_assets(self):
-        self._assets_hidden = not self._assets_hidden
-        self.summary.set_assets_hidden(self._assets_hidden)
-        for row in self.rows.values():
-            row.set_assets_hidden(self._assets_hidden)
-        self._apply_assets_btn_visual()
-        self.assets_hidden_changed.emit(self._assets_hidden)
-
-    def _apply_assets_btn_visual(self):
-        if self._assets_hidden:
-            self.toggle_assets_btn.setText("🙈")
-            self.toggle_assets_btn.setToolTip("자산 정보 표시")
-        else:
-            self.toggle_assets_btn.setText("👁")
-            self.toggle_assets_btn.setToolTip("자산 정보 숨기기")
 
     # ── 투명도 ────────────────────────────────────────────────────────────
     def set_opacity(self, value: float):
