@@ -430,7 +430,7 @@ class Popover(QWidget):
     height_changed           = pyqtSignal(int)     # px
     closed_by_user           = pyqtSignal()      # ESC 등 사용자 명시적 닫기
 
-    OPACITY_MIN = 60   # 슬라이더 정수 단위 (퍼센트). 60% 미만은 가독성 저하로 차단.
+    OPACITY_MIN = 10   # 슬라이더 정수 단위 (퍼센트).
     OPACITY_MAX = 100
 
     def __init__(self, parent=None):
@@ -531,11 +531,6 @@ class Popover(QWidget):
             btn = self._make_market_filter_btn(text, market)
             ch.addWidget(btn)
 
-        opacity_caption = QLabel("투명도")
-        opacity_caption.setFont(QFont(_FONT_FAMILY, 10))
-        opacity_caption.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
-        ch.addWidget(opacity_caption)
-
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(self.OPACITY_MIN, self.OPACITY_MAX)
         self.opacity_slider.setValue(self.OPACITY_MAX)
@@ -559,6 +554,7 @@ class Popover(QWidget):
             }}
         """)
         self.opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
+        ch.addStretch(1)
         ch.addWidget(self.opacity_slider, 1)
 
         root.addWidget(controls_row)

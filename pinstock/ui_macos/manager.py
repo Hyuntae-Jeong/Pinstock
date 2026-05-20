@@ -392,7 +392,7 @@ class MacAppManager(QObject):
             self.assets_hidden = bool(data.get("assets_hidden", False))
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
-                self.popover_opacity = max(0.6, min(1.0, opacity))
+                self.popover_opacity = max(0.1, min(1.0, opacity))
             except (TypeError, ValueError):
                 self.popover_opacity = 1.0
             try:
