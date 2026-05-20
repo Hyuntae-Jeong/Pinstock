@@ -435,6 +435,17 @@ class MasterWidget(QWidget):
         y = self.y() + self.GRID_H
         self.slider_window.move(x, y)
 
+    def sync_aux_windows(self):
+        """마스터와 분리된 슬라이더/잠금 오버레이를 현재 상태에 맞춰 복원."""
+        self._sync_slider_window_pos()
+        if hasattr(self, "slider_window"):
+            if self.isVisible():
+                self.slider_window.show()
+                self.slider_window.raise_()
+            else:
+                self.slider_window.hide()
+        self._sync_lock_overlay()
+
     # ── 마스터 이동/표시 변화에 맞춰 슬라이더 윈도우 + 자물쇠 오버레이 따라가기 ──
     def moveEvent(self, event):
         super().moveEvent(event)
@@ -448,11 +459,7 @@ class MasterWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._sync_slider_window_pos()
-        if hasattr(self, "slider_window"):
-            self.slider_window.show()
-            self.slider_window.raise_()
-        self._sync_lock_overlay()
+        self.sync_aux_windows()
 
     def hideEvent(self, event):
         super().hideEvent(event)

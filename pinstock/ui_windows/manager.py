@@ -255,6 +255,7 @@ class WidgetManager:
         self._compact_visible_widgets()
         if self.master_widget:
             self.master_widget.set_market_filter(self.market_filter)
+            self.master_widget.sync_aux_windows()
 
     # ── 트레이 ─────────────────────────────────────────────────────────────
     def _setup_tray(self):
