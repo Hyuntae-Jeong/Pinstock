@@ -250,6 +250,12 @@ set "NEW_ZIP=%~3"
 set "ERR_LOG=%~4"
 set "OLD_DIR=%INSTALL_DIR%.old"
 
+REM cwd 를 install_dir 밖으로 옮긴다. cmd.exe 가 install_dir 을 cwd 로 들고
+REM 있으면 Windows 가 그 폴더의 rename 자체를 거부해서(ERROR_SHARING_VIOLATION)
+REM 2단계 move 가 ERR_BACKUP_RENAME 으로 떨어진다. Pinstock.exe 를 install_dir
+REM 안에서 더블클릭으로 실행하면 부모 cwd 가 install_dir 이라 그대로 상속된다.
+cd /d "%TEMP%"
+
 REM 1) wait for main process to exit (max 30s)
 set /a TRIES=0
 :wait
@@ -431,6 +437,9 @@ def launch_updater_windows(install_dir: Path, new_zip: Path) -> None:
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_NO_WINDOW = 0x08000000
 
+    # cwd 를 install_dir 밖으로 명시. Pinstock.exe 가 install_dir 안에서
+    # 더블클릭으로 실행됐을 때 부모 cwd 가 install_dir 이라 그대로 상속되면
+    # 헬퍼 cmd.exe 가 install_dir 을 잡고 있게 되어 move 가 거부된다.
     subprocess.Popen(
         [
             "cmd.exe", "/c",
@@ -440,6 +449,7 @@ def launch_updater_windows(install_dir: Path, new_zip: Path) -> None:
             str(new_zip),
             str(err_log),
         ],
+        cwd=str(_temp_dir()),
         creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
         close_fds=True,
         stdin=subprocess.DEVNULL,
