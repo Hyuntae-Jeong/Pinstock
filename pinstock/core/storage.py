@@ -5,6 +5,8 @@ import sys
 import shutil
 from pathlib import Path
 
+from .portfolio import portfolio_totals
+
 
 # ─── 설정 파일 경로 (OS별 표준 디렉토리) ──────────────────────────────────────
 def _config_dir() -> Path:
@@ -21,6 +23,42 @@ def _config_dir() -> Path:
 
 CONFIG_FILE = str(_config_dir() / "stocks.json")
 BACKUP_FILE = CONFIG_FILE + ".bak"
+
+
+# ─── 종목 스키마 기본값 ─────────────────────────────────────────────────────
+MARKET_KR = "KR"
+MARKET_US = "US"
+CURRENCY_KRW = "KRW"
+CURRENCY_USD = "USD"
+
+
+def normalize_stock_schema(stock: dict) -> dict:
+    """기존 stocks.json 항목에 시장/통화 기본값을 보강한다.
+
+    미국 주식 지원 전의 기존 데이터는 market/currency 필드가 없으므로 한국
+    주식으로 취급한다. 알 수 없는 부가 필드(pos, hidden 등)는 그대로 보존한다.
+    """
+    normalized = dict(stock)
+    market = str(normalized.get("market") or MARKET_KR).strip().upper()
+    if market not in {MARKET_KR, MARKET_US}:
+        market = MARKET_KR
+    normalized["market"] = market
+
+    default_currency = CURRENCY_USD if market == MARKET_US else CURRENCY_KRW
+    currency = str(normalized.get("currency") or default_currency).strip().upper()
+    normalized["currency"] = currency or default_currency
+
+    if market == MARKET_US and "buy_exchange_rate" in normalized:
+        try:
+            normalized["buy_exchange_rate"] = float(normalized["buy_exchange_rate"])
+        except (TypeError, ValueError):
+            normalized.pop("buy_exchange_rate", None)
+
+    return normalized
+
+
+def normalize_stocks_schema(stocks: list[dict]) -> list[dict]:
+    return [normalize_stock_schema(s) for s in stocks if isinstance(s, dict)]
 
 
 # ─── 레거시 위치(레포 루트/CWD)에서 새 위치로 1회 자동 이전 ───────────────
@@ -74,12 +112,14 @@ EXCEL_COLUMNS = [
 
 # ─── Excel import/export ─────────────────────────────────────────────────────
 def export_stocks_to_excel(stocks: list[dict], path: str,
-                           current_prices: dict | None = None) -> None:
+                           current_prices: dict | None = None,
+                           usd_krw_rate: float | None = None) -> None:
     """보유 종목을 .xlsx 로 내보내기.
     - 종목코드는 텍스트 셀로 저장 (선행 0 보존: '005930', '0183J0').
     - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음.
-    - current_prices ({code: price}) 가 주어지면 시트 하단에 포트폴리오 요약
-      (총 매입금액 / 평가금액 / 평가손익 / 수익률) 을 빈 행 한 줄로 분리해서 추가.
+    - current_prices ({code: price}) 와 usd_krw_rate 가 주어지면 시트 하단에
+      포트폴리오 요약(총 매입금액 / 평가금액 / 평가손익 / 수익률)을 빈 행 한
+      줄로 분리해서 추가. 미국 주식은 원화 기준으로 합산한다.
       import 시에는 빈 행 이후의 행을 모두 무시하므로 라운드트립에 영향 없음."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment
@@ -122,19 +162,16 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
     # 종목 표와 빈 행 한 줄로 분리. import 측에서 빈 행 이후를 모두 무시하므로
     # 라운드트립 안전.
     if stocks:
-        total_invest = sum(
-            int(s.get("avg_price", 0)) * int(s.get("quantity", 0)) for s in stocks
+        totals = portfolio_totals(
+            stocks,
+            current_prices=current_prices,
+            usd_krw_rate=usd_krw_rate,
+            include_hidden=True,
         )
-        cp = current_prices or {}
-        total_eval = 0
-        for s in stocks:
-            avg = int(s.get("avg_price", 0))
-            qty = int(s.get("quantity", 0))
-            # 현재가가 없는 종목은 평단가로 폴백 (평가손익 0 으로 계산됨)
-            price = int(cp.get(s.get("code")) or avg)
-            total_eval += price * qty
-        profit = total_eval - total_invest
-        prate  = (profit / total_invest * 100.0) if total_invest else 0.0
+        total_invest = totals["total_invest"]
+        total_eval = totals["total_eval"]
+        profit = totals["profit"]
+        prate = totals["profit_rate"]
 
         # 빈 행 한 줄 띄우고 다음 행에 요약 헤더
         header_row = ws.max_row + 2
@@ -232,12 +269,12 @@ def import_stocks_from_excel(path: str) -> list[dict]:
 
         name = str(raw_name).strip() if raw_name is not None and str(raw_name).strip() else code
 
-        stocks.append({
+        stocks.append(normalize_stock_schema({
             "code":      code,
             "name":      name,
             "avg_price": avg_price,
             "quantity":  quantity,
-        })
+        }))
         seen_codes.add(code)
 
     if errors:
@@ -249,4 +286,4 @@ def import_stocks_from_excel(path: str) -> list[dict]:
     if not stocks:
         raise ValueError("가져올 종목이 없습니다. (데이터 행을 찾지 못했습니다)")
 
-    return stocks
+    return normalize_stocks_schema(stocks)

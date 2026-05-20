@@ -36,6 +36,9 @@ files.zip
 # Claude Code 로컬 설정
 .claude/settings.local.json
 
+# Codex 로컬 설정
+AGENTS.md
+
 # OS
 Thumbs.db
 Desktop.ini

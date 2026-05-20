@@ -1,7 +1,7 @@
 """다이얼로그용 폼 위젯: AutoSelect 라인에디트/스핀박스, ArrowSpinBox, ToggleSwitch."""
 
 from PyQt6.QtWidgets import (
-    QWidget, QLineEdit, QSpinBox, QStyle, QStyleOptionSpinBox,
+    QWidget, QLineEdit, QSpinBox, QDoubleSpinBox, QStyle, QStyleOptionSpinBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPolygon
@@ -27,6 +27,10 @@ class AutoSelectLineEdit(_SelectAllOnFocus, QLineEdit):
 
 
 class AutoSelectSpinBox(_SelectAllOnFocus, QSpinBox):
+    pass
+
+
+class AutoSelectDoubleSpinBox(_SelectAllOnFocus, QDoubleSpinBox):
     pass
 
 

@@ -6,7 +6,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
 
-from ..core.api import fetch_stock, fetch_minute_chart, fetch_daily_chart
+from ..core.api import (
+    fetch_stock, fetch_minute_chart, fetch_daily_chart,
+    fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
+)
+from ..core.portfolio import is_us_stock, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .chart_widget import SparklineWidget
 from .manage_dialog import StockDialog
@@ -22,13 +26,16 @@ class StockWidget(QWidget):
 
     MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
-    EXPAND_H   = 214    # 확장 높이 (compact + 상세 패널 156)
+    EXPAND_H_KR = 214
+    EXPAND_H_US = 268
+    EXPAND_H   = EXPAND_H_KR
     RADIUS     = 13     # 모서리 반지름
 
     def __init__(self, stock_data: dict, width: int | None = None, stagger_idx: int = 0):
         super().__init__()
         self.data = stock_data          # code, name, avg_price, quantity, pos
-        self.current_price: int = 0
+        self.current_price: float = 0
+        self.usd_krw_rate: float | None = None
         self.is_expanded: bool = False
         self._drag_pos = None
         self._press_pos = None    # 좌클릭 시작 위치 (드래그/클릭 구분용)
@@ -145,7 +152,7 @@ class StockWidget(QWidget):
         hl.addWidget(self.sparkline, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # ── 확장 패널 ────────────────────────────────────────────────────
-        panel_h = self.EXPAND_H - self.COMPACT_H
+        panel_h = self.EXPAND_H_US - self.COMPACT_H
         self.expand_panel = QWidget(self.card)
         self.expand_panel.setGeometry(0, self.COMPACT_H, self.W, panel_h)
         self.expand_panel.setStyleSheet("background: transparent;")
@@ -163,14 +170,17 @@ class StockWidget(QWidget):
         vl.addSpacing(2)
 
         # 상세 행 생성
-        self.avg_val    = self._make_row(vl, "평단가")
-        self.qty_val    = self._make_row(vl, "보유수량")
-        self.invest_val = self._make_row(vl, "투자원금")
-        self.eval_val   = self._make_row(vl, "평가금액")
+        self.avg_row, self.avg_key, self.avg_val = self._make_row(vl, "평단가")
+        self.fx_row, self.fx_key, self.fx_val = self._make_row(vl, "매수환율")
+        self.qty_row, self.qty_key, self.qty_val = self._make_row(vl, "보유수량")
+        self.invest_row, self.invest_key, self.invest_val = self._make_row(vl, "투자원금")
+        self.eval_row, self.eval_key, self.eval_val = self._make_row(vl, "평가금액")
 
         # 손익 (강조)
-        self.profit_val = self._make_row(vl, "평가손익", bold=True)
-        self.prate_val  = self._make_row(vl, "수익률",   bold=True)
+        self.profit_row, self.profit_key, self.profit_val = self._make_row(vl, "평가손익", bold=True)
+        self.fx_profit_row, self.fx_profit_key, self.fx_profit_val = self._make_row(vl, "환차손익")
+        self.total_profit_row, self.total_profit_key, self.total_profit_val = self._make_row(vl, "총 평가손익", bold=True)
+        self.prate_row, self.prate_key, self.prate_val = self._make_row(vl, "수익률", bold=True)
 
     # ── 외부에서 위젯 너비 변경 (통일 너비 적용용) ────────────────────
     def set_width(self, new_w: int):
@@ -181,10 +191,10 @@ class StockWidget(QWidget):
         self.setFixedWidth(new_w)
         self.card.setGeometry(0, 0, new_w, cur_h)
         self.compact.setGeometry(0, 0, new_w, self.COMPACT_H)
-        panel_h = self.EXPAND_H - self.COMPACT_H
+        panel_h = self.EXPAND_H_US - self.COMPACT_H
         self.expand_panel.setGeometry(0, self.COMPACT_H, new_w, panel_h)
 
-    def _make_row(self, parent_layout, key_text: str, bold=False) -> QLabel:
+    def _make_row(self, parent_layout, key_text: str, bold=False) -> tuple[QHBoxLayout, QLabel, QLabel]:
         """키-값 한 줄 생성, 값 QLabel 반환"""
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -192,6 +202,7 @@ class StockWidget(QWidget):
         key_lbl = QLabel(key_text)
         key_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
         key_lbl.setFixedWidth(58)
+        key_lbl.setFixedHeight(16)
 
         val_lbl = QLabel("─")
         style = f"color: {C['text']}; font-size: 11px;"
@@ -199,16 +210,25 @@ class StockWidget(QWidget):
             style += " font-weight: bold;"
         val_lbl.setStyleSheet(style)
         val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        val_lbl.setFixedHeight(16)
 
         row.addWidget(key_lbl)
         row.addWidget(val_lbl)
         parent_layout.addLayout(row)
-        return val_lbl
+        return row, key_lbl, val_lbl
+
+    @staticmethod
+    def _set_row_visible(row: QHBoxLayout, visible: bool):
+        for i in range(row.count()):
+            item = row.itemAt(i)
+            widget = item.widget()
+            if widget:
+                widget.setVisible(visible)
 
     # ── 데이터 갱신 ────────────────────────────────────────────────────────
     def _fetch_price(self):
         """현재가/등락률 갱신 (5초 주기)."""
-        result = fetch_stock(self.data["code"])
+        result = fetch_us_stock(self.data["code"]) if is_us_stock(self.data) else fetch_stock(self.data["code"])
         if result:
             self.data["name"] = result["name"]
             self.name_lbl.setText(result["name"])
@@ -217,15 +237,23 @@ class StockWidget(QWidget):
             self._apply_price(result)
             self.price_updated.emit(self.data["code"])
 
+    def set_usd_krw_rate(self, rate: float | None):
+        self.usd_krw_rate = rate
+        if self.current_price:
+            self._update_detail(self.current_price)
+
     def _fetch_chart(self):
         """sparkline 갱신 (60초 주기) — 당일 분봉 우선, 비어있으면 최근 일봉 폴백."""
-        chart = fetch_minute_chart(self.data["code"])
+        if is_us_stock(self.data):
+            chart = fetch_us_minute_chart(self.data["code"])
+        else:
+            chart = fetch_minute_chart(self.data["code"])
         if chart and len(chart["prices"]) >= 2:
             # 분봉 모드: 전일 종가 점선(=현재가 - 전일대비)도 함께 표시
             self.sparkline.set_data(chart["prices"], chart["open"], self._prev_close)
         else:
             # 일봉 모드: 최근 N일 캔들 차트로 폴백
-            daily = fetch_daily_chart(self.data["code"])
+            daily = fetch_us_daily_chart(self.data["code"]) if is_us_stock(self.data) else fetch_daily_chart(self.data["code"])
             if daily:
                 self.sparkline.set_candles(daily["candles"])
 
@@ -251,26 +279,58 @@ class StockWidget(QWidget):
 
         self._update_detail(price)
 
-    def _update_detail(self, price: int):
-        avg    = self.data.get("avg_price", 0)
-        qty    = self.data.get("quantity", 0)
-        invest = avg * qty
-        eval_  = price * qty
-        profit = eval_ - invest
-        prate  = (profit / invest * 100) if invest else 0
+    def _update_detail(self, price: float):
+        avg = self.data.get("avg_price", 0)
+        qty = self.data.get("quantity", 0)
+        metrics = stock_metrics(self.data, price, self.usd_krw_rate)
+        invest = metrics["invest"]
+        eval_ = metrics["eval"]
+        profit = metrics["profit"]
+        prate = metrics["profit_rate"]
 
         sign  = "+" if profit >= 0 else ""
         color = C["red"] if profit >= 0 else C["blue"]
 
-        self.avg_val.setText(f"{avg:,} 원")
+        if is_us_stock(self.data):
+            self.EXPAND_H = self.EXPAND_H_US
+            self._set_row_visible(self.fx_row, True)
+            self._set_row_visible(self.fx_profit_row, True)
+            self._set_row_visible(self.total_profit_row, True)
+            self.avg_val.setText(f"{float(avg):,.2f} USD")
+            self.fx_val.setText(f"{metrics['buy_rate']:,.2f} 원/USD")
+            stock_profit = metrics["stock_profit"]
+            fx_profit = metrics["fx_profit"]
+            stock_sign = "+" if stock_profit >= 0 else ""
+            stock_color = C["red"] if stock_profit >= 0 else C["blue"]
+            fx_sign = "+" if fx_profit >= 0 else ""
+            fx_color = C["red"] if fx_profit >= 0 else C["blue"]
+            self.profit_val.setText(f"{stock_sign}{stock_profit:,} 원")
+            self.profit_val.setStyleSheet(f"color: {stock_color}; font-size: 11px; font-weight: bold;")
+            self.fx_profit_val.setText(f"{fx_sign}{fx_profit:,} 원")
+            self.fx_profit_val.setStyleSheet(f"color: {fx_color}; font-size: 11px;")
+            self.total_profit_val.setText(f"{sign}{profit:,} 원")
+            self.total_profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        else:
+            self.EXPAND_H = self.EXPAND_H_KR
+            self._set_row_visible(self.fx_row, False)
+            self._set_row_visible(self.fx_profit_row, False)
+            self._set_row_visible(self.total_profit_row, False)
+            self.avg_val.setText(f"{int(avg):,} 원")
+            self.fx_val.setText("─")
+            self.fx_profit_val.setText("─")
+            self.fx_profit_val.setStyleSheet(f"color: {C['text']}; font-size: 11px;")
+            self.total_profit_val.setText("─")
+            self.total_profit_val.setStyleSheet(f"color: {C['text']}; font-size: 11px;")
+            self.profit_val.setText(f"{sign}{profit:,} 원")
+            self.profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.qty_val.setText(f"{qty:,} 주")
         self.invest_val.setText(f"{invest:,} 원")
         self.eval_val.setText(f"{eval_:,} 원")
-
-        self.profit_val.setText(f"{sign}{profit:,} 원")
-        self.profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.prate_val.setText(f"{sign}{prate:.2f}%")
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        if self.is_expanded:
+            self.setFixedHeight(self.EXPAND_H)
+            self.card.setGeometry(0, 0, self.W, self.EXPAND_H)
 
     # ── 확장 / 축소 ────────────────────────────────────────────────────────
     def toggle_expand(self):
@@ -373,6 +433,8 @@ class StockWidget(QWidget):
             new = dlg.get_data()
             self.data["avg_price"] = new["avg_price"]
             self.data["quantity"]  = new["quantity"]
+            if "buy_exchange_rate" in new:
+                self.data["buy_exchange_rate"] = new["buy_exchange_rate"]
             if self.current_price:
                 self._update_detail(self.current_price)
             self.edited.emit(self.data["code"])

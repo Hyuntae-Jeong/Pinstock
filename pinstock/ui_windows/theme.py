@@ -45,7 +45,7 @@ QLabel {{
     color: {C['subtext']};
     font-size: 12px;
 }}
-QLineEdit, QSpinBox {{
+QLineEdit, QSpinBox, QDoubleSpinBox {{
     background: {C['surface']};
     color: {C['text']};
     border: 1px solid {C['surface2']};
@@ -54,21 +54,24 @@ QLineEdit, QSpinBox {{
     font-size: 13px;
     selection-background-color: {C['blue']};
 }}
-QLineEdit:focus, QSpinBox:focus {{
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
     border: 1px solid {C['blue']};
 }}
-QSpinBox::up-button, QSpinBox::down-button {{
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
     background: {C['surface2']};
     border: none;
     width: 22px;
 }}
-QSpinBox::up-button {{ border-top-right-radius: 6px; }}
-QSpinBox::down-button {{ border-bottom-right-radius: 6px; }}
-QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+QSpinBox::up-button, QDoubleSpinBox::up-button {{ border-top-right-radius: 6px; }}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{ border-bottom-right-radius: 6px; }}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
     background: {C['blue']};
 }}
 /* 화살표는 ArrowSpinBox.paintEvent에서 직접 그림 — Qt 기본 화살표는 숨김 */
-QSpinBox::up-arrow, QSpinBox::down-arrow {{
+QSpinBox::up-arrow, QSpinBox::down-arrow,
+QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {{
     image: none;
     width: 0;
     height: 0;

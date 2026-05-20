@@ -13,6 +13,7 @@ from PyQt6.QtGui import QFont, QFontMetrics, QScreen
 
 from ..ui_windows.theme import C, TRAY_MENU_STYLE
 from ..ui_windows.chart_widget import SparklineWidget
+from ..core.portfolio import is_us_stock, stock_metrics
 
 
 # macOS 시스템 한글 폰트 (Malgun Gothic 의 Mac 대체)
@@ -31,12 +32,15 @@ class StockRow(QWidget):
     delete_requested = pyqtSignal(str)   # code
 
     COMPACT_H = 52
-    EXPAND_H  = 168
+    EXPAND_H_KR = 168
+    EXPAND_H_US = 222
+    EXPAND_H  = EXPAND_H_KR
 
     def __init__(self, stock_data: dict, parent=None):
         super().__init__(parent)
         self.data = stock_data
-        self.current_price: int = 0
+        self.current_price: float = 0
+        self.usd_krw_rate: float | None = None
         self.is_expanded: bool = False
         self._prev_close: float = 0.0
         self.assets_hidden: bool = False
@@ -114,22 +118,26 @@ class StockRow(QWidget):
         vl.addWidget(sep)
         vl.addSpacing(2)
 
-        self.avg_val    = self._make_detail_row(vl, "평단가")
-        self.qty_val    = self._make_detail_row(vl, "보유수량")
-        self.invest_val = self._make_detail_row(vl, "투자원금")
-        self.eval_val   = self._make_detail_row(vl, "평가금액")
-        self.profit_val = self._make_detail_row(vl, "평가손익", bold=True)
-        self.prate_val  = self._make_detail_row(vl, "수익률",   bold=True)
+        self.avg_row, self.avg_key, self.avg_val = self._make_detail_row(vl, "평단가")
+        self.fx_row, self.fx_key, self.fx_val = self._make_detail_row(vl, "매수환율")
+        self.qty_row, self.qty_key, self.qty_val = self._make_detail_row(vl, "보유수량")
+        self.invest_row, self.invest_key, self.invest_val = self._make_detail_row(vl, "투자원금")
+        self.eval_row, self.eval_key, self.eval_val = self._make_detail_row(vl, "평가금액")
+        self.profit_row, self.profit_key, self.profit_val = self._make_detail_row(vl, "평가손익", bold=True)
+        self.fx_profit_row, self.fx_profit_key, self.fx_profit_val = self._make_detail_row(vl, "환차손익")
+        self.total_profit_row, self.total_profit_key, self.total_profit_val = self._make_detail_row(vl, "총 평가손익", bold=True)
+        self.prate_row, self.prate_key, self.prate_val = self._make_detail_row(vl, "수익률", bold=True)
 
         outer.addWidget(self.expand_panel)
 
-    def _make_detail_row(self, parent_layout, key_text: str, bold: bool = False) -> QLabel:
+    def _make_detail_row(self, parent_layout, key_text: str, bold: bool = False) -> tuple[QHBoxLayout, QLabel, QLabel]:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
 
         key_lbl = QLabel(key_text)
         key_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
         key_lbl.setFixedWidth(64)
+        key_lbl.setFixedHeight(16)
 
         val_lbl = QLabel("─")
         style = f"color: {C['text']}; font-size: 11px;"
@@ -137,11 +145,20 @@ class StockRow(QWidget):
             style += " font-weight: bold;"
         val_lbl.setStyleSheet(style)
         val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        val_lbl.setFixedHeight(16)
 
         row.addWidget(key_lbl)
         row.addWidget(val_lbl)
         parent_layout.addLayout(row)
-        return val_lbl
+        return row, key_lbl, val_lbl
+
+    @staticmethod
+    def _set_row_visible(row: QHBoxLayout, visible: bool):
+        for i in range(row.count()):
+            item = row.itemAt(i)
+            widget = item.widget()
+            if widget:
+                widget.setVisible(visible)
 
     # ── 데이터 적용 ───────────────────────────────────────────────────────
     def apply_price(self, result: dict):
@@ -168,6 +185,10 @@ class StockRow(QWidget):
 
         self._refresh_detail()
 
+    def set_usd_krw_rate(self, rate: float | None):
+        self.usd_krw_rate = rate
+        self._refresh_detail()
+
     def apply_minute(self, prices: list, open_price: float):
         self.sparkline.set_data(prices, open_price, self._prev_close)
 
@@ -175,25 +196,57 @@ class StockRow(QWidget):
         self.sparkline.set_candles(candles)
 
     def _refresh_detail(self):
-        avg    = int(self.data.get("avg_price", 0))
+        avg    = float(self.data.get("avg_price", 0))
         qty    = int(self.data.get("quantity", 0))
         price  = self.current_price or avg
-        invest = avg * qty
-        eval_  = price * qty
-        profit = eval_ - invest
-        prate  = (profit / invest * 100) if invest else 0
+        metrics = stock_metrics(self.data, price, self.usd_krw_rate)
+        invest = metrics["invest"]
+        eval_ = metrics["eval"]
+        profit = metrics["profit"]
+        prate = metrics["profit_rate"]
 
         sign  = "+" if profit >= 0 else ""
         color = C["red"] if profit >= 0 else C["blue"]
 
-        self.avg_val.setText(f"{avg:,} 원")
+        if self.data.get("market") == "US" or self.data.get("currency") == "USD":
+            self.EXPAND_H = self.EXPAND_H_US
+            self._set_row_visible(self.fx_row, True)
+            self._set_row_visible(self.fx_profit_row, True)
+            self._set_row_visible(self.total_profit_row, True)
+            self.avg_val.setText(f"{float(avg):,.2f} USD")
+            self.fx_val.setText(f"{metrics['buy_rate']:,.2f} 원/USD")
+            stock_profit = metrics["stock_profit"]
+            fx_profit = metrics["fx_profit"]
+            stock_sign = "+" if stock_profit >= 0 else ""
+            stock_color = C["red"] if stock_profit >= 0 else C["blue"]
+            fx_sign = "+" if fx_profit >= 0 else ""
+            fx_color = C["red"] if fx_profit >= 0 else C["blue"]
+            self.profit_val.setText(f"{stock_sign}{stock_profit:,} 원")
+            self.profit_val.setStyleSheet(f"color: {stock_color}; font-size: 11px; font-weight: bold;")
+            self.fx_profit_val.setText(f"{fx_sign}{fx_profit:,} 원")
+            self.fx_profit_val.setStyleSheet(f"color: {fx_color}; font-size: 11px;")
+            self.total_profit_val.setText(f"{sign}{profit:,} 원")
+            self.total_profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        else:
+            self.EXPAND_H = self.EXPAND_H_KR
+            self._set_row_visible(self.fx_row, False)
+            self._set_row_visible(self.fx_profit_row, False)
+            self._set_row_visible(self.total_profit_row, False)
+            self.avg_val.setText(f"{int(avg):,} 원")
+            self.fx_val.setText("─")
+            self.fx_profit_val.setText("─")
+            self.fx_profit_val.setStyleSheet(f"color: {C['text']}; font-size: 11px;")
+            self.total_profit_val.setText("─")
+            self.total_profit_val.setStyleSheet(f"color: {C['text']}; font-size: 11px;")
+            self.profit_val.setText(f"{sign}{profit:,} 원")
+            self.profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.qty_val.setText(f"{qty:,} 주")
         self.invest_val.setText(f"{invest:,} 원")
         self.eval_val.setText(f"{eval_:,} 원")
-        self.profit_val.setText(f"{sign}{profit:,} 원")
-        self.profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.prate_val.setText(f"{sign}{prate:.2f}%")
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        if self.is_expanded:
+            self.setFixedHeight(self.EXPAND_H)
 
     def set_assets_hidden(self, hidden: bool):
         self.assets_hidden = hidden
@@ -356,12 +409,12 @@ class Popover(QWidget):
     """
 
     W        = 360
-    MAX_H    = 640
     MIN_H    = 420    # 종목이 적어도 시원하게 — 빈 상태에도 안내문이 잘 보이게
     RADIUS   = 12
     OUTER_M  = 8      # 카드 바깥 마진 (그림자/여백)
     ACTION_H   = 44   # 하단 액션 바 높이
     CONTROLS_H = 28   # 액션 바 위 설정(투명도 슬라이더) 행 높이
+    RESIZE_MARGIN = 10
 
     add_stock_requested      = pyqtSignal()
     manage_stocks_requested  = pyqtSignal()
@@ -371,8 +424,10 @@ class Popover(QWidget):
     quit_requested           = pyqtSignal()
     edit_requested           = pyqtSignal(str)   # code
     delete_requested         = pyqtSignal(str)   # code
+    market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
     assets_hidden_changed    = pyqtSignal(bool)
     opacity_changed          = pyqtSignal(float)   # 0.6 ~ 1.0
+    height_changed           = pyqtSignal(int)     # px
     closed_by_user           = pyqtSignal()      # ESC 등 사용자 명시적 닫기
 
     OPACITY_MIN = 60   # 슬라이더 정수 단위 (퍼센트). 60% 미만은 가독성 저하로 차단.
@@ -389,6 +444,13 @@ class Popover(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.rows: dict[str, StockRow] = {}
         self._assets_hidden: bool = False
+        self._usd_krw_rate: float | None = None
+        self._market_filter: str = "ALL"
+        self._preferred_height: int | None = None
+        self._height_resizing: bool = False
+        self._resize_start_y: int = 0
+        self._resize_start_h: int = 0
+        self.setMouseTracking(True)
         self._build_ui()
 
     def _build_ui(self):
@@ -463,6 +525,11 @@ class Popover(QWidget):
         ch = QHBoxLayout(controls_row)
         ch.setContentsMargins(14, 4, 14, 4)
         ch.setSpacing(8)
+
+        self.market_filter_buttons: dict[str, QPushButton] = {}
+        for text, market in (("전체", "ALL"), ("한국", "KR"), ("미국", "US")):
+            btn = self._make_market_filter_btn(text, market)
+            ch.addWidget(btn)
 
         opacity_caption = QLabel("투명도")
         opacity_caption.setFont(QFont(_FONT_FAMILY, 10))
@@ -552,6 +619,59 @@ class Popover(QWidget):
 
         root.addWidget(action_row)
 
+    def _make_market_filter_btn(self, text: str, market: str) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(lambda _, m=market: self._set_market_filter(m, emit=True))
+        self.market_filter_buttons[market] = btn
+        active = market == self._market_filter
+        btn.setChecked(active)
+        self._apply_market_filter_btn_style(btn, active)
+        return btn
+
+    def _apply_market_filter_btn_style(self, btn: QPushButton, active: bool):
+        if active:
+            bg = C["blue"]
+            fg = C["bg"]
+            hover = "#b4befe"
+        else:
+            bg = "transparent"
+            fg = C["subtext"]
+            hover = C["surface"]
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {bg};
+                color: {fg};
+                border: none;
+                border-radius: 5px;
+                padding: 3px 7px;
+                font-size: 10px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {hover}; }}
+        """)
+
+    def _set_market_filter(self, market: str, *, emit: bool = False):
+        if market not in {"ALL", "KR", "US"}:
+            market = "ALL"
+        self._market_filter = market
+        for key, btn in self.market_filter_buttons.items():
+            active = key == market
+            btn.setChecked(active)
+            self._apply_market_filter_btn_style(btn, active)
+        if emit:
+            self.market_filter_changed.emit(market)
+
+    def set_market_filter(self, market: str):
+        self._set_market_filter(market, emit=False)
+
+    def _matches_market_filter(self, stock: dict) -> bool:
+        if self._market_filter == "ALL":
+            return True
+        market = "US" if is_us_stock(stock) else "KR"
+        return market == self._market_filter
+
     # ── 업데이트 뱃지 ────────────────────────────────────────────────────
     def set_update_available(self, available: bool):
         """🔄 버튼에 새 버전 표시. 텍스트 뒤 작은 점 추가 + 툴팁 확장."""
@@ -573,21 +693,24 @@ class Popover(QWidget):
             row.deleteLater()
         self.rows.clear()
 
-        if not stocks:
+        visible_stocks = [
+            s for s in stocks
+            if not s.get("hidden", False) and self._matches_market_filter(s)
+        ]
+        if not visible_stocks:
             self.empty_lbl.show()
             return
         self.empty_lbl.hide()
 
         # 새 행 추가 (insertWidget 으로 stretch 앞에 삽입)
-        for i, s in enumerate(stocks):
-            if s.get("hidden", False):
-                continue
+        for s in visible_stocks:
             row = StockRow(s)
             row.assets_hidden = self._assets_hidden
+            row.set_usd_krw_rate(self._usd_krw_rate)
             row.edit_requested.connect(self.edit_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
             self.rows[s["code"]] = row
-            self.rows_layout.insertWidget(i, row)
+            self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
 
     def update_summary(self, total_invest: int, total_eval: int):
         if total_invest == 0 and total_eval == 0:
@@ -599,6 +722,11 @@ class Popover(QWidget):
         row = self.rows.get(code)
         if row:
             row.apply_price(result)
+
+    def set_usd_krw_rate(self, rate: float | None):
+        self._usd_krw_rate = rate
+        for row in self.rows.values():
+            row.set_usd_krw_rate(rate)
 
     def update_stock_minute(self, code: str, prices: list, open_price: float):
         row = self.rows.get(code)
@@ -613,7 +741,7 @@ class Popover(QWidget):
     # ── 위치/표시 ────────────────────────────────────────────────────────
     def _calc_content_height(self) -> int:
         """현재 종목 수/확장 상태에 맞춘 컨텐츠 영역 높이 계산.
-        스크롤이 필요한 경우 MAX_H 안에서 잘리고 스크롤바가 뜬다."""
+        스크롤이 필요한 경우 현재 모니터 높이 안에서 잘리고 스크롤바가 뜬다."""
         if self.rows:
             rows_h = sum(
                 (r.EXPAND_H if r.is_expanded else r.COMPACT_H)
@@ -672,11 +800,24 @@ class Popover(QWidget):
         self.setWindowOpacity(opacity)
         self.opacity_changed.emit(opacity)
 
+    def set_preferred_height(self, height: int | None):
+        """외부(매니저)에서 초기 높이 설정을 동기화. None 이면 자동 높이."""
+        if height is None:
+            self._preferred_height = None
+            return
+        self._preferred_height = self._clamp_height(int(height))
+        if self.isVisible():
+            self.setFixedHeight(self._preferred_height)
+
     def show_below(self, anchor_global_pos: QPoint, anchor_width: int = 0):
         """anchor_global_pos 아래에 팝오버를 표시. 화면 우상단 메뉴바 아이콘 기준."""
         target_w = self.W + self.OUTER_M * 2
+        screen = QApplication.screenAt(anchor_global_pos) or QApplication.primaryScreen()
+        sg = screen.availableGeometry()
+        max_h = self._max_height_for_screen(screen)
         content_h = self._calc_content_height()
-        target_h = max(self.MIN_H, min(content_h, self.MAX_H))
+        auto_h = max(self.MIN_H, min(content_h, max_h))
+        target_h = self._clamp_height(self._preferred_height or auto_h, screen)
 
         self.setFixedSize(target_w, target_h)
 
@@ -686,8 +827,6 @@ class Popover(QWidget):
         y = anchor_global_pos.y() + 10
 
         # 화면 경계 안으로 보정
-        screen = QApplication.screenAt(anchor_global_pos) or QApplication.primaryScreen()
-        sg = screen.availableGeometry()
         x = max(sg.x() + 4, min(x, sg.x() + sg.width() - target_w - 4))
         y = max(sg.y() + 4, y)
 
@@ -695,6 +834,58 @@ class Popover(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _max_height_for_screen(self, screen: QScreen | None = None) -> int:
+        screen = screen or QApplication.screenAt(self.frameGeometry().center())
+        screen = screen or QApplication.primaryScreen()
+        return max(self.MIN_H, screen.availableGeometry().height())
+
+    def _clamp_height(self, height: int, screen: QScreen | None = None) -> int:
+        return max(self.MIN_H, min(int(height), self._max_height_for_screen(screen)))
+
+    def _in_height_resize_zone(self, pos) -> bool:
+        return self.height() - self.RESIZE_MARGIN <= int(pos.y()) <= self.height()
+
+    def mousePressEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._in_height_resize_zone(event.position())
+        ):
+            self._height_resizing = True
+            self._resize_start_y = int(event.globalPosition().y())
+            self._resize_start_h = self.height()
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._height_resizing:
+            delta = int(event.globalPosition().y()) - self._resize_start_y
+            height = self._clamp_height(self._resize_start_h + delta)
+            self._preferred_height = height
+            self.setFixedHeight(height)
+            event.accept()
+            return
+        if self._in_height_resize_zone(event.position()):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._height_resizing and event.button() == Qt.MouseButton.LeftButton:
+            self._height_resizing = False
+            self.unsetCursor()
+            self.height_changed.emit(self.height())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._height_resizing:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     # ── 키보드 ────────────────────────────────────────────────────────────
     def keyPressEvent(self, event):

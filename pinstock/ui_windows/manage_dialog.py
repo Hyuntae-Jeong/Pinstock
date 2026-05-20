@@ -9,11 +9,21 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from ..core.api import fetch_stock
+from ..core.api import fetch_stock, fetch_us_stock, fetch_usd_krw_rate, search_us_stocks
+from ..core.portfolio import is_us_stock, stock_metrics
+from ..core.storage import MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD
 from .theme import C, DIALOG_STYLE
 from .form_widgets import (
-    AutoSelectLineEdit, AutoSelectSpinBox, ArrowSpinBox, ToggleSwitch,
+    AutoSelectDoubleSpinBox, AutoSelectLineEdit, ArrowSpinBox, ToggleSwitch,
 )
+
+
+def fetch_quote_for_stock(stock: dict) -> dict | None:
+    market = str(stock.get("market") or MARKET_KR).upper()
+    code = str(stock.get("code") or "").strip().upper()
+    if market == MARKET_US:
+        return fetch_us_stock(code)
+    return fetch_stock(code)
 
 
 # ─── Excel import 모드 선택 다이얼로그 ───────────────────────────────────────
@@ -84,14 +94,39 @@ class StockDialog(QDialog):
         super().__init__(parent)
         self.is_edit = data is not None
         self.setWindowTitle("종목 수정" if self.is_edit else "종목 추가")
-        self.setFixedSize(340, 270)
+        self.setFixedSize(380, 360)
         self.setStyleSheet(DIALOG_STYLE)
+        self._preview_result: dict | None = None
 
         layout = QFormLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(24, 24, 24, 20)
         # 라벨과 입력 위젯의 세로 중심을 일치시킴 (이슈 #2)
         layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        market_widget = QWidget()
+        market_widget.setMinimumHeight(34)
+        market_row = QHBoxLayout(market_widget)
+        market_row.setContentsMargins(0, 0, 0, 0)
+        market_row.setSpacing(15)
+        radio_style = (
+            f"QRadioButton {{ color: {C['text']}; font-size: 12px; padding: 4px 0 4px 6px; }}"
+            f"QRadioButton::indicator {{ width: 14px; height: 14px; margin-left: 2px; margin-right: 5px; }}"
+        )
+        self.kr_radio = QRadioButton("한국")
+        self.us_radio = QRadioButton("미국")
+        self.kr_radio.setStyleSheet(radio_style)
+        self.us_radio.setStyleSheet(radio_style)
+        self.kr_radio.setChecked(True)
+        self.market_group = QButtonGroup(self)
+        self.market_group.addButton(self.kr_radio)
+        self.market_group.addButton(self.us_radio)
+        self.kr_radio.toggled.connect(self._on_market_changed)
+        self.us_radio.toggled.connect(self._on_market_changed)
+        market_row.addWidget(self.kr_radio, 0, Qt.AlignmentFlag.AlignVCenter)
+        market_row.addWidget(self.us_radio, 0, Qt.AlignmentFlag.AlignVCenter)
+        market_row.addStretch()
+        layout.addRow(self._row_label("시장"), market_widget)
 
         # 종목코드 (포커스 시 자동 전체선택)
         self.code_edit = AutoSelectLineEdit()
@@ -105,10 +140,11 @@ class StockDialog(QDialog):
         layout.addRow(self._row_label("종목명"), self.preview_lbl)
 
         # 평단가 (화살표 버튼 제거 + 포커스 시 자동 전체선택)
-        self.avg_spin = AutoSelectSpinBox()
+        self.avg_spin = AutoSelectDoubleSpinBox()
         self.avg_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self.avg_spin.setRange(1, 10_000_000)
+        self.avg_spin.setRange(0.01, 10_000_000)
         self.avg_spin.setSingleStep(100)
+        self.avg_spin.setDecimals(0)
         self.avg_spin.setSuffix("  원")
         layout.addRow(self._row_label("평단가"), self.avg_spin)
 
@@ -118,14 +154,32 @@ class StockDialog(QDialog):
         self.qty_spin.setSuffix("  주")
         layout.addRow(self._row_label("수  량"), self.qty_spin)
 
+        self.fx_label = self._row_label("매수환율")
+        self.fx_spin = AutoSelectDoubleSpinBox()
+        self.fx_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.fx_spin.setRange(1, 10_000)
+        self.fx_spin.setSingleStep(1)
+        self.fx_spin.setDecimals(2)
+        self.fx_spin.setSuffix("  원/USD")
+        layout.addRow(self.fx_label, self.fx_spin)
+
         # 기존 데이터 채우기
         if self.is_edit:
+            market = str(data.get("market") or MARKET_KR).upper()
+            self.us_radio.setChecked(market == MARKET_US)
+            self.kr_radio.setChecked(market != MARKET_US)
+            self.kr_radio.setEnabled(False)
+            self.us_radio.setEnabled(False)
             self.code_edit.setText(data["code"])
             self.code_edit.setReadOnly(True)
-            self.avg_spin.setValue(int(data.get("avg_price", 0)))
+            self.avg_spin.setValue(float(data.get("avg_price", 0)))
             self.qty_spin.setValue(int(data.get("quantity", 1)))
+            if data.get("buy_exchange_rate"):
+                self.fx_spin.setValue(float(data.get("buy_exchange_rate", 0)))
             if data.get("name"):
                 self._set_preview_found(data["name"])
+
+        self._on_market_changed()
 
         # 버튼
         btns = QDialogButtonBox(
@@ -149,19 +203,60 @@ class StockDialog(QDialog):
     # ── 종목명 자동 미리보기 ─────────────────────────────────────────────
     def _preview_name(self):
         code = self.code_edit.text().strip().upper()
+        self._preview_result = None
         if not code:
             self._set_preview_neutral()
             return
-        if len(code) != 6 or not code.isalnum():
+        market = self.market()
+        if market == MARKET_KR and (len(code) != 6 or not code.isalnum()):
             self._set_preview_hint("6자리 코드를 입력하세요 (숫자/영문)")
             return
         self._set_preview_hint("조회 중...")
         self.preview_lbl.repaint()
-        result = fetch_stock(code)
+        if market == MARKET_US:
+            result = fetch_us_stock(code)
+            if not result:
+                matches = search_us_stocks(code, limit=1)
+                if matches:
+                    if matches[0].get("symbol"):
+                        self.code_edit.setText(matches[0]["symbol"])
+                    result = {"name": matches[0]["name"]}
+                    self._preview_result = matches[0]
+        else:
+            result = fetch_stock(code)
         if result:
             self._set_preview_found(result["name"])
+            if self._preview_result is None:
+                self._preview_result = result
         else:
             self._set_preview_error("찾을 수 없는 종목")
+
+    def market(self) -> str:
+        return MARKET_US if self.us_radio.isChecked() else MARKET_KR
+
+    def _on_market_changed(self):
+        market = self.market()
+        self._preview_result = None
+        if not self.is_edit:
+            self._set_preview_neutral()
+        if market == MARKET_US:
+            self.code_edit.setPlaceholderText("예: AAPL  (Apple)")
+            self.avg_spin.setDecimals(2)
+            self.avg_spin.setSingleStep(1)
+            self.avg_spin.setSuffix("  USD")
+            self.fx_spin.setVisible(True)
+            self.fx_label.setVisible(True)
+            if not self.is_edit and self.fx_spin.value() <= 1:
+                fx = fetch_usd_krw_rate()
+                if fx:
+                    self.fx_spin.setValue(float(fx["rate"]))
+        else:
+            self.code_edit.setPlaceholderText("예: 005930  (삼성전자)")
+            self.avg_spin.setDecimals(0)
+            self.avg_spin.setSingleStep(100)
+            self.avg_spin.setSuffix("  원")
+            self.fx_spin.setVisible(False)
+            self.fx_label.setVisible(False)
 
     def _set_preview_neutral(self):
         self.preview_lbl.setText("─")
@@ -187,12 +282,30 @@ class StockDialog(QDialog):
             f"color: {C['red']}; font-size: 12px; font-style: italic; padding-left: 4px;"
         )
 
+    def accept(self):
+        self._preview_name()
+        if self._preview_result is None:
+            QMessageBox.warning(
+                self,
+                "조회 실패",
+                "종목을 찾을 수 없습니다.\n코드 또는 티커를 다시 확인해 주세요.",
+            )
+            return
+        super().accept()
+
     def get_data(self) -> dict:
-        return {
+        market = self.market()
+        avg_price = self.avg_spin.value()
+        data = {
             "code":      self.code_edit.text().strip().upper(),
-            "avg_price": self.avg_spin.value(),
+            "market":    market,
+            "currency":  CURRENCY_USD if market == MARKET_US else CURRENCY_KRW,
+            "avg_price": round(avg_price, 2) if market == MARKET_US else int(round(avg_price)),
             "quantity":  self.qty_spin.value(),
         }
+        if market == MARKET_US:
+            data["buy_exchange_rate"] = self.fx_spin.value()
+        return data
 
 
 # ─── 좁은 셀에서도 입력값이 잘리지 않도록 editor 폭을 약간만 늘리는 delegate ──
@@ -214,11 +327,15 @@ class ManageStocksDialog(QDialog):
 
     COLS = ["종목명", "종목코드", "평단가", "수량", "평가손익", "표시"]
 
-    def __init__(self, stocks: list[dict], current_prices: dict | None = None, parent=None):
+    def __init__(self, stocks: list[dict], current_prices: dict | None = None,
+                 usd_krw_rate: float | None = None, parent=None):
         super().__init__(parent)
         self._stocks: list[dict] = stocks   # 호출측에서 deepcopy 해서 전달
         self._current_prices: dict = current_prices or {}   # {code: 현재가}
+        self._usd_krw_rate = usd_krw_rate
         self._suppress_change: bool = False   # itemChanged 재귀 차단용
+        self._market_filter: str = "ALL"
+        self._row_stock_indexes: list[int] = []
 
         self.setWindowTitle("종목 관리")
         self.setMinimumSize(700, 400)
@@ -227,6 +344,15 @@ class ManageStocksDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
+        filter_row.addWidget(self._make_filter_btn("전체", "ALL"))
+        filter_row.addWidget(self._make_filter_btn("한국", MARKET_KR))
+        filter_row.addWidget(self._make_filter_btn("미국", MARKET_US))
+        filter_row.addStretch()
+        root.addLayout(filter_row)
+        self._update_filter_button_styles()
 
         # ── 표 ─────────────────────────────────────────────────────────────
         self.table = QTableWidget(0, len(self.COLS))
@@ -325,6 +451,73 @@ class ManageStocksDialog(QDialog):
 
         self._rebuild_table()
 
+    def _make_filter_btn(self, text: str, market: str) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setProperty("flat", "true")
+        btn.clicked.connect(lambda _, m=market: self._set_market_filter(m))
+        if market == self._market_filter:
+            btn.setChecked(True)
+        if not hasattr(self, "_filter_buttons"):
+            self._filter_buttons: dict[str, QPushButton] = {}
+        self._filter_buttons[market] = btn
+        return btn
+
+    def _set_market_filter(self, market: str):
+        self._market_filter = market
+        self._update_filter_button_styles()
+        filtered = market != "ALL"
+        self.table.setDragEnabled(not filtered)
+        self.table.setAcceptDrops(not filtered)
+        self.table.viewport().setAcceptDrops(not filtered)
+        self.table.setDragDropMode(
+            QAbstractItemView.DragDropMode.NoDragDrop
+            if filtered else QAbstractItemView.DragDropMode.InternalMove
+        )
+        self._rebuild_table()
+
+    def _update_filter_button_styles(self):
+        for key, btn in self._filter_buttons.items():
+            active = key == self._market_filter
+            btn.setChecked(active)
+            if active:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {C['blue']};
+                        color: {C['bg']};
+                        border: none;
+                        border-radius: 7px;
+                        padding: 8px 16px;
+                        font-size: 13px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:hover {{ background: #b4befe; }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {C['surface']};
+                        color: {C['text']};
+                        border: none;
+                        border-radius: 7px;
+                        padding: 8px 16px;
+                        font-size: 13px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:hover {{ background: {C['surface2']}; }}
+                """)
+
+    def _matches_filter(self, stock: dict) -> bool:
+        if self._market_filter == "ALL":
+            return True
+        market = MARKET_US if is_us_stock(stock) else MARKET_KR
+        return market == self._market_filter
+
+    def _stock_index_for_row(self, row: int) -> int | None:
+        if row < 0 or row >= len(self._row_stock_indexes):
+            return None
+        return self._row_stock_indexes[row]
+
     # ── 표 동기화 ─────────────────────────────────────────────────────────
     def _rebuild_table(self, select_row: int | None = None):
         """self._stocks 기준으로 표를 다시 그림."""
@@ -333,28 +526,32 @@ class ManageStocksDialog(QDialog):
         self._suppress_change = True
         try:
             self.table.setRowCount(0)
-            for s in self._stocks:
+            self._row_stock_indexes = []
+            for stock_idx, s in enumerate(self._stocks):
+                if not self._matches_filter(s):
+                    continue
                 row = self.table.rowCount()
                 self.table.insertRow(row)
-                self._fill_row(row, s)
+                self._row_stock_indexes.append(stock_idx)
+                self._fill_row(row, s, stock_idx)
         finally:
             self._suppress_change = False
             self.table.model().rowsMoved.connect(self._on_rows_moved)
 
-        if select_row is not None and 0 <= select_row < self.table.rowCount():
-            self.table.selectRow(select_row)
+        if select_row is not None and select_row in self._row_stock_indexes:
+            self.table.selectRow(self._row_stock_indexes.index(select_row))
 
-    def _fill_row(self, row: int, s: dict):
+    def _fill_row(self, row: int, s: dict, stock_idx: int):
         name  = s.get("name", s["code"])
         code  = s["code"]
-        avg_p = int(s.get("avg_price", 0))
+        us_stock = is_us_stock(s)
+        avg_p = float(s.get("avg_price", 0))
         qty_n = int(s.get("quantity", 0))
-        avg   = f"{avg_p:,} 원"
+        avg   = f"{avg_p:,.2f} USD" if us_stock else f"{int(avg_p):,} 원"
         qty   = f"{qty_n:,} 주"
 
-        # 평가손익 = (현재가 - 평단가) * 수량. 현재가 없으면 평단가 fallback → 0
-        cur_p  = int(self._current_prices.get(code, avg_p))
-        profit = (cur_p - avg_p) * qty_n
+        metrics = stock_metrics(s, self._current_prices.get(code, avg_p), self._usd_krw_rate)
+        profit = metrics["profit"]
         if profit > 0:
             profit_text  = f"+{profit:,} 원"
             profit_color = C['red']    # 이익 = 빨강 (한국 컨벤션)
@@ -396,7 +593,7 @@ class ManageStocksDialog(QDialog):
         hidden = bool(s.get("hidden", False))
         toggle = ToggleSwitch(checked=not hidden)
         toggle.toggled.connect(
-            lambda checked, r=row: self._on_visibility_toggled(r, checked)
+            lambda checked, idx=stock_idx: self._on_visibility_toggled(idx, checked)
         )
         # 셀 가운데 정렬용 컨테이너 (드래그-드롭 정렬 시 시각 일관성 유지)
         container = QWidget()
@@ -430,7 +627,8 @@ class ManageStocksDialog(QDialog):
         if self._suppress_change or item is None:
             return
         row, col = item.row(), item.column()
-        if row < 0 or row >= len(self._stocks):
+        stock_idx = self._stock_index_for_row(row)
+        if stock_idx is None:
             return
 
         if col not in (2, 3):
@@ -438,42 +636,57 @@ class ManageStocksDialog(QDialog):
 
         # 사용자가 입력한 텍스트에서 숫자만 추출
         text = item.text().strip()
-        digits = "".join(c for c in text if c.isdigit())
-        s = self._stocks[row]
+        s = self._stocks[stock_idx]
+        us_stock = is_us_stock(s)
+        if us_stock and col == 2:
+            cleaned = "".join(c for c in text if c.isdigit() or c == ".")
+        else:
+            cleaned = "".join(c for c in text if c.isdigit())
 
-        if not digits or int(digits) <= 0:
+        try:
+            value = float(cleaned) if us_stock and col == 2 else int(cleaned)
+        except ValueError:
+            value = 0
+        if value <= 0:
             # 잘못된 입력 → 원래 값으로 복원
             self._suppress_change = True
             if col == 2:
-                item.setText(f"{int(s.get('avg_price', 0)):,} 원")
+                if us_stock:
+                    item.setText(f"{float(s.get('avg_price', 0)):,.2f} USD")
+                else:
+                    item.setText(f"{int(float(s.get('avg_price', 0))):,} 원")
             else:
                 item.setText(f"{int(s.get('quantity', 0)):,} 주")
             self._suppress_change = False
             return
 
-        value = int(digits)
         if col == 2:
-            s["avg_price"] = value
-            suffix = "원"
+            s["avg_price"] = round(value, 2) if us_stock else int(value)
+            suffix = "USD" if us_stock else "원"
         else:
-            s["quantity"] = value
+            s["quantity"] = int(value)
             suffix = "주"
 
         # 표시 형식 (쉼표 + 단위) 재포맷
         self._suppress_change = True
-        item.setText(f"{value:,} {suffix}")
+        if col == 2 and us_stock:
+            item.setText(f"{value:,.2f} {suffix}")
+        else:
+            item.setText(f"{int(value):,} {suffix}")
         self._suppress_change = False
 
         # 평가손익 셀 즉시 갱신
         self._refresh_profit_cell(row)
 
     def _refresh_profit_cell(self, row: int):
-        s = self._stocks[row]
+        stock_idx = self._stock_index_for_row(row)
+        if stock_idx is None:
+            return
+        s = self._stocks[stock_idx]
         code = s["code"]
-        avg = int(s.get("avg_price", 0))
-        qty = int(s.get("quantity", 0))
-        cur = int(self._current_prices.get(code, avg))
-        profit = (cur - avg) * qty
+        avg = float(s.get("avg_price", 0))
+        metrics = stock_metrics(s, self._current_prices.get(code, avg), self._usd_krw_rate)
+        profit = metrics["profit"]
 
         if profit > 0:
             text, color = f"+{profit:,} 원", C['red']
@@ -502,15 +715,17 @@ class ManageStocksDialog(QDialog):
     # ── 평가손익 내림차순 정렬 (명시적 버튼) ─────────────────────────────
     def _sort_by_profit_desc(self):
         def key_for(s: dict):
-            avg = int(s.get("avg_price", 0))
-            qty = int(s.get("quantity", 0))
-            cur = int(self._current_prices.get(s["code"], avg))
-            return (cur - avg) * qty
+            avg = float(s.get("avg_price", 0))
+            metrics = stock_metrics(s, self._current_prices.get(s["code"], avg), self._usd_krw_rate)
+            return metrics["profit"]
         self._stocks.sort(key=key_for, reverse=True)
         self._rebuild_table()
 
     # ── 드래그 정렬 핸들러 ────────────────────────────────────────────────
     def _on_rows_moved(self, parent, start, end, dest_parent, dest_row):
+        if self._market_filter != "ALL":
+            self._rebuild_table()
+            return
         # 단일 행만 이동(SingleSelection) — 한 항목을 옮긴 결과를 self._stocks 에 반영
         # Qt 의 dest_row 는 "이동 전 좌표계" 기준이므로 보정 필요
         item = self._stocks.pop(start)
@@ -534,7 +749,7 @@ class ManageStocksDialog(QDialog):
             QMessageBox.information(self, "알림", f"'{code}'는 이미 추가되어 있습니다.")
             return
 
-        result = fetch_stock(code)
+        result = fetch_quote_for_stock(d)
         if not result:
             QMessageBox.warning(
                 self, "조회 실패",
@@ -543,28 +758,33 @@ class ManageStocksDialog(QDialog):
             return
 
         d["name"] = result["name"]
+        d["hidden"] = False
         self._stocks.append(d)
         # 현재가도 캐시해 두면 평가손익이 즉시 계산됨
-        self._current_prices[code] = int(result["price"])
+        self._current_prices[code] = float(result["price"])
         self._rebuild_table(select_row=len(self._stocks) - 1)
 
     def _edit_selected(self):
         row = self.table.currentRow()
-        if row < 0 or row >= len(self._stocks):
+        stock_idx = self._stock_index_for_row(row)
+        if stock_idx is None:
             return
-        dlg = StockDialog(parent=self, data=self._stocks[row])
+        dlg = StockDialog(parent=self, data=self._stocks[stock_idx])
         if not dlg.exec():
             return
         new = dlg.get_data()
-        self._stocks[row]["avg_price"] = new["avg_price"]
-        self._stocks[row]["quantity"]  = new["quantity"]
-        self._rebuild_table(select_row=row)
+        self._stocks[stock_idx]["avg_price"] = new["avg_price"]
+        self._stocks[stock_idx]["quantity"]  = new["quantity"]
+        if "buy_exchange_rate" in new:
+            self._stocks[stock_idx]["buy_exchange_rate"] = new["buy_exchange_rate"]
+        self._rebuild_table(select_row=stock_idx)
 
     def _delete_selected(self):
         row = self.table.currentRow()
-        if row < 0 or row >= len(self._stocks):
+        stock_idx = self._stock_index_for_row(row)
+        if stock_idx is None:
             return
-        name = self._stocks[row].get("name", self._stocks[row]["code"])
+        name = self._stocks[stock_idx].get("name", self._stocks[stock_idx]["code"])
         ret = QMessageBox.question(
             self, "삭제 확인",
             f"'{name}' 을(를) 삭제할까요?",
@@ -573,8 +793,8 @@ class ManageStocksDialog(QDialog):
         )
         if ret != QMessageBox.StandardButton.Yes:
             return
-        self._stocks.pop(row)
-        next_sel = min(row, len(self._stocks) - 1) if self._stocks else None
+        self._stocks.pop(stock_idx)
+        next_sel = min(stock_idx, len(self._stocks) - 1) if self._stocks else None
         self._rebuild_table(select_row=next_sel)
 
     def get_stocks(self) -> list[dict]:
