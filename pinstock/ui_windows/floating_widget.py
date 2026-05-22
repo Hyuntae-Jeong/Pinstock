@@ -46,6 +46,9 @@ class StockWidget(QWidget):
         name = self.data.get("name", self.data["code"])
         self.W = width if width else self.calc_width_for_name(name)
 
+        # 종목 타입(국내/미국)에 따라 확장 높이 결정 — 첫 fetch 전에 펼쳐도 패널 높이가 맞도록
+        self.EXPAND_H = self.EXPAND_H_US if is_us_stock(self.data) else self.EXPAND_H_KR
+
         # 5초 자동 축소 타이머
         self.collapse_timer = QTimer(singleShot=True)
         self.collapse_timer.timeout.connect(self.collapse)
@@ -152,7 +155,7 @@ class StockWidget(QWidget):
         hl.addWidget(self.sparkline, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # ── 확장 패널 ────────────────────────────────────────────────────
-        panel_h = self.EXPAND_H_US - self.COMPACT_H
+        panel_h = self.EXPAND_H - self.COMPACT_H
         self.expand_panel = QWidget(self.card)
         self.expand_panel.setGeometry(0, self.COMPACT_H, self.W, panel_h)
         self.expand_panel.setStyleSheet("background: transparent;")
@@ -191,7 +194,7 @@ class StockWidget(QWidget):
         self.setFixedWidth(new_w)
         self.card.setGeometry(0, 0, new_w, cur_h)
         self.compact.setGeometry(0, 0, new_w, self.COMPACT_H)
-        panel_h = self.EXPAND_H_US - self.COMPACT_H
+        panel_h = self.EXPAND_H - self.COMPACT_H
         self.expand_panel.setGeometry(0, self.COMPACT_H, new_w, panel_h)
 
     def _make_row(self, parent_layout, key_text: str, bold=False) -> tuple[QHBoxLayout, QLabel, QLabel]:
@@ -328,6 +331,8 @@ class StockWidget(QWidget):
         self.eval_val.setText(f"{eval_:,} 원")
         self.prate_val.setText(f"{sign}{prate:.2f}%")
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        # 패널 높이를 종목 타입(EXPAND_H)에 맞춰 동기화 — 패널 바닥이 카드 바닥과 일치해야 마지막 행이 안 잘림
+        self.expand_panel.setGeometry(0, self.COMPACT_H, self.W, self.EXPAND_H - self.COMPACT_H)
         if self.is_expanded:
             self.setFixedHeight(self.EXPAND_H)
             self.card.setGeometry(0, 0, self.W, self.EXPAND_H)
