@@ -1,8 +1,10 @@
 """macOS 메뉴바 팝오버 패널.
 
 메뉴바 ₩ 아이콘을 클릭하면 이 패널이 펼쳐진다.
-구성: 포트폴리오 요약 + 종목 리스트(스크롤) + 액션 바.
+구성: 포트폴리오 요약 + 종목 리스트(스크롤) + 설정 바.
 """
+
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
@@ -20,6 +22,15 @@ from ..core.portfolio import is_us_stock, stock_metrics
 _FONT_FAMILY = "Apple SD Gothic Neo"
 
 
+def format_quantity(value) -> str:
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        qty = 0.0
+    text = f"{qty:,.3f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
 # ─── 종목 한 행 ────────────────────────────────────────────────────────────
 class StockRow(QWidget):
     """팝오버 안의 한 종목 행.
@@ -32,6 +43,7 @@ class StockRow(QWidget):
     delete_requested = pyqtSignal(str)   # code
 
     COMPACT_H = 52
+    EXTENDED_COMPACT_H = 68
     EXPAND_H_KR = 168
     EXPAND_H_US = 222
     EXPAND_H  = EXPAND_H_KR
@@ -44,6 +56,7 @@ class StockRow(QWidget):
         self.is_expanded: bool = False
         self._prev_close: float = 0.0
         self.assets_hidden: bool = False
+        self._compact_height = self.COMPACT_H
         self.setFixedHeight(self.COMPACT_H)
         self._build_ui()
 
@@ -95,6 +108,37 @@ class StockRow(QWidget):
         price_row.addStretch()
 
         info.addLayout(price_row)
+
+        extended_row = QHBoxLayout()
+        extended_row.setContentsMargins(0, 0, 0, 0)
+        extended_row.setSpacing(8)
+
+        self.extended_price_lbl = QLabel("")
+        self.extended_price_lbl.setFont(self.price_lbl.font())
+        self.extended_price_lbl.setStyleSheet(
+            f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
+        )
+        self.extended_price_lbl.setMinimumHeight(18)
+        extended_row.addWidget(self.extended_price_lbl)
+
+        self.extended_rate_lbl = QLabel("")
+        self.extended_rate_lbl.setFont(self.rate_lbl.font())
+        self.extended_rate_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 11px;")
+        self.extended_rate_lbl.setMinimumHeight(18)
+        extended_row.addWidget(self.extended_rate_lbl)
+
+        self.extended_icon_lbl = QLabel("")
+        self.extended_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.extended_icon_lbl.setFixedHeight(18)
+        self.extended_icon_lbl.setStyleSheet("font-size: 9px; line-height: 18px;")
+        extended_row.addWidget(self.extended_icon_lbl)
+        extended_row.addStretch()
+
+        self.extended_widgets = [self.extended_price_lbl, self.extended_rate_lbl, self.extended_icon_lbl]
+        for widget in self.extended_widgets:
+            widget.hide()
+        info.addSpacing(2)
+        info.addLayout(extended_row)
         hl.addLayout(info, 1)
 
         # 우측: sparkline
@@ -160,6 +204,11 @@ class StockRow(QWidget):
             if widget:
                 widget.setVisible(visible)
 
+    @staticmethod
+    def _local_session_icon() -> str:
+        hour = datetime.now().hour
+        return "☀️" if 5 <= hour < 17 else "🌙"
+
     # ── 데이터 적용 ───────────────────────────────────────────────────────
     def apply_price(self, result: dict):
         self.data["name"] = result["name"]
@@ -169,21 +218,76 @@ class StockRow(QWidget):
 
         price = result["price"]
         rate  = result["change_rate"]
+        display_price = price
+        display_rate = rate
+        extended = result.get("extended") if is_us_stock(self.data) else None
+        regular_price = float(result.get("regular_price") or 0.0)
+        if extended and regular_price > 0 and self._prev_close > 0:
+            display_price = regular_price
+            display_rate = (regular_price - self._prev_close) / self._prev_close * 100.0
 
-        self.price_lbl.setText(f"{price:,}")
+        self.price_lbl.setText(
+            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,}"
+        )
 
-        if rate > 0:
+        if display_rate > 0:
             color, sign = C["red"], "▲"
-        elif rate < 0:
+        elif display_rate < 0:
             color, sign = C["blue"], "▼"
         else:
             color, sign = C["subtext"], "  "
 
         self.price_lbl.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold;")
-        self.rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
+        self.rate_lbl.setText(f"{sign}{abs(display_rate):.2f}%")
         self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._apply_extended_price(result)
 
         self._refresh_detail()
+
+    def _apply_extended_price(self, result: dict):
+        extended = result.get("extended") if is_us_stock(self.data) else None
+        if not extended:
+            for widget in self.extended_widgets:
+                widget.hide()
+                widget.setText("")
+            self._set_compact_height(self.COMPACT_H)
+            return
+        rate = float(extended.get("change_rate", 0.0))
+        price = float(extended.get("price", 0.0))
+        if price <= 0:
+            for widget in self.extended_widgets:
+                widget.hide()
+                widget.setText("")
+            self._set_compact_height(self.COMPACT_H)
+            return
+        if rate > 0:
+            color, sign = C["red"], "▲"
+        elif rate < 0:
+            color, sign = C["blue"], "▼"
+        else:
+            color, sign = C["subtext"], " "
+        session_icon = self._local_session_icon()
+        self.extended_price_lbl.setText(f"{price:,.4f}")
+        self.extended_price_lbl.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold;")
+        self.extended_rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
+        self.extended_rate_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self.extended_icon_lbl.setText(session_icon)
+        for widget in self.extended_widgets:
+            widget.show()
+        self._set_compact_height(self.EXTENDED_COMPACT_H)
+
+    def _set_compact_height(self, height: int):
+        self._compact_height = height
+        if self.is_expanded:
+            self.setFixedHeight(self._expanded_height())
+            return
+        if self.height() == height:
+            return
+        self.setFixedHeight(height)
+        self.compact.setFixedHeight(height)
+
+    def _expanded_height(self) -> int:
+        return self.EXPAND_H + max(0, self._compact_height - self.COMPACT_H)
 
     def set_usd_krw_rate(self, rate: float | None):
         self.usd_krw_rate = rate
@@ -197,7 +301,7 @@ class StockRow(QWidget):
 
     def _refresh_detail(self):
         avg    = float(self.data.get("avg_price", 0))
-        qty    = int(self.data.get("quantity", 0))
+        qty    = float(self.data.get("quantity", 0))
         price  = self.current_price or avg
         metrics = stock_metrics(self.data, price, self.usd_krw_rate)
         invest = metrics["invest"]
@@ -213,7 +317,8 @@ class StockRow(QWidget):
             self._set_row_visible(self.fx_row, True)
             self._set_row_visible(self.fx_profit_row, True)
             self._set_row_visible(self.total_profit_row, True)
-            self.avg_val.setText(f"{float(avg):,.2f} USD")
+            self.avg_key.setText("달러 매입단가")
+            self.avg_val.setText(f"{float(avg):,.4f} USD")
             self.fx_val.setText(f"{metrics['buy_rate']:,.2f} 원/USD")
             stock_profit = metrics["stock_profit"]
             fx_profit = metrics["fx_profit"]
@@ -232,6 +337,7 @@ class StockRow(QWidget):
             self._set_row_visible(self.fx_row, False)
             self._set_row_visible(self.fx_profit_row, False)
             self._set_row_visible(self.total_profit_row, False)
+            self.avg_key.setText("평단가")
             self.avg_val.setText(f"{int(avg):,} 원")
             self.fx_val.setText("─")
             self.fx_profit_val.setText("─")
@@ -240,13 +346,13 @@ class StockRow(QWidget):
             self.total_profit_val.setStyleSheet(f"color: {C['text']}; font-size: 11px;")
             self.profit_val.setText(f"{sign}{profit:,} 원")
             self.profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
-        self.qty_val.setText(f"{qty:,} 주")
+        self.qty_val.setText(f"{format_quantity(qty)} 주")
         self.invest_val.setText(f"{invest:,} 원")
         self.eval_val.setText(f"{eval_:,} 원")
         self.prate_val.setText(f"{sign}{prate:.2f}%")
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         if self.is_expanded:
-            self.setFixedHeight(self.EXPAND_H)
+            self.setFixedHeight(self._expanded_height())
 
     def set_assets_hidden(self, hidden: bool):
         self.assets_hidden = hidden
@@ -254,17 +360,17 @@ class StockRow(QWidget):
         if hidden and self.is_expanded:
             self.is_expanded = False
             self.expand_panel.hide()
-            self.setFixedHeight(self.COMPACT_H)
+            self.setFixedHeight(self._compact_height)
 
     # ── 확장 / 축소 ───────────────────────────────────────────────────────
     def toggle_expand(self):
         self.is_expanded = not self.is_expanded
         if self.is_expanded:
             self.expand_panel.show()
-            self.setFixedHeight(self.EXPAND_H)
+            self.setFixedHeight(self._expanded_height())
         else:
             self.expand_panel.hide()
-            self.setFixedHeight(self.COMPACT_H)
+            self.setFixedHeight(self._compact_height)
         self.expanded_toggled.emit(self.data["code"])
 
     # ── 마우스 이벤트 ────────────────────────────────────────────────────
@@ -416,7 +522,6 @@ class Popover(QWidget):
     명시적 닫기 경로:
       - 트레이 아이콘 재클릭 (토글)
       - ESC 키
-      - ❌ 종료 버튼
     """
 
     W        = 360
@@ -693,10 +798,7 @@ class Popover(QWidget):
         """현재 종목 수/확장 상태에 맞춘 컨텐츠 영역 높이 계산.
         스크롤이 필요한 경우 현재 모니터 높이 안에서 잘리고 스크롤바가 뜬다."""
         if self.rows:
-            rows_h = sum(
-                (r.EXPAND_H if r.is_expanded else r.COMPACT_H)
-                for r in self.rows.values()
-            )
+            rows_h = sum(r.height() for r in self.rows.values())
         else:
             rows_h = 120   # empty_lbl 안내 영역
 

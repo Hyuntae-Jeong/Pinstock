@@ -37,7 +37,7 @@ def stock_metrics(
     현재환율(usd_krw_rate)을 적용해 원화 기준 손익을 계산한다.
     """
     avg_price = _to_float(stock.get("avg_price"))
-    quantity = _to_int(stock.get("quantity"))
+    quantity = _to_float(stock.get("quantity"))
     price = _to_float(current_price, avg_price) or avg_price
 
     if not is_us_stock(stock):

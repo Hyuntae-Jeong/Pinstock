@@ -141,6 +141,8 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
                 row.append(str(s.get("code", "")))
             elif key == "name":
                 row.append(s.get("name", s.get("code", "")))
+            elif key == "quantity":
+                row.append(float(s.get(key, 0)))
             else:
                 row.append(int(s.get(key, 0)))
         ws.append(row)
@@ -249,22 +251,22 @@ def import_stocks_from_excel(path: str) -> list[dict]:
             errors.append(f"{row_num}행: 종목코드 '{code}' 가 중복되었습니다.")
             continue
 
-        # 평단가/수량: 정수 변환
+        # 평단가/수량 변환. 수량은 소수점 3자리까지 허용한다.
         try:
             avg_price = int(float(raw_avg)) if raw_avg is not None and str(raw_avg).strip() != "" else 0
         except (TypeError, ValueError):
             errors.append(f"{row_num}행: 평단가 '{raw_avg}' 가 숫자가 아닙니다.")
             continue
         try:
-            quantity = int(float(raw_qty)) if raw_qty is not None and str(raw_qty).strip() != "" else 0
+            quantity = round(float(raw_qty), 3) if raw_qty is not None and str(raw_qty).strip() != "" else 0
         except (TypeError, ValueError):
             errors.append(f"{row_num}행: 수량 '{raw_qty}' 가 숫자가 아닙니다.")
             continue
         if avg_price < 1:
             errors.append(f"{row_num}행: 평단가가 1 이상이어야 합니다.")
             continue
-        if quantity < 1:
-            errors.append(f"{row_num}행: 수량이 1 이상이어야 합니다.")
+        if quantity <= 0:
+            errors.append(f"{row_num}행: 수량이 0보다 커야 합니다.")
             continue
 
         name = str(raw_name).strip() if raw_name is not None and str(raw_name).strip() else code

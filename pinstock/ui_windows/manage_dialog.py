@@ -9,12 +9,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from ..core.api import fetch_stock, fetch_us_stock, fetch_usd_krw_rate, search_us_stocks
+from ..core.api import fetch_stock, fetch_us_stock, search_us_stocks
 from ..core.portfolio import is_us_stock, stock_metrics
 from ..core.storage import MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD
 from .theme import C, DIALOG_STYLE
 from .form_widgets import (
-    AutoSelectDoubleSpinBox, AutoSelectLineEdit, ArrowSpinBox, ToggleSwitch,
+    AutoSelectDoubleSpinBox, AutoSelectLineEdit, ArrowDoubleSpinBox, ToggleSwitch,
 )
 
 
@@ -24,6 +24,15 @@ def fetch_quote_for_stock(stock: dict) -> dict | None:
     if market == MARKET_US:
         return fetch_us_stock(code)
     return fetch_stock(code)
+
+
+def format_quantity(value) -> str:
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        qty = 0.0
+    text = f"{qty:,.3f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 # ─── Excel import 모드 선택 다이얼로그 ───────────────────────────────────────
@@ -139,29 +148,33 @@ class StockDialog(QDialog):
         self._set_preview_neutral()
         layout.addRow(self._row_label("종목명"), self.preview_lbl)
 
-        # 평단가 (화살표 버튼 제거 + 포커스 시 자동 전체선택)
+        # 매입단가 (화살표 버튼 제거 + 포커스 시 자동 전체선택)
+        self.avg_label = self._row_label("평단가")
         self.avg_spin = AutoSelectDoubleSpinBox()
         self.avg_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.avg_spin.setRange(0.01, 10_000_000)
         self.avg_spin.setSingleStep(100)
         self.avg_spin.setDecimals(0)
         self.avg_spin.setSuffix("  원")
-        layout.addRow(self._row_label("평단가"), self.avg_spin)
+        layout.addRow(self.avg_label, self.avg_spin)
+
+        self.krw_avg_label = self._row_label("원화 매입단가")
+        self.krw_avg_spin = AutoSelectDoubleSpinBox()
+        self.krw_avg_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.krw_avg_spin.setRange(1, 1_000_000_000)
+        self.krw_avg_spin.setSingleStep(1000)
+        self.krw_avg_spin.setDecimals(0)
+        self.krw_avg_spin.setSuffix("  원/주")
+        layout.addRow(self.krw_avg_label, self.krw_avg_spin)
 
         # 수량 (paintEvent로 ▲▼ 화살표 직접 그림)
-        self.qty_spin = ArrowSpinBox()
-        self.qty_spin.setRange(1, 1_000_000)
+        self.qty_spin = ArrowDoubleSpinBox()
+        self.qty_spin.setRange(0.001, 1_000_000)
+        self.qty_spin.setSingleStep(1)
+        self.qty_spin.setDecimals(3)
         self.qty_spin.setSuffix("  주")
+        self.qty_spin.setValue(1.000)
         layout.addRow(self._row_label("수  량"), self.qty_spin)
-
-        self.fx_label = self._row_label("매수환율")
-        self.fx_spin = AutoSelectDoubleSpinBox()
-        self.fx_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self.fx_spin.setRange(1, 10_000)
-        self.fx_spin.setSingleStep(1)
-        self.fx_spin.setDecimals(2)
-        self.fx_spin.setSuffix("  원/USD")
-        layout.addRow(self.fx_label, self.fx_spin)
 
         # 기존 데이터 채우기
         if self.is_edit:
@@ -173,9 +186,10 @@ class StockDialog(QDialog):
             self.code_edit.setText(data["code"])
             self.code_edit.setReadOnly(True)
             self.avg_spin.setValue(float(data.get("avg_price", 0)))
-            self.qty_spin.setValue(int(data.get("quantity", 1)))
+            self.qty_spin.setValue(float(data.get("quantity", 1)))
             if data.get("buy_exchange_rate"):
-                self.fx_spin.setValue(float(data.get("buy_exchange_rate", 0)))
+                krw_avg = float(data.get("avg_price", 0)) * float(data.get("buy_exchange_rate", 0))
+                self.krw_avg_spin.setValue(krw_avg)
             if data.get("name"):
                 self._set_preview_found(data["name"])
 
@@ -197,6 +211,7 @@ class StockDialog(QDialog):
     def _row_label(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl.setFixedWidth(96)
         lbl.setMinimumHeight(34)   # QLineEdit/QSpinBox 높이와 매칭
         return lbl
 
@@ -241,22 +256,22 @@ class StockDialog(QDialog):
             self._set_preview_neutral()
         if market == MARKET_US:
             self.code_edit.setPlaceholderText("예: AAPL  (Apple)")
-            self.avg_spin.setDecimals(2)
+            self.avg_label.setText("달러 매입단가")
+            self.avg_spin.setDecimals(4)
             self.avg_spin.setSingleStep(1)
             self.avg_spin.setSuffix("  USD")
-            self.fx_spin.setVisible(True)
-            self.fx_label.setVisible(True)
-            if not self.is_edit and self.fx_spin.value() <= 1:
-                fx = fetch_usd_krw_rate()
-                if fx:
-                    self.fx_spin.setValue(float(fx["rate"]))
+            if not self.is_edit:
+                self.avg_spin.setValue(1.0000)
+            self.krw_avg_spin.setVisible(True)
+            self.krw_avg_label.setVisible(True)
         else:
             self.code_edit.setPlaceholderText("예: 005930  (삼성전자)")
+            self.avg_label.setText("평단가")
             self.avg_spin.setDecimals(0)
             self.avg_spin.setSingleStep(100)
             self.avg_spin.setSuffix("  원")
-            self.fx_spin.setVisible(False)
-            self.fx_label.setVisible(False)
+            self.krw_avg_spin.setVisible(False)
+            self.krw_avg_label.setVisible(False)
 
     def _set_preview_neutral(self):
         self.preview_lbl.setText("─")
@@ -300,11 +315,11 @@ class StockDialog(QDialog):
             "code":      self.code_edit.text().strip().upper(),
             "market":    market,
             "currency":  CURRENCY_USD if market == MARKET_US else CURRENCY_KRW,
-            "avg_price": round(avg_price, 2) if market == MARKET_US else int(round(avg_price)),
-            "quantity":  self.qty_spin.value(),
+            "avg_price": round(avg_price, 4) if market == MARKET_US else int(round(avg_price)),
+            "quantity":  round(self.qty_spin.value(), 3),
         }
         if market == MARKET_US:
-            data["buy_exchange_rate"] = self.fx_spin.value()
+            data["buy_exchange_rate"] = round(self.krw_avg_spin.value() / avg_price, 4)
         return data
 
 
@@ -325,7 +340,7 @@ class WideEditorDelegate(QStyledItemDelegate):
 class ManageStocksDialog(QDialog):
     """현재 보유 종목들을 표 형태로 일괄 관리하는 다이얼로그."""
 
-    COLS = ["종목명", "종목코드", "평단가", "수량", "평가손익", "표시"]
+    COLS = ["종목명", "종목코드", "매입단가", "수량", "평가손익", "표시"]
 
     def __init__(self, stocks: list[dict], current_prices: dict | None = None,
                  usd_krw_rate: float | None = None, parent=None):
@@ -546,9 +561,9 @@ class ManageStocksDialog(QDialog):
         code  = s["code"]
         us_stock = is_us_stock(s)
         avg_p = float(s.get("avg_price", 0))
-        qty_n = int(s.get("quantity", 0))
-        avg   = f"{avg_p:,.2f} USD" if us_stock else f"{int(avg_p):,} 원"
-        qty   = f"{qty_n:,} 주"
+        qty_n = float(s.get("quantity", 0))
+        avg   = f"{avg_p:,.4f} USD" if us_stock else f"{int(avg_p):,} 원"
+        qty   = f"{format_quantity(qty_n)} 주"
 
         metrics = stock_metrics(s, self._current_prices.get(code, avg_p), self._usd_krw_rate)
         profit = metrics["profit"]
@@ -641,10 +656,10 @@ class ManageStocksDialog(QDialog):
         if us_stock and col == 2:
             cleaned = "".join(c for c in text if c.isdigit() or c == ".")
         else:
-            cleaned = "".join(c for c in text if c.isdigit())
+            cleaned = "".join(c for c in text if c.isdigit() or c == ".")
 
         try:
-            value = float(cleaned) if us_stock and col == 2 else int(cleaned)
+            value = float(cleaned) if col in (2, 3) else int(cleaned)
         except ValueError:
             value = 0
         if value <= 0:
@@ -652,25 +667,27 @@ class ManageStocksDialog(QDialog):
             self._suppress_change = True
             if col == 2:
                 if us_stock:
-                    item.setText(f"{float(s.get('avg_price', 0)):,.2f} USD")
+                    item.setText(f"{float(s.get('avg_price', 0)):,.4f} USD")
                 else:
                     item.setText(f"{int(float(s.get('avg_price', 0))):,} 원")
             else:
-                item.setText(f"{int(s.get('quantity', 0)):,} 주")
+                item.setText(f"{format_quantity(s.get('quantity', 0))} 주")
             self._suppress_change = False
             return
 
         if col == 2:
-            s["avg_price"] = round(value, 2) if us_stock else int(value)
+            s["avg_price"] = round(value, 4) if us_stock else int(value)
             suffix = "USD" if us_stock else "원"
         else:
-            s["quantity"] = int(value)
+            s["quantity"] = round(value, 3)
             suffix = "주"
 
         # 표시 형식 (쉼표 + 단위) 재포맷
         self._suppress_change = True
         if col == 2 and us_stock:
-            item.setText(f"{value:,.2f} {suffix}")
+            item.setText(f"{value:,.4f} {suffix}")
+        elif col == 3:
+            item.setText(f"{format_quantity(value)} {suffix}")
         else:
             item.setText(f"{int(value):,} {suffix}")
         self._suppress_change = False

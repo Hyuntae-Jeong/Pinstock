@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
+from datetime import datetime
 
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
@@ -14,6 +15,15 @@ from ..core.portfolio import is_us_stock, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .chart_widget import SparklineWidget
 from .manage_dialog import StockDialog
+
+
+def format_quantity(value) -> str:
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        qty = 0.0
+    text = f"{qty:,.3f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 # ─── 개별 주식 위젯 ───────────────────────────────────────────────────────────
@@ -26,6 +36,7 @@ class StockWidget(QWidget):
 
     MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
+    EXTENDED_COMPACT_H = 72
     EXPAND_H_KR = 214
     EXPAND_H_US = 268
     EXPAND_H   = EXPAND_H_KR
@@ -41,6 +52,7 @@ class StockWidget(QWidget):
         self._press_pos = None    # 좌클릭 시작 위치 (드래그/클릭 구분용)
         self._moved: bool = False # 일정 거리 이상 움직였는지
         self._stagger_idx = stagger_idx   # 동시 호출 분산용 인덱스
+        self._compact_height = self.COMPACT_H
 
         # 외부에서 통일 너비를 받지 않으면 종목명 기준 자체 계산
         name = self.data.get("name", self.data["code"])
@@ -148,6 +160,37 @@ class StockWidget(QWidget):
         price_row.addStretch()
 
         info.addLayout(price_row)
+
+        extended_row = QHBoxLayout()
+        extended_row.setContentsMargins(0, 0, 0, 0)
+        extended_row.setSpacing(8)
+
+        self.extended_price_lbl = QLabel("")
+        self.extended_price_lbl.setFont(self.price_lbl.font())
+        self.extended_price_lbl.setStyleSheet(
+            f"color: {C['subtext']}; font-size: 11px; font-weight: bold;"
+        )
+        self.extended_price_lbl.setMinimumHeight(16)
+        extended_row.addWidget(self.extended_price_lbl)
+
+        self.extended_rate_lbl = QLabel("")
+        self.extended_rate_lbl.setFont(self.rate_lbl.font())
+        self.extended_rate_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 9px;")
+        self.extended_rate_lbl.setMinimumHeight(16)
+        extended_row.addWidget(self.extended_rate_lbl)
+
+        self.extended_icon_lbl = QLabel("")
+        self.extended_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.extended_icon_lbl.setFixedHeight(16)
+        self.extended_icon_lbl.setStyleSheet("font-size: 8px; line-height: 16px;")
+        extended_row.addWidget(self.extended_icon_lbl)
+        extended_row.addStretch()
+
+        self.extended_widgets = [self.extended_price_lbl, self.extended_rate_lbl, self.extended_icon_lbl]
+        for widget in self.extended_widgets:
+            widget.hide()
+        info.addSpacing(2)
+        info.addLayout(extended_row)
         hl.addLayout(info, 1)
 
         # 우측: 당일 sparkline 미니 차트
@@ -190,12 +233,12 @@ class StockWidget(QWidget):
         if new_w == self.W:
             return
         self.W = new_w
-        cur_h = self.EXPAND_H if self.is_expanded else self.COMPACT_H
+        cur_h = self._expanded_height() if self.is_expanded else self._compact_height
         self.setFixedWidth(new_w)
         self.card.setGeometry(0, 0, new_w, cur_h)
-        self.compact.setGeometry(0, 0, new_w, self.COMPACT_H)
+        self.compact.setGeometry(0, 0, new_w, self._compact_height)
         panel_h = self.EXPAND_H - self.COMPACT_H
-        self.expand_panel.setGeometry(0, self.COMPACT_H, new_w, panel_h)
+        self.expand_panel.setGeometry(0, self._compact_height, new_w, panel_h)
 
     def _make_row(self, parent_layout, key_text: str, bold=False) -> tuple[QHBoxLayout, QLabel, QLabel]:
         """키-값 한 줄 생성, 값 QLabel 반환"""
@@ -227,6 +270,11 @@ class StockWidget(QWidget):
             widget = item.widget()
             if widget:
                 widget.setVisible(visible)
+
+    @staticmethod
+    def _local_session_icon() -> str:
+        hour = datetime.now().hour
+        return "☀️" if 5 <= hour < 17 else "🌙"
 
     # ── 데이터 갱신 ────────────────────────────────────────────────────────
     def _fetch_price(self):
@@ -263,13 +311,22 @@ class StockWidget(QWidget):
     def _apply_price(self, result: dict):
         price = result["price"]
         rate  = result["change_rate"]
+        display_price = price
+        display_rate = rate
+        extended = result.get("extended") if is_us_stock(self.data) else None
+        regular_price = float(result.get("regular_price") or 0.0)
+        if extended and regular_price > 0 and self._prev_close > 0:
+            display_price = regular_price
+            display_rate = (regular_price - self._prev_close) / self._prev_close * 100.0
 
-        self.price_lbl.setText(f"{price:,}")
+        self.price_lbl.setText(
+            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,}"
+        )
 
-        if rate > 0:
+        if display_rate > 0:
             color = C["red"]
             sign  = "▲"
-        elif rate < 0:
+        elif display_rate < 0:
             color = C["blue"]
             sign  = "▼"
         else:
@@ -277,10 +334,60 @@ class StockWidget(QWidget):
             sign  = "  "
 
         self.price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
-        self.rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
+        self.rate_lbl.setText(f"{sign}{abs(display_rate):.2f}%")
         self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 9px;")
+        self._apply_extended_price(result)
 
         self._update_detail(price)
+
+    def _apply_extended_price(self, result: dict):
+        extended = result.get("extended") if is_us_stock(self.data) else None
+        if not extended:
+            for widget in self.extended_widgets:
+                widget.hide()
+                widget.setText("")
+            self._set_compact_height(self.COMPACT_H)
+            return
+        rate = float(extended.get("change_rate", 0.0))
+        price = float(extended.get("price", 0.0))
+        if price <= 0:
+            for widget in self.extended_widgets:
+                widget.hide()
+                widget.setText("")
+            self._set_compact_height(self.COMPACT_H)
+            return
+        if rate > 0:
+            color, sign = C["red"], "▲"
+        elif rate < 0:
+            color, sign = C["blue"], "▼"
+        else:
+            color, sign = C["subtext"], " "
+        session_icon = self._local_session_icon()
+        self.extended_price_lbl.setText(f"{price:,.4f}")
+        self.extended_price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        self.extended_rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
+        self.extended_rate_lbl.setStyleSheet(f"color: {color}; font-size: 9px;")
+        self.extended_icon_lbl.setText(session_icon)
+        for widget in self.extended_widgets:
+            widget.show()
+        self._set_compact_height(self.EXTENDED_COMPACT_H)
+
+    def _set_compact_height(self, height: int):
+        self._compact_height = height
+        if self.is_expanded:
+            self.setFixedHeight(self._expanded_height())
+            self.card.setGeometry(0, 0, self.W, self._expanded_height())
+            self.compact.setGeometry(0, 0, self.W, height)
+            self.expand_panel.setGeometry(0, height, self.W, self.expand_panel.height())
+            return
+        if self.height() == height:
+            return
+        self.setFixedHeight(height)
+        self.card.setGeometry(0, 0, self.W, height)
+        self.compact.setGeometry(0, 0, self.W, height)
+
+    def _expanded_height(self) -> int:
+        return self.EXPAND_H + max(0, self._compact_height - self.COMPACT_H)
 
     def _update_detail(self, price: float):
         avg = self.data.get("avg_price", 0)
@@ -299,7 +406,8 @@ class StockWidget(QWidget):
             self._set_row_visible(self.fx_row, True)
             self._set_row_visible(self.fx_profit_row, True)
             self._set_row_visible(self.total_profit_row, True)
-            self.avg_val.setText(f"{float(avg):,.2f} USD")
+            self.avg_key.setText("달러 매입단가")
+            self.avg_val.setText(f"{float(avg):,.4f} USD")
             self.fx_val.setText(f"{metrics['buy_rate']:,.2f} 원/USD")
             stock_profit = metrics["stock_profit"]
             fx_profit = metrics["fx_profit"]
@@ -318,6 +426,7 @@ class StockWidget(QWidget):
             self._set_row_visible(self.fx_row, False)
             self._set_row_visible(self.fx_profit_row, False)
             self._set_row_visible(self.total_profit_row, False)
+            self.avg_key.setText("평단가")
             self.avg_val.setText(f"{int(avg):,} 원")
             self.fx_val.setText("─")
             self.fx_profit_val.setText("─")
@@ -326,16 +435,17 @@ class StockWidget(QWidget):
             self.total_profit_val.setStyleSheet(f"color: {C['text']}; font-size: 11px;")
             self.profit_val.setText(f"{sign}{profit:,} 원")
             self.profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
-        self.qty_val.setText(f"{qty:,} 주")
+        self.qty_val.setText(f"{format_quantity(qty)} 주")
         self.invest_val.setText(f"{invest:,} 원")
         self.eval_val.setText(f"{eval_:,} 원")
         self.prate_val.setText(f"{sign}{prate:.2f}%")
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         # 패널 높이를 종목 타입(EXPAND_H)에 맞춰 동기화 — 패널 바닥이 카드 바닥과 일치해야 마지막 행이 안 잘림
-        self.expand_panel.setGeometry(0, self.COMPACT_H, self.W, self.EXPAND_H - self.COMPACT_H)
+        self.expand_panel.setGeometry(0, self._compact_height, self.W, self.EXPAND_H - self.COMPACT_H)
         if self.is_expanded:
-            self.setFixedHeight(self.EXPAND_H)
-            self.card.setGeometry(0, 0, self.W, self.EXPAND_H)
+            expanded_h = self._expanded_height()
+            self.setFixedHeight(expanded_h)
+            self.card.setGeometry(0, 0, self.W, expanded_h)
 
     # ── 확장 / 축소 ────────────────────────────────────────────────────────
     def toggle_expand(self):
@@ -349,16 +459,20 @@ class StockWidget(QWidget):
     def expand(self):
         self.is_expanded = True
         self.expand_panel.show()
-        self.setFixedHeight(self.EXPAND_H)
-        self.card.setGeometry(0, 0, self.W, self.EXPAND_H)
+        expanded_h = self._expanded_height()
+        self.setFixedHeight(expanded_h)
+        self.card.setGeometry(0, 0, self.W, expanded_h)
+        self.compact.setGeometry(0, 0, self.W, self._compact_height)
+        self.expand_panel.setGeometry(0, self._compact_height, self.W, self.expand_panel.height())
         self.collapse_timer.start(5_000)   # 5초 뒤 자동 축소
         self._ensure_on_screen()           # 화면 밖이면 위로 이동
 
     def collapse(self):
         self.is_expanded = False
         self.expand_panel.hide()
-        self.setFixedHeight(self.COMPACT_H)
-        self.card.setGeometry(0, 0, self.W, self.COMPACT_H)
+        self.setFixedHeight(self._compact_height)
+        self.card.setGeometry(0, 0, self.W, self._compact_height)
+        self.compact.setGeometry(0, 0, self.W, self._compact_height)
         self.collapse_timer.stop()
         self._restore_pre_expand_pos()     # 임시 이동했으면 원위치
 

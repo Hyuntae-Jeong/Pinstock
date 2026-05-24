@@ -79,6 +79,45 @@ class ArrowSpinBox(AutoSelectSpinBox):
         painter.end()
 
 
+class ArrowDoubleSpinBox(AutoSelectDoubleSpinBox):
+    """소수 입력용 스핀박스에 ▲▼ 화살표를 직접 그린다."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.buttonSymbols() == QSpinBox.ButtonSymbols.NoButtons:
+            return
+
+        opt = QStyleOptionSpinBox()
+        self.initStyleOption(opt)
+        style = self.style()
+        up_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt,
+            QStyle.SubControl.SC_SpinBoxUp, self)
+        down_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox, opt,
+            QStyle.SubControl.SC_SpinBoxDown, self)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(QColor(C['text'])))
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        cx, cy = up_rect.center().x(), up_rect.center().y()
+        painter.drawPolygon(QPolygon([
+            QPoint(cx,     cy - 3),
+            QPoint(cx - 4, cy + 2),
+            QPoint(cx + 4, cy + 2),
+        ]))
+
+        cx, cy = down_rect.center().x(), down_rect.center().y()
+        painter.drawPolygon(QPolygon([
+            QPoint(cx - 4, cy - 2),
+            QPoint(cx + 4, cy - 2),
+            QPoint(cx,     cy + 3),
+        ]))
+        painter.end()
+
+
 # ─── ON/OFF 슬라이딩 토글 스위치 ─────────────────────────────────────────────
 class ToggleSwitch(QWidget):
     """슬라이딩 토글 스위치. ON=녹색 트랙, OFF=회색 트랙. 핸들은 흰 원."""

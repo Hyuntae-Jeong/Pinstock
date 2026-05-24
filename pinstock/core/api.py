@@ -2,6 +2,7 @@
 
 import requests
 from datetime import datetime, timedelta
+from time import time
 from urllib.parse import quote
 
 # ─── 공용 HTTP 세션 (TCP/TLS 연결 재사용으로 호출당 100~300ms 절감) ─────────
@@ -24,11 +25,87 @@ def _normalize_us_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
 
 
-def _parse_yahoo_chart(symbol: str, range_: str = "1d", interval: str = "5m") -> dict | None:
+def _yahoo_market_session(meta: dict, now_ts: int | None = None) -> str:
+    """Yahoo chart meta 의 거래 시간대 기준으로 현재 세션을 판정한다."""
+    now_ts = int(now_ts if now_ts is not None else time())
+    periods = meta.get("currentTradingPeriod") or {}
+    for key, session in (("pre", "PRE"), ("regular", "REGULAR"), ("post", "POST")):
+        period = periods.get(key) or {}
+        start = int(period.get("start") or 0)
+        end = int(period.get("end") or 0)
+        if start <= now_ts < end:
+            return session
+    return "CLOSED"
+
+
+def _last_yahoo_close(result: dict, period_key: str | None = None) -> float:
+    quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
+    timestamps = result.get("timestamp") or []
+    closes = quote_data.get("close") or []
+    start = end = None
+    if period_key:
+        period = ((result.get("meta") or {}).get("currentTradingPeriod") or {}).get(period_key) or {}
+        start = int(period.get("start") or 0)
+        end = int(period.get("end") or 0)
+    for ts, close in reversed(list(zip(timestamps, closes))):
+        price = _to_float(close)
+        if price <= 0:
+            continue
+        if start is not None and not (start <= int(ts) < end):
+            continue
+        return price
+    return 0.0
+
+
+def _yahoo_extended_session(result: dict, session: str) -> dict | None:
+    """프리/애프터마켓 가격이 있으면 표시용 세션 정보를 만든다."""
+    meta = result.get("meta", {}) or {}
+    # 프리/애프터 표시는 직전 정규장 종가 대비 등락률로 계산한다.
+    regular_close = _to_float(meta.get("regularMarketPrice"))
+    if regular_close <= 0:
+        regular_close = _to_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
+    if session == "PRE":
+        price = _last_yahoo_close(result, "pre")
+    elif session == "POST":
+        price = _last_yahoo_close(result, "post")
+    else:
+        return None
+    if price <= 0 or regular_close <= 0:
+        return None
+    change_price = price - regular_close
+    return {
+        "session": session,
+        "price": price,
+        "change_price": change_price,
+        "change_rate": change_price / regular_close * 100.0,
+    }
+
+
+def _select_yahoo_market_price(result: dict, session: str) -> float:
+    meta = result.get("meta", {}) or {}
+    if session == "PRE":
+        price = _last_yahoo_close(result, "pre")
+        if price > 0:
+            return price
+    if session == "POST":
+        price = _last_yahoo_close(result, "post")
+        if price > 0:
+            return price
+    return _to_float(meta.get("regularMarketPrice"))
+
+
+def _parse_yahoo_chart(
+    symbol: str,
+    range_: str = "1d",
+    interval: str = "5m",
+    include_prepost: bool = False,
+) -> dict | None:
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}"
         f"?range={range_}&interval={interval}"
     )
+    if include_prepost:
+        url += "&includePrePost=true"
     r = _SESSION.get(url, timeout=5)
     if r.status_code != 200:
         return None
@@ -267,19 +344,15 @@ def fetch_us_stock(symbol: str) -> dict | None:
         return None
 
     try:
-        result = _parse_yahoo_chart(symbol, range_="1d", interval="5m")
+        result = _parse_yahoo_chart(symbol, range_="1d", interval="5m", include_prepost=True)
         if not result:
             return _fetch_us_stock_naver(symbol)
         meta = result.get("meta", {}) or {}
-        price = _to_float(meta.get("regularMarketPrice"))
+        session = _yahoo_market_session(meta)
+        price = _select_yahoo_market_price(result, session)
         prev_close = _to_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
         if price <= 0:
-            closes = [
-                _to_float(v)
-                for v in (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [])
-                if v is not None
-            ]
-            price = closes[-1] if closes else 0.0
+            price = _last_yahoo_close(result)
         if price <= 0:
             return _fetch_us_stock_naver(symbol)
 
@@ -292,6 +365,9 @@ def fetch_us_stock(symbol: str) -> dict | None:
             "change_rate":  change_rate,
             "change_price": change_price,
             "currency":     meta.get("currency") or "USD",
+            "regular_price": _to_float(meta.get("regularMarketPrice")),
+            "market_state":  session,
+            "extended":      _yahoo_extended_session(result, session),
         }
     except Exception as e:
         print(f"[fetch_us_stock] {symbol} 오류: {e}")
@@ -299,14 +375,14 @@ def fetch_us_stock(symbol: str) -> dict | None:
 
 
 def fetch_us_minute_chart(symbol: str) -> dict | None:
-    """Yahoo Finance 5분봉 API로 당일 시계열 조회.
+    """Yahoo Finance 1분봉 API로 당일 정규장 시계열 조회.
     반환: {'prices': [float, ...], 'open': float} or None"""
     symbol = _normalize_us_symbol(symbol)
     if not symbol:
         return None
 
     try:
-        result = _parse_yahoo_chart(symbol, range_="1d", interval="5m")
+        result = _parse_yahoo_chart(symbol, range_="1d", interval="1m")
         if not result:
             return _fetch_us_minute_chart_naver(symbol)
         quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
