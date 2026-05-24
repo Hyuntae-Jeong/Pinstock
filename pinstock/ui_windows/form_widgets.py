@@ -118,6 +118,17 @@ class ArrowDoubleSpinBox(AutoSelectDoubleSpinBox):
         painter.end()
 
 
+class QuantitySpinBox(ArrowDoubleSpinBox):
+    """수량 입력용 스핀박스. 값이 정수면 '1', 소수면 '1.5'처럼
+    trailing zero 없이 표시한다. 입력은 setDecimals 자릿수까지 허용."""
+
+    def textFromValue(self, value: float) -> str:
+        text = f"{value:.{self.decimals()}f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
+
 # ─── ON/OFF 슬라이딩 토글 스위치 ─────────────────────────────────────────────
 class ToggleSwitch(QWidget):
     """슬라이딩 토글 스위치. ON=녹색 트랙, OFF=회색 트랙. 핸들은 흰 원."""

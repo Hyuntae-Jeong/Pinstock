@@ -14,7 +14,7 @@ from ..core.portfolio import is_us_stock, stock_metrics
 from ..core.storage import MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD
 from .theme import C, DIALOG_STYLE
 from .form_widgets import (
-    AutoSelectDoubleSpinBox, AutoSelectLineEdit, ArrowDoubleSpinBox, ToggleSwitch,
+    AutoSelectDoubleSpinBox, AutoSelectLineEdit, QuantitySpinBox, ToggleSwitch,
 )
 
 
@@ -168,12 +168,13 @@ class StockDialog(QDialog):
         layout.addRow(self.krw_avg_label, self.krw_avg_spin)
 
         # 수량 (paintEvent로 ▲▼ 화살표 직접 그림)
-        self.qty_spin = ArrowDoubleSpinBox()
+        # 정수면 '1주', 사용자가 소수점 입력하면 '1.5주'처럼 trailing zero 없이 표시
+        self.qty_spin = QuantitySpinBox()
         self.qty_spin.setRange(0.001, 1_000_000)
         self.qty_spin.setSingleStep(1)
         self.qty_spin.setDecimals(3)
         self.qty_spin.setSuffix("  주")
-        self.qty_spin.setValue(1.000)
+        self.qty_spin.setValue(1)
         layout.addRow(self._row_label("수  량"), self.qty_spin)
 
         # 기존 데이터 채우기
