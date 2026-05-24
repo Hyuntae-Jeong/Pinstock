@@ -247,7 +247,8 @@ class StockWidget(QWidget):
 
         key_lbl = QLabel(key_text)
         key_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
-        key_lbl.setFixedWidth(58)
+        # 미국 주식에서 노출되는 '달러 매입단가' (가장 긴 라벨) 가 잘리지 않을 폭.
+        key_lbl.setFixedWidth(72)
         key_lbl.setFixedHeight(16)
 
         val_lbl = QLabel("─")
