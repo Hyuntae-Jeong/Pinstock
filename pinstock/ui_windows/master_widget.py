@@ -234,6 +234,7 @@ class MasterWidget(QWidget):
 
     opacity_changed = pyqtSignal(float)   # 0.1 ~ 1.0
     market_filter_changed = pyqtSignal(str)   # ALL / KR / US
+    context_menu_requested = pyqtSignal(QPoint)   # 우클릭 위치(전역 좌표) → 매니저가 트레이와 동일 메뉴 표시
 
     def __init__(self, width: int):
         super().__init__()
@@ -722,3 +723,8 @@ class MasterWidget(QWidget):
         self._drag_pos  = None
         self._press_pos = None
         self._moved     = False
+
+    def contextMenuEvent(self, event):
+        # 우클릭 → 트레이와 동일한 메뉴 표시(매니저가 처리). 마스터가 숨김/클릭통과
+        # 상태면 이벤트 자체가 안 오므로, 기존대로 트레이 아이콘 우클릭으로 메뉴를 연다.
+        self.context_menu_requested.emit(event.globalPos())

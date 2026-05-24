@@ -418,6 +418,7 @@ class WidgetManager:
         menu.addAction(self.update_act)
         menu.addAction(quit_act)
 
+        self.context_menu = menu   # 마스터 위젯 우클릭에서도 같은 메뉴 재사용
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         # 업데이트 토스트 클릭 → 업데이트 다이얼로그
@@ -429,6 +430,10 @@ class WidgetManager:
         # 트레이 아이콘 좌클릭(Trigger) 시 표시/숨김 빠른 토글
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.toggle_visibility()
+
+    def _show_context_menu(self, global_pos):
+        # 마스터 위젯 우클릭 → 트레이와 동일한 컨텍스트 메뉴를 커서 위치에 표시
+        self.context_menu.popup(global_pos)
 
     @staticmethod
     def _make_tray_icon() -> QIcon:
@@ -591,7 +596,9 @@ class WidgetManager:
             top_y = y if top_y is None else min(top_y, y)
         if top_y is not None:
             base_y = top_y
-        step_y = StockWidget.COMPACT_H + 12
+        # GAP은 reset_positions()의 같은 column 내 세로 간격(4)과 일치해야
+        # 필터 변경 후에도 위치 초기화로 맞춘 간격이 유지된다.
+        step_y = StockWidget.COMPACT_H + 4
         for visible_idx, s in enumerate(visible):
             w = self.widgets.get(s["code"])
             if not w:
@@ -666,6 +673,7 @@ class WidgetManager:
             self.master_widget.set_opacity(self.popover_opacity)
             self.master_widget.opacity_changed.connect(self._on_opacity_changed)
             self.master_widget.market_filter_changed.connect(self._on_market_filter_changed)
+            self.master_widget.context_menu_requested.connect(self._show_context_menu)
             self.master_widget.set_market_filter(self.market_filter)
             # 시작 시 저장된 투명도가 임계치 이하면 show 전에 미리 click-through 활성화
             # (슬라이더는 별도 윈도우라 영향 없음).
