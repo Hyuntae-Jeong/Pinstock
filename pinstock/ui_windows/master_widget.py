@@ -222,6 +222,7 @@ class MasterWidget(QWidget):
     H        = GRID_H + FOOTER_H   # compact 카드 전체 높이
     RADIUS   = 13
     DRAG_THRESHOLD = 4
+    MASK     = "•••••"   # 자산 숨김 시 4지표/종목 손익에 표시
 
     # 투명도 슬라이더 범위 (퍼센트). Windows 는 macOS(60–100) 보다 넓게 10–100.
     OPACITY_MIN = 10
@@ -247,6 +248,12 @@ class MasterWidget(QWidget):
         self.is_expanded: bool = False
         self.holdings: list[dict] = []   # [{"name", "profit", "profit_rate"}, ...]
         self._market_filter: str = "ALL"
+        # 자산 숨김 — True 면 4지표/종목 손익을 •••• 로 마스킹. update_metrics 후
+        # 토글이 와도 다시 그릴 수 있도록 마지막 입력값을 보관해둔다.
+        self._assets_hidden: bool = False
+        self._total_invest: int = 0
+        self._total_eval: int = 0
+        self._has_data: bool = False
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -514,6 +521,45 @@ class MasterWidget(QWidget):
 
     # ── 지표 갱신 ────────────────────────────────────────────────────────
     def update_metrics(self, total_invest: int, total_eval: int):
+        self._total_invest = total_invest
+        self._total_eval   = total_eval
+        self._has_data     = True
+        self._render_metrics()
+
+    def clear_metrics(self):
+        """종목이 하나도 없을 때 0/빈 표시로 초기화."""
+        self._total_invest = 0
+        self._total_eval   = 0
+        self._has_data     = False
+        self.holdings = []
+        self._render_metrics()
+        if self.is_expanded:
+            self.collapse()
+
+    def _render_metrics(self):
+        muted = f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
+
+        if self._assets_hidden:
+            mask = self.MASK
+            self.invest_val.setText(mask)
+            self.eval_val.setText(mask)
+            self.profit_val.setText(mask)
+            self.profit_val.setStyleSheet(muted)
+            self.prate_val.setText(mask)
+            self.prate_val.setStyleSheet(muted)
+            return
+
+        if not self._has_data:
+            self.invest_val.setText("0 원")
+            self.eval_val.setText("0 원")
+            self.profit_val.setText("─")
+            self.profit_val.setStyleSheet(muted)
+            self.prate_val.setText("─")
+            self.prate_val.setStyleSheet(muted)
+            return
+
+        total_invest = self._total_invest
+        total_eval   = self._total_eval
         profit = total_eval - total_invest
         prate  = (profit / total_invest * 100.0) if total_invest else 0.0
 
@@ -539,21 +585,15 @@ class MasterWidget(QWidget):
             f"color: {color}; font-size: 13px; font-weight: bold;"
         )
 
-    def clear_metrics(self):
-        """종목이 하나도 없을 때 0/빈 표시로 초기화."""
-        self.invest_val.setText("0 원")
-        self.eval_val.setText("0 원")
-        self.profit_val.setText("─")
-        self.profit_val.setStyleSheet(
-            f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
-        )
-        self.prate_val.setText("─")
-        self.prate_val.setStyleSheet(
-            f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
-        )
-        self.holdings = []
+    def set_assets_hidden(self, hidden: bool):
+        """자산 정보 숨김 토글. 위젯은 계속 화면에 있지만 4지표/종목 손익은
+        ••••• 로 마스킹된다. 펼친 상태라면 보유 종목 행도 다시 그린다."""
+        if self._assets_hidden == hidden:
+            return
+        self._assets_hidden = hidden
+        self._render_metrics()
         if self.is_expanded:
-            self.collapse()
+            self._render_holdings()
 
     # ── 보유 종목 목록 표시 ──────────────────────────────────────────────
     ROW_H        = 20    # 종목 1행 높이 (폰트 11 + 약간의 여유)
@@ -615,20 +655,27 @@ class MasterWidget(QWidget):
 
             profit = int(h["profit"])
             rate   = float(h["profit_rate"])
-            if profit > 0:
-                color, sign = C['red'], "+"
-            elif profit < 0:
-                color, sign = C['blue'], ""   # 음수는 자체 '-' 사용
-            else:
+            if self._assets_hidden:
                 color, sign = C['subtext'], ""
+                profit_text = self.MASK
+                rate_text   = self.MASK
+            else:
+                if profit > 0:
+                    color, sign = C['red'], "+"
+                elif profit < 0:
+                    color, sign = C['blue'], ""   # 음수는 자체 '-' 사용
+                else:
+                    color, sign = C['subtext'], ""
+                profit_text = f"{sign}{profit:,} 원"
+                rate_text   = f"{sign}{rate:.2f}%"
 
-            profit_lbl = QLabel(f"{sign}{profit:,} 원")
+            profit_lbl = QLabel(profit_text)
             profit_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
             profit_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             profit_lbl.setFixedWidth(100)
             row.addWidget(profit_lbl)
 
-            rate_lbl = QLabel(f"{sign}{rate:.2f}%")
+            rate_lbl = QLabel(rate_text)
             rate_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
             rate_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             rate_lbl.setFixedWidth(60)

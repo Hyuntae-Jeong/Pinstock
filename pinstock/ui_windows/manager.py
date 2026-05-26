@@ -68,6 +68,10 @@ class WidgetManager:
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
         # 마스터 위젯 (포트폴리오 요약)
         self.master_widget: MasterWidget | None = None
+        # 마스터 위젯의 데이터를 표시할지 여부. False 면 위젯은 그대로 화면에 있지만
+        # 4지표/종목 손익이 ••••• 로 마스킹된다 (macOS '자산 정보 숨기기' 와 동등).
+        # stocks.json 의 master.visible 키와 1:1 매핑 — 기존 사용자 설정 호환을 위해
+        # 의미만 재정의하고 키/변수명은 유지한다.
         self.master_visible: bool = True
         self.master_pos: list | None = None   # None → 기본 위치
         # macOS 팝오버에서 쓰는 자산 정보 숨김 / 팝오버 투명도 — Windows 에서는
@@ -113,11 +117,12 @@ class WidgetManager:
                 w.show()
             else:
                 w.hide()
-        # 마스터 위젯도 전체 토글에 함께 따름. 단, 마스터 개별 숨김 상태는 보존.
+        # 마스터 위젯도 전체 토글에 함께 따름. master_visible 은 위젯 표시 여부가
+        # 아니라 데이터 마스킹 여부라 여기서는 신경 쓰지 않는다 (마스킹 상태는 별개).
         if self.master_widget:
             if self.is_hidden:
                 self.master_widget.hide()
-            elif self.master_visible:
+            else:
                 self.master_widget.show()
         self.toggle_act.setText("👀   표시하기" if self.is_hidden else "🙈   숨기기")
 
@@ -549,10 +554,13 @@ class WidgetManager:
         else:
             self.master_widget.move(60, 20)
 
-        if self.master_visible and not self.is_hidden:
-            self.master_widget.show()
-        else:
+        # 마스터 위젯은 전체 숨김이 아닌 한 항상 보이고, master_visible 은
+        # 데이터 마스킹 여부로만 작용.
+        if self.is_hidden:
             self.master_widget.hide()
+        else:
+            self.master_widget.show()
+        self.master_widget.set_assets_hidden(not self.master_visible)
 
         # 마스터 자체에 저장된 투명도 적용 (set_opacity는 슬라이더만 동기화함)
         self.master_widget.setWindowOpacity(self.popover_opacity)
@@ -609,13 +617,14 @@ class WidgetManager:
         self._save_config()
 
     def _master_toggle_text(self) -> str:
-        return "📊   마스터 위젯 숨기기" if self.master_visible else "📊   마스터 위젯 표시하기"
+        return "💰   자산 숨기기" if self.master_visible else "💰   자산 표시하기"
 
     def toggle_master_visibility(self):
+        """마스터 위젯의 자산 데이터 표시 ↔ 마스킹 토글. 위젯 자체는 그대로 둔다
+        (macOS '자산 정보 숨기기' 와 같은 동작)."""
         self.master_visible = not self.master_visible
-        show_master = self.master_visible and not self.is_hidden
         if self.master_widget:
-            self.master_widget.show() if show_master else self.master_widget.hide()
+            self.master_widget.set_assets_hidden(not self.master_visible)
         self.master_toggle_act.setText(self._master_toggle_text())
         self._save_config()
 
