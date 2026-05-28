@@ -299,7 +299,7 @@ class WidgetManager:
     def _setup_tray(self):
         icon = self._make_tray_icon()
         self.tray = QSystemTrayIcon(icon)
-        self.tray.setToolTip("한국 주식 위젯")
+        self.tray.setToolTip("Pinstock")
 
         menu = QMenu()
         menu.setStyleSheet(TRAY_MENU_STYLE)
