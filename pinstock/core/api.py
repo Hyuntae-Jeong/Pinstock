@@ -135,6 +135,44 @@ def fetch_stock(code: str) -> dict | None:
         return None
 
 
+def search_korean_stocks(query: str, limit: int = 10) -> list[dict]:
+    """네이버 금융 자동완성 API로 한국 주식/ETF 후보를 조회.
+
+    반환 항목:
+    {'code', 'name', 'market': 'KR', 'exchange'}
+    """
+    query = str(query or "").strip()
+    if not query:
+        return []
+    url = f"https://ac.stock.naver.com/ac?q={quote(query)}&target=stock"
+    try:
+        r = _SESSION.get(url, timeout=5)
+        if r.status_code != 200:
+            return []
+        items = r.json().get("items") or []
+        results: list[dict] = []
+        seen: set[str] = set()
+        for item in items:
+            if str(item.get("nationCode") or "").upper() != "KOR":
+                continue
+            code = str(item.get("code") or "").strip().upper()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            results.append({
+                "code":     code,
+                "name":     item.get("name") or code,
+                "market":   "KR",
+                "exchange": item.get("typeName") or item.get("typeCode") or "",
+            })
+            if len(results) >= limit:
+                break
+        return results
+    except Exception as e:
+        print(f"[search_korean_stocks] {query} 오류: {e}")
+        return []
+
+
 # ─── 네이버 금융 분봉 차트 API ───────────────────────────────────────────────
 def fetch_minute_chart(code: str) -> dict | None:
     """네이버 금융 분봉 API로 당일 1분봉 시계열 조회.
