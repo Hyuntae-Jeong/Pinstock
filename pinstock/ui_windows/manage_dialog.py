@@ -292,16 +292,23 @@ class StockDialog(QDialog):
         """입력(확정/조합)이 바뀔 때마다 호출. 디바운스 후 현재 시장에 맞는 API 로 검색."""
         query = self.code_edit.composedText().strip()
         if not query:
-            self._search_timer.stop()
-            self._search_model.clear()
+            self._clear_search()
             return
         # 순수 6자리 숫자(= 한국 종목코드 직접 입력)만 드롭다운을 띄우지 않는다.
         # 글자가 섞이면(예: 6자 종목명 '카카오게임즈') 종목명 검색으로 본다.
         if self.market() == MARKET_KR and len(query) == 6 and query.isdigit():
-            self._search_timer.stop()
-            self._search_model.clear()
+            self._clear_search()
             return
         self._search_timer.start()
+
+    def _clear_search(self):
+        """드롭다운 후보·디바운스·중복검색 캐시를 모두 비운다.
+        _last_search_query 까지 비워야, 검색어를 지웠다가 같은 종목명을 다시
+        입력했을 때 _run_search 의 중복검색 가드(query == _last_search_query)에
+        걸리지 않고 드롭다운이 다시 뜬다."""
+        self._search_timer.stop()
+        self._search_model.clear()
+        self._last_search_query = ""
 
     def _run_search(self):
         query = self.code_edit.composedText().strip()
@@ -347,9 +354,7 @@ class StockDialog(QDialog):
         if not self.is_edit:
             self._set_preview_neutral()
         # 시장이 바뀌면 이전 시장의 후보 목록·캐시된 쿼리를 비운다
-        self._search_timer.stop()
-        self._search_model.clear()
-        self._last_search_query = ""
+        self._clear_search()
         if market == MARKET_US:
             self.code_edit.setPlaceholderText("예: Apple / AAPL")
             self.avg_label.setText("달러 매입단가")
