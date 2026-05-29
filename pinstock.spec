@@ -94,7 +94,7 @@ if IS_MAC:
         version=APP_VERSION,
         info_plist={
             # 메뉴바 전용 앱 — Dock 에 아이콘/이름 안 띄움
-            "LSUIElement": False,
+            "LSUIElement": True,
             # Retina 대응
             "NSHighResolutionCapable": True,
             # 시스템 다크 모드 따라가게
