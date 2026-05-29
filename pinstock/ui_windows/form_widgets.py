@@ -80,6 +80,24 @@ class SearchLineEdit(AutoSelectLineEdit):
         self._preedit = ""
         super().setText(text)
 
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        # QLineEdit 은 포커스를 받을 때마다 QCompleter 의 두 시그널을 내부 슬롯에
+        # 다시 연결한다:
+        #   activated(str)  → setText(str)               (엔터·클릭 확정)
+        #   highlighted(str)→ _q_completionHighlighted(str) → setText(str)  (방향키 탐색)
+        # 방향키로 드롭다운을 훑기만 해도 두 번째 연결 때문에 입력창이 강조된
+        # 종목코드로 즉시 바뀌어 버린다(+UnfilteredPopup 모드에선 첫 방향키가
+        # 현재 항목을 강제 선택). 엔터·클릭 전까지는 입력값을 유지하도록
+        # highlighted→setText 연결만 끊는다. activated(확정) 연결은 그대로 둔다.
+        completer = self.completer()
+        if completer is not None:
+            try:
+                completer.highlighted[str].disconnect()
+            except (TypeError, RuntimeError):
+                # 연결이 아직(혹은 이미) 없으면 disconnect 가 예외를 던진다 — 무시
+                pass
+
 
 class AutoSelectSpinBox(_SelectAllOnFocus, QSpinBox):
     pass
