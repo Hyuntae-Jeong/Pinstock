@@ -334,7 +334,33 @@ class StockDialog(QDialog):
             item.setData(data, Qt.ItemDataRole.UserRole)
             self._search_model.appendRow(item)
         if self._search_model.rowCount() and self.code_edit.hasFocus():
+            self._resize_search_popup()
             self._search_completer.complete()
+
+    def _resize_search_popup(self):
+        """드롭다운 팝업 폭을 가장 긴 후보에 맞춰 넓힌다.
+        기본 QCompleter 팝업은 입력창 너비에 고정돼(showPopup 이 setGeometry 를
+        line edit 폭으로 호출) 긴 종목명이 '...' 로 잘린다. 내용에 맞춘 최소 폭을
+        주면 setGeometry 가 minimumWidth 로 클램프돼 팝업이 넓어진다."""
+        popup = self._search_completer.popup()
+        n = self._search_model.rowCount()
+        if popup is None or n == 0:
+            return
+        # 가장 긴 항목을 잘림 없이 담을 폭. 글꼴 기준 실측(fm)과 delegate 여백을
+        # 반영한 sizeHintForColumn 중 큰 값을 써서 프록시 갱신 타이밍과 무관하게 안전.
+        fm = popup.fontMetrics()
+        text_w = max(fm.horizontalAdvance(self._search_model.item(r).text())
+                     for r in range(n))
+        width = max(text_w + 26, popup.sizeHintForColumn(0))
+        # 항목이 많아 세로 스크롤바가 생기면 그 폭만큼 추가
+        if n > self._search_completer.maxVisibleItems():
+            width += popup.verticalScrollBar().sizeHint().width()
+        width += 2 * popup.frameWidth()
+        # 화면 밖으로 넘치지 않게 상한
+        screen = popup.screen()
+        if screen is not None:
+            width = min(width, screen.availableGeometry().width() - 40)
+        popup.setMinimumWidth(width)
 
     def _on_search_activated(self, index: QModelIndex):
         data = index.data(Qt.ItemDataRole.UserRole)
