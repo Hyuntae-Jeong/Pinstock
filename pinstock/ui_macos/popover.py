@@ -995,11 +995,19 @@ class Popover(QWidget):
         # 메뉴바 아이콘 가운데 아래로 떨어뜨림 (Qt 트레이는 geometry 가 비어있는 경우가
         # 있어 anchor 좌표 기준으로 보정). 메뉴바와 살짝 떨어뜨리기 위해 10px 갭.
         base_pos = self._base_pos_for_anchor(anchor_global_pos, anchor_width, target_w, target_h, screen)
-        self.move(self._clamp_position(base_pos + self._position_offset, screen))
-        self.show()
+        target_pos = self._clamp_position(base_pos + self._position_offset, screen)
+
+        self.move(target_pos)
+        if not self.isVisible():
+            self.show()
+            # macOS Qt bug workaround: top-level 윈도우(특히 Qt.Window)는 show() 이후에
+            # 다시 move()를 해줘야 저장된 위치에 정확히 박히는 경우가 있음.
+            self.move(target_pos)
+        else:
+            self.raise_()
+            self.activateWindow()
+
         self.pin_btn.raise_()
-        self.raise_()
-        self.activateWindow()
 
     def _start_position_drag(self, global_pos: QPoint):
         self._move_start_global_pos = QPoint(global_pos)
