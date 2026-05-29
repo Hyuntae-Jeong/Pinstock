@@ -37,8 +37,9 @@ HELP_SECTIONS: list[tuple[str, str, str]] = [
         """
         <p>트레이 아이콘 우클릭 → <b>종목 추가</b> 로 다이얼로그를 엽니다.</p>
         <ul>
-            <li><b>한국 주식</b>: 6자리 종목 코드 입력
-                (예: 삼성전자 <code>005930</code>, 카카오 <code>035720</code>)</li>
+            <li><b>한국 주식</b>: <b>종목명</b> 으로 검색해 후보 드롭다운에서 선택하거나,
+                6자리 종목 코드를 직접 입력
+                (예: <code>삼성전자</code>, <code>카카오</code>, <code>005930</code>)</li>
             <li><b>미국 주식</b>: 시장 선택을 <i>미국</i> 으로 바꾸고
                 <b>영문 티커 또는 종목명</b> 입력
                 (예: <code>AAPL</code>, <code>Apple</code>, <code>Tesla</code>)</li>
