@@ -26,6 +26,47 @@ class AutoSelectLineEdit(_SelectAllOnFocus, QLineEdit):
     pass
 
 
+class SearchLineEdit(AutoSelectLineEdit):
+    """IME 조합 중(preedit)인 글자까지 추적하는 검색용 라인에디트.
+
+    한글처럼 IME 로 입력하는 글자는 마지막 음절이 '조합 중'(preedit) 상태로
+    남아 text()/textEdited 에 잡히지 않는다. 예) '삼성전자'를 입력하면 마지막
+    '자'가 조합 중일 때 text()는 '삼성전'만 돌려준다. 검색어에는 이 글자까지
+    포함해야 하므로 preedit 를 따로 들고 있다가 composedText()로 합쳐서 주고,
+    확정 텍스트든 조합 중 텍스트든 바뀔 때마다 textComposed 시그널을 쏜다."""
+
+    textComposed = pyqtSignal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._preedit: str = ""
+        # 확정 텍스트 변경(영문·붙여넣기·백스페이스·음절 확정)도 동일하게 알림
+        self.textEdited.connect(self._on_text_edited)
+
+    def _on_text_edited(self, _text: str = ""):
+        self.textComposed.emit()
+
+    def inputMethodEvent(self, event):
+        super().inputMethodEvent(event)
+        preedit = event.preeditString()
+        if preedit != self._preedit:
+            self._preedit = preedit
+            self.textComposed.emit()
+
+    def composedText(self) -> str:
+        """확정 텍스트에 조합 중인 글자를 합친, 화면에 보이는 전체 문자열."""
+        text = self.text()
+        if not self._preedit:
+            return text
+        pos = self.cursorPosition()
+        return text[:pos] + self._preedit + text[pos:]
+
+    def setText(self, text: str):
+        # 프로그램이 값을 직접 넣으면 조합 상태도 초기화한다
+        self._preedit = ""
+        super().setText(text)
+
+
 class AutoSelectSpinBox(_SelectAllOnFocus, QSpinBox):
     pass
 

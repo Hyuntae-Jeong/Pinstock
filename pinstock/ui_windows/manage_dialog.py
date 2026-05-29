@@ -15,7 +15,7 @@ from ..core.portfolio import is_us_stock, stock_metrics
 from ..core.storage import MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD
 from .theme import C, DIALOG_STYLE
 from .form_widgets import (
-    AutoSelectDoubleSpinBox, AutoSelectLineEdit, QuantitySpinBox, ToggleSwitch,
+    AutoSelectDoubleSpinBox, SearchLineEdit, QuantitySpinBox, ToggleSwitch,
 )
 
 
@@ -150,10 +150,11 @@ class StockDialog(QDialog):
         layout.addRow(self._row_label("시장"), market_widget)
 
         # 종목코드 (포커스 시 자동 전체선택)
-        self.code_edit = AutoSelectLineEdit()
+        self.code_edit = SearchLineEdit()
         self.code_edit.setPlaceholderText("예: 삼성전자 / 005930")
         self.code_edit.editingFinished.connect(self._preview_name)
-        self.code_edit.textEdited.connect(self._on_code_text_edited)
+        # textComposed: 확정 텍스트뿐 아니라 IME 조합 중인 글자 변화까지 알린다
+        self.code_edit.textComposed.connect(self._on_code_text_edited)
         layout.addRow(self._row_label("종목 코드"), self.code_edit)
 
         # 종목 이름/티커 검색용 드롭다운 자동완성 (KR·US 공용, 항상 부착)
@@ -163,10 +164,11 @@ class StockDialog(QDialog):
         self._search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._search_completer.activated[QModelIndex].connect(self._on_search_activated)
         self.code_edit.setCompleter(self._search_completer)
-        # 디바운스: 타이핑이 250ms 멈춘 뒤 한 번만 검색
+        # 디바운스: 타이핑이 0.5초 멈춘 뒤 한 번만 검색
+        # (한글 IME 조합 중인 마지막 글자는 SearchLineEdit.composedText()로 포함)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(250)
+        self._search_timer.setInterval(500)
         self._search_timer.timeout.connect(self._run_search)
         self._last_search_query: str = ""
 
@@ -245,7 +247,7 @@ class StockDialog(QDialog):
 
     # ── 종목명 자동 미리보기 ─────────────────────────────────────────────
     def _preview_name(self):
-        raw = self.code_edit.text().strip()
+        raw = self.code_edit.composedText().strip()
         code = raw.upper()
         self._preview_result = None
         if not code:
@@ -286,9 +288,9 @@ class StockDialog(QDialog):
             self._set_preview_error("찾을 수 없는 종목")
 
     # ── 종목 이름/티커 자동완성 (KR·US 공용) ─────────────────────────────
-    def _on_code_text_edited(self, text: str):
-        """타이핑할 때마다 호출. 디바운스 후 현재 시장에 맞는 API 로 검색."""
-        query = text.strip()
+    def _on_code_text_edited(self):
+        """입력(확정/조합)이 바뀔 때마다 호출. 디바운스 후 현재 시장에 맞는 API 로 검색."""
+        query = self.code_edit.composedText().strip()
         if not query:
             self._search_timer.stop()
             self._search_model.clear()
@@ -301,7 +303,7 @@ class StockDialog(QDialog):
         self._search_timer.start()
 
     def _run_search(self):
-        query = self.code_edit.text().strip()
+        query = self.code_edit.composedText().strip()
         if not query:
             return
         if query == self._last_search_query:
