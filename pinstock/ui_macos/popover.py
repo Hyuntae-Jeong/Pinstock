@@ -592,6 +592,12 @@ class Popover(QWidget):
         self._preferred_height: int | None = None
         self._pinned: bool = False
         self._position_offset = QPoint(0, 0)
+        # 외부 창 관리 앱(Rectangle 등)이 키보드 단축키로 팝오버를 옮기는 것을
+        # 막기 위한 상태. 우리가 의도한 마지막 위치를 기록해 두고, moveEvent 에서
+        # 그와 다른 이동(=외부 이동)이면 되돌린다. 크기는 setFixedSize 로 이미
+        # NSWindow min==max 가 걸려 외부 리사이즈가 막히므로 위치만 잠그면 된다.
+        self._intended_pos: QPoint | None = None
+        self._reverting_move: bool = False
         self._last_anchor_pos: QPoint | None = None
         self._last_anchor_width: int = 0
         self._move_start_global_pos: QPoint | None = None
@@ -757,7 +763,7 @@ class Popover(QWidget):
         was_visible = self.isVisible()
         pos = self.pos()
         self.setWindowFlags(flags)
-        self.move(pos)
+        self._move_window(pos)
         if was_visible:
             self.show()
             self.raise_()
@@ -1005,17 +1011,25 @@ class Popover(QWidget):
         base_pos = self._base_pos_for_anchor(anchor_global_pos, anchor_width, target_w, target_h, screen)
         target_pos = self._clamp_position(base_pos + self._position_offset, screen)
 
-        self.move(target_pos)
+        self._move_window(target_pos)
         if not self.isVisible():
             self.show()
             # macOS Qt bug workaround: top-level 윈도우(특히 Qt.Window)는 show() 이후에
             # 다시 move()를 해줘야 저장된 위치에 정확히 박히는 경우가 있음.
-            self.move(target_pos)
+            self._move_window(target_pos)
         else:
             self.raise_()
             self.activateWindow()
 
         self.pin_btn.raise_()
+
+    def _move_window(self, pos: QPoint):
+        """창을 옮기는 단일 통로. 의도한 위치를 기록해 둔다.
+        우리 코드(show_below / 마우스 드래그 / 플래그 전환)의 모든 이동은 이
+        메서드를 거치므로, moveEvent 에서 이 값과 다른 이동은 외부(Rectangle 등)
+        가 일으킨 것으로 보고 되돌릴 수 있다."""
+        self._intended_pos = QPoint(pos)
+        self.move(pos)
 
     def _start_position_drag(self, global_pos: QPoint):
         self._move_start_global_pos = QPoint(global_pos)
@@ -1026,7 +1040,7 @@ class Popover(QWidget):
         if self._move_start_global_pos is None or self._move_start_window_pos is None:
             return
         delta = global_pos - self._move_start_global_pos
-        self.move(self._clamp_position(self._move_start_window_pos + delta))
+        self._move_window(self._clamp_position(self._move_start_window_pos + delta))
 
     def _finish_position_drag(self):
         self.unsetCursor()
@@ -1094,6 +1108,20 @@ class Popover(QWidget):
         if not self._height_resizing:
             self.unsetCursor()
         super().leaveEvent(event)
+
+    def moveEvent(self, event):
+        """Rectangle 같은 창 관리 앱이 control+option+방향키 등으로 팝오버를
+        옮기는 것을 막는다. 우리(show_below / 드래그)의 이동은 _move_window 로
+        _intended_pos 를 먼저 갱신하므로 현재 위치와 일치 → 통과. 그 외(=외부
+        이동)는 마지막 의도 위치로 되돌려, 팝오버 이동을 마우스 드래그로만
+        제한한다."""
+        super().moveEvent(event)
+        if self._intended_pos is None or self._reverting_move:
+            return
+        if self.pos() != self._intended_pos:
+            self._reverting_move = True
+            self.move(self._intended_pos)
+            self._reverting_move = False
 
     # ── 키보드 ────────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
