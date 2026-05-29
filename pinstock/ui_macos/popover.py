@@ -971,10 +971,18 @@ class Popover(QWidget):
         y = max(sg.y() + 4, min(y, sg.y() + sg.height() - target_h - 4))
         return QPoint(x, y)
 
-    def _clamp_position(self, pos: QPoint, screen: QScreen | None = None) -> QPoint:
-        screen = screen or QApplication.screenAt(pos) or QApplication.screenAt(self.frameGeometry().center())
-        screen = screen or QApplication.primaryScreen()
+    def _clamp_position(self, pos: QPoint, preferred_screen: QScreen | None = None) -> QPoint:
+        """좌표가 화면 밖으로 나가지 않게 보정한다.
+        멀티 모니터 대응: 대상 좌표(pos)가 위치한 모니터를 찾아 그 화면 경계로 가둔다.
+        만약 어느 모니터에도 걸쳐있지 않다면(모니터 연결 해제 등) 기본 screen 가이드를 따른다.
+        """
+        # 1. 대상 좌표가 현재 어느 스크린에 있는지 확인
+        target_screen = QApplication.screenAt(pos)
+        
+        # 2. 해당 좌표에 스크린이 있다면 그 스크린의 경계를 사용, 없다면 전달받은 가이드나 주 모니터 사용
+        screen = target_screen or preferred_screen or QApplication.primaryScreen()
         sg = screen.availableGeometry()
+
         x = max(sg.x() + 4, min(pos.x(), sg.x() + sg.width() - self.width() - 4))
         y = max(sg.y() + 4, min(pos.y(), sg.y() + sg.height() - self.height() - 4))
         return QPoint(x, y)
