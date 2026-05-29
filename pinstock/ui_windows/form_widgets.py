@@ -11,15 +11,29 @@ from .theme import C
 
 # ─── 포커스 진입 시 자동 전체선택 ────────────────────────────────────────────
 class _SelectAllOnFocus:
-    """Mixin: 포커스가 들어오면 내용을 자동으로 전체 선택.
+    """Mixin: 사용자가 마우스/탭으로 포커스를 주면 내용을 자동 전체 선택.
     selectAll() 메서드가 있는 위젯(QLineEdit·QSpinBox 등)과 혼합해 사용.
 
     focusInEvent 직후 Qt 내부에서 selection이 해제될 수 있어
-    QTimer.singleShot(0, ...)으로 다음 이벤트 루프 tick에 호출한다."""
+    QTimer.singleShot(0, ...)으로 다음 이벤트 루프 tick에 호출한다.
+
+    단, 자동완성(QCompleter) 팝업이 닫히며 되돌아오는 포커스
+    (PopupFocusReason·ActiveWindowFocusReason 등)에서는 전체 선택하지 않는다.
+    검색 드롭다운이 갱신될 때마다 입력 중이던 텍스트가 통째로 선택돼,
+    이어 누른 글자에 덮어써지는 문제가 있기 때문이다."""
+
+    # 사용자가 '직접' 진입한 것으로 볼 포커스 사유만 전체 선택 대상
+    _SELECT_ALL_REASONS = (
+        Qt.FocusReason.MouseFocusReason,
+        Qt.FocusReason.TabFocusReason,
+        Qt.FocusReason.BacktabFocusReason,
+        Qt.FocusReason.ShortcutFocusReason,
+    )
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        QTimer.singleShot(0, self.selectAll)
+        if event.reason() in self._SELECT_ALL_REASONS:
+            QTimer.singleShot(0, self.selectAll)
 
 
 class AutoSelectLineEdit(_SelectAllOnFocus, QLineEdit):

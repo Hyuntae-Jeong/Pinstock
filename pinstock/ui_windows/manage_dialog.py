@@ -270,7 +270,7 @@ class StockDialog(QDialog):
                     result = {"name": matches[0]["name"]}
                     self._preview_result = matches[0]
         else:
-            if len(code) == 6 and code.isalnum():
+            if len(code) == 6 and code.isdigit():
                 result = fetch_stock(code)
             else:
                 matches = search_korean_stocks(raw, limit=1)
@@ -295,8 +295,9 @@ class StockDialog(QDialog):
             self._search_timer.stop()
             self._search_model.clear()
             return
-        # 코드를 직접 입력한 경우 (KR 6자리 alphanumeric) 는 드롭다운 띄우지 않음
-        if self.market() == MARKET_KR and len(query) == 6 and query.isalnum():
+        # 순수 6자리 숫자(= 한국 종목코드 직접 입력)만 드롭다운을 띄우지 않는다.
+        # 글자가 섞이면(예: 6자 종목명 '카카오게임즈') 종목명 검색으로 본다.
+        if self.market() == MARKET_KR and len(query) == 6 and query.isdigit():
             self._search_timer.stop()
             self._search_model.clear()
             return
