@@ -27,7 +27,7 @@ from ..ui_windows.theme import C, DIALOG_STYLE
 
 # ─── 백그라운드 통신 신호 (메인 스레드로 안전하게 넘기기) ─────────────────
 class _Signals(QObject):
-    release_fetched = pyqtSignal(object)            # ReleaseInfo | None
+    release_fetched = pyqtSignal(object, object)     # ReleaseInfo|None, FetchError|None
     download_progress = pyqtSignal(int, int)         # done, total
     download_done = pyqtSignal(bool, object)         # success, dest Path
 
@@ -38,6 +38,38 @@ _S_UP_TO_DATE = "up_to_date"
 _S_UPDATE_AVAILABLE = "update_available"
 _S_DOWNLOADING = "downloading"
 _S_ERROR = "error"
+
+
+def _fetch_error_message(error: Optional[updater.FetchError]) -> str:
+    """FetchError 종류별 한글 안내. 사용자가 다음에 뭘 해야 하는지가 분명하도록.
+    예전엔 모든 실패가 같은 '네트워크 상태를 확인해주세요' 였는데, rate-limit 처럼
+    네트워크는 멀쩡한 경우엔 사용자를 헷갈리게 했다."""
+    if error is None:
+        # 호환성 안전망 — 새 코드 경로는 항상 error 를 채워서 emit 함
+        return "최신 버전 정보를 가져오지 못했습니다. 잠시 후 다시 시도해주세요."
+    if error.kind == "rate_limit":
+        sec = error.reset_in_seconds
+        if sec is None or sec <= 0:
+            wait = "잠시 후"
+        elif sec < 60:
+            wait = f"{sec}초 후"
+        else:
+            wait = f"약 {(sec + 59) // 60}분 후"
+        return (
+            f"GitHub 업데이트 서버의 호출 한도를 초과했습니다. {wait}에 다시 시도해주세요.\n"
+            f"(네트워크는 정상 — 잠깐만 기다리면 자동으로 풀립니다.)"
+        )
+    if error.kind == "network":
+        return "GitHub 업데이트 서버에 연결하지 못했습니다. 네트워크 상태를 확인해주세요."
+    if error.kind == "no_asset":
+        return (
+            "최신 릴리즈에서 이 OS 용 설치 파일을 찾지 못했습니다.\n"
+            "릴리즈 페이지에서 직접 확인해주세요."
+        )
+    if error.kind == "http":
+        return f"업데이트 서버 응답이 비정상입니다. ({error.detail.splitlines()[0][:80]})"
+    # bad_tag / parse / 기타
+    return "최신 버전 정보를 해석하지 못했습니다. 잠시 후 다시 시도해주세요."
 
 
 class UpdateDialog(QDialog):
@@ -196,14 +228,18 @@ class UpdateDialog(QDialog):
     # ── 비동기 흐름 ────────────────────────────────────────────────────────
     def _start_check(self):
         def worker():
-            rel = updater.fetch_latest_release()
-            self._signals.release_fetched.emit(rel)
+            rel, err = updater.fetch_latest_release_with_error()
+            self._signals.release_fetched.emit(rel, err)
         self._worker = threading.Thread(target=worker, daemon=True)
         self._worker.start()
 
-    def _on_release_fetched(self, release: Optional[updater.ReleaseInfo]):
+    def _on_release_fetched(
+        self,
+        release: Optional[updater.ReleaseInfo],
+        error: Optional[updater.FetchError],
+    ):
         if release is None:
-            self._show_error("최신 버전 정보를 가져오지 못했습니다. 네트워크 상태를 확인해주세요.")
+            self._show_error(_fetch_error_message(error))
             return
         self._release = release
         # manager 의 캐시/throttle 갱신

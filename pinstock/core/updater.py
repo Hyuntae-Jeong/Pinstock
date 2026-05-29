@@ -14,6 +14,7 @@
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -38,6 +39,17 @@ class ReleaseInfo:
     asset_url: str      # 현재 OS 용 ZIP 직접 다운로드 URL
     asset_name: str     # e.g. "Pinstock-win-v0.1.4.zip"
     asset_size: int     # bytes
+
+
+# ─── 실패 사유 (UI 가 사용자에게 정확한 메시지를 보여줄 수 있게 분류) ──────
+# 예전엔 모든 실패가 "네트워크 상태를 확인해주세요" 한 줄로 통일돼서
+# 실제로는 GitHub API rate-limit 인 경우(네트워크는 멀쩡)에도 같은 메시지가
+# 떴다. UI 가 케이스별로 다른 안내를 보여줄 수 있게 사유를 구조화한다.
+@dataclass(frozen=True)
+class FetchError:
+    kind: str                              # "rate_limit"|"network"|"http"|"no_asset"|"bad_tag"|"parse"
+    detail: str = ""                       # 디버깅용 원문 (HTTP body 일부, 예외 메시지 등)
+    reset_in_seconds: Optional[int] = None # rate_limit 일 때만, X-RateLimit-Reset - now
 
 
 # ─── 버전 비교 ────────────────────────────────────────────────────────────
@@ -112,10 +124,14 @@ def _asset_name_for(version: str) -> str:
 
 
 # ─── 릴리즈 조회 ──────────────────────────────────────────────────────────
-def fetch_latest_release(timeout: float = 5.0) -> Optional[ReleaseInfo]:
-    """GitHub Releases API 호출. 네트워크 오류/rate limit 등은 조용히 None 반환.
+def fetch_latest_release_with_error(
+    timeout: float = 5.0,
+) -> tuple[Optional[ReleaseInfo], Optional[FetchError]]:
+    """GitHub Releases API 호출. 성공 시 (release, None), 실패 시 (None, error).
 
     `/releases/latest` 엔드포인트는 prerelease 를 자동 제외하므로 안정 버전만 들어온다.
+    호출측이 사용자에게 사유별로 다른 안내를 보여줄 수 있도록 실패를 구조화한다
+    (특히 비인증 GitHub API 의 IP 당 60req/h rate-limit 을 네트워크 오류와 구분).
     """
     try:
         r = requests.get(
@@ -126,17 +142,37 @@ def fetch_latest_release(timeout: float = 5.0) -> Optional[ReleaseInfo]:
             },
             timeout=timeout,
         )
-        if r.status_code != 200:
-            print(f"[updater] releases API status={r.status_code}")
-            return None
+    except requests.RequestException as e:
+        print(f"[updater] releases API 네트워크 오류: {e}")
+        return None, FetchError(kind="network", detail=str(e))
+
+    if r.status_code != 200:
+        # 403 + X-RateLimit-Remaining=0 = GitHub API rate-limit. reset 시각도 함께 보존.
+        remaining = r.headers.get("X-RateLimit-Remaining")
+        if r.status_code == 403 and remaining == "0":
+            reset_at = r.headers.get("X-RateLimit-Reset")
+            try:
+                reset_in = max(0, int(reset_at) - int(time.time())) if reset_at else None
+            except (TypeError, ValueError):
+                reset_in = None
+            print(f"[updater] releases API rate-limit (reset_in={reset_in}s)")
+            return None, FetchError(
+                kind="rate_limit",
+                detail=r.text[:200],
+                reset_in_seconds=reset_in,
+            )
+        print(f"[updater] releases API status={r.status_code}")
+        return None, FetchError(kind="http", detail=f"HTTP {r.status_code}: {r.text[:200]}")
+
+    try:
         data = r.json()
-    except (requests.RequestException, ValueError) as e:
-        print(f"[updater] releases API 오류: {e}")
-        return None
+    except ValueError as e:
+        print(f"[updater] releases API 파싱 오류: {e}")
+        return None, FetchError(kind="parse", detail=str(e))
 
     tag = data.get("tag_name", "")
     if not tag.startswith("v"):
-        return None
+        return None, FetchError(kind="bad_tag", detail=f"tag_name={tag!r}")
     version = tag.lstrip("v")
 
     expected = _asset_name_for(version)
@@ -146,9 +182,9 @@ def fetch_latest_release(timeout: float = 5.0) -> Optional[ReleaseInfo]:
     )
     if asset is None:
         print(f"[updater] 자산을 찾을 수 없음: {expected}")
-        return None
+        return None, FetchError(kind="no_asset", detail=expected)
 
-    return ReleaseInfo(
+    release = ReleaseInfo(
         tag=tag,
         version=version,
         body=data.get("body", "") or "",
@@ -157,6 +193,14 @@ def fetch_latest_release(timeout: float = 5.0) -> Optional[ReleaseInfo]:
         asset_name=asset["name"],
         asset_size=int(asset.get("size", 0)),
     )
+    return release, None
+
+
+def fetch_latest_release(timeout: float = 5.0) -> Optional[ReleaseInfo]:
+    """fetch_latest_release_with_error 의 얇은 래퍼 — 호출측이 실패 사유가 필요 없을 때
+    (예: manager 의 백그라운드 자동 체크) 사용."""
+    release, _ = fetch_latest_release_with_error(timeout=timeout)
+    return release
 
 
 # ─── 임시 폴더 ───────────────────────────────────────────────────────────
