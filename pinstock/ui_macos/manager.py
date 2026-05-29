@@ -138,6 +138,8 @@ class MacAppManager(QObject):
         self.assets_hidden: bool = False
         self.popover_opacity: float = 1.0
         self.popover_height: int | None = None
+        self.popover_offset: list[int] | None = None
+        self.pinned: bool = False
         self.market_filter: str = "ALL"
         # 자동 업데이트 체크 상태
         self.update_last_check_at: datetime | None = None
@@ -165,6 +167,8 @@ class MacAppManager(QObject):
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
         self.popover.opacity_changed.connect(self._on_opacity_changed)
         self.popover.height_changed.connect(self._on_height_changed)
+        self.popover.position_offset_changed.connect(self._on_position_offset_changed)
+        self.popover.pinned_changed.connect(self._on_pinned_changed)
         self.popover.closed_by_user.connect(self._on_popover_closed_by_user)
 
         # 로드한 자산 숨김 / 팝오버 투명도 상태를 팝오버에 한 번 주입
@@ -173,6 +177,8 @@ class MacAppManager(QObject):
         self.tray_assets_action.setChecked(self.assets_hidden)
         self.popover.set_opacity(self.popover_opacity)
         self.popover.set_preferred_height(self.popover_height)
+        self.popover.set_position_offset(self.popover_offset)
+        self.popover.set_pinned(self.pinned)
         self.popover.set_market_filter(self.market_filter)
 
         # 초기 데이터 푸시
@@ -267,6 +273,8 @@ class MacAppManager(QObject):
         if state == Qt.ApplicationState.ApplicationActive:
             self._maybe_re_show_popover()
         elif state == Qt.ApplicationState.ApplicationInactive:
+            if self.pinned:
+                return
             # NSPanel 의 hidesOnDeactivate 가 Cocoa 레벨에서 popover 를
             # 시각적으로 숨기는데, Qt 의 isVisible() 은 그걸 모르고 True 인
             # 채로 남는다 (desync). 그 상태에서 다음 트레이 클릭이 토글로
@@ -366,6 +374,16 @@ class MacAppManager(QObject):
         self.popover_height = height
         self._save_config()
 
+    def _on_position_offset_changed(self, x: int, y: int):
+        self.popover_offset = [int(x), int(y)]
+        self._save_config()
+
+    def _on_pinned_changed(self, pinned: bool):
+        self.pinned = bool(pinned)
+        if self.pinned and self.popover.isVisible():
+            self._user_wants_popover_visible = True
+        self._save_config()
+
     def _reapply_cached_data(self):
         """popover.set_stocks() 이후 새로 만들어진 행에 캐시된 가격/차트를 즉시 다시
         넣어 차트가 비어 보이는 시간을 없앤다."""
@@ -460,6 +478,13 @@ class MacAppManager(QObject):
                 )
             except (TypeError, ValueError):
                 self.popover_height = None
+            offset = data.get("popover_offset")
+            if isinstance(offset, list) and len(offset) == 2:
+                try:
+                    self.popover_offset = [int(offset[0]), int(offset[1])]
+                except (TypeError, ValueError):
+                    self.popover_offset = None
+            self.pinned = bool(data.get("pinned", False))
             # 자동 업데이트 메타 — last_check_at 만 (24h throttle 용)
             upd = data.get("update") or {}
             last_at = upd.get("last_check_at")
@@ -481,6 +506,8 @@ class MacAppManager(QObject):
             "assets_hidden": self.assets_hidden,
             "popover_opacity": self.popover_opacity,
             "popover_height": self.popover_height,
+            "popover_offset": self.popover_offset,
+            "pinned": self.pinned,
         }
         if self.update_last_check_at is not None:
             data["update"] = {

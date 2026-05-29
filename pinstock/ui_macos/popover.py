@@ -402,6 +402,9 @@ class PortfolioSummary(QWidget):
     MASK = "•••••"
 
     clicked = pyqtSignal()   # 카드 클릭 → 자산 숨김 토글
+    drag_started = pyqtSignal(QPoint)
+    drag_moved = pyqtSignal(QPoint)
+    drag_finished = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -413,6 +416,8 @@ class PortfolioSummary(QWidget):
         self._total_eval: int = 0
         self._has_data: bool = False
         self._assets_hidden: bool = False
+        self._press_global_pos: QPoint | None = None
+        self._dragging: bool = False
 
         grid = QGridLayout(self)
         grid.setContentsMargins(14, 12, 14, 12)
@@ -426,10 +431,37 @@ class PortfolioSummary(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+            self._press_global_pos = event.globalPosition().toPoint()
+            self._dragging = False
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_global_pos is None:
+            super().mouseMoveEvent(event)
+            return
+        pos = event.globalPosition().toPoint()
+        if not self._dragging and (pos - self._press_global_pos).manhattanLength() >= 4:
+            self._dragging = True
+            self.drag_started.emit(self._press_global_pos)
+        if self._dragging:
+            self.drag_moved.emit(pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._press_global_pos is not None:
+            if self._dragging:
+                self.drag_finished.emit()
+            else:
+                self.clicked.emit()
+            self._press_global_pos = None
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _make_cell(self, grid: QGridLayout, row: int, col: int,
                    key_text: str, bold: bool = False) -> QLabel:
@@ -537,6 +569,8 @@ class Popover(QWidget):
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
     opacity_changed          = pyqtSignal(float)   # 0.1 ~ 1.0
     height_changed           = pyqtSignal(int)     # px
+    position_offset_changed  = pyqtSignal(int, int) # 메뉴바 기준 x/y offset
+    pinned_changed           = pyqtSignal(bool)
     closed_by_user           = pyqtSignal()      # ESC 등 사용자 명시적 닫기
 
     OPACITY_MIN = 10   # 슬라이더 정수 단위 (퍼센트).
@@ -556,6 +590,12 @@ class Popover(QWidget):
         self._usd_krw_rate: float | None = None
         self._market_filter: str = "ALL"
         self._preferred_height: int | None = None
+        self._pinned: bool = False
+        self._position_offset = QPoint(0, 0)
+        self._last_anchor_pos: QPoint | None = None
+        self._last_anchor_width: int = 0
+        self._move_start_global_pos: QPoint | None = None
+        self._move_start_window_pos: QPoint | None = None
         self._height_resizing: bool = False
         self._resize_start_y: int = 0
         self._resize_start_h: int = 0
@@ -584,7 +624,19 @@ class Popover(QWidget):
         # ── 상단: 포트폴리오 요약 ────────────────────────────────────────
         self.summary = PortfolioSummary(self.card)
         self.summary.clicked.connect(self.toggle_assets_requested.emit)
+        self.summary.drag_started.connect(self._start_position_drag)
+        self.summary.drag_moved.connect(self._move_position_drag)
+        self.summary.drag_finished.connect(self._finish_position_drag)
         root.addWidget(self.summary)
+
+        self.pin_btn = QPushButton("📌", self.card)
+        self.pin_btn.setCheckable(True)
+        self.pin_btn.setFixedSize(24, 22)
+        self.pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pin_btn.clicked.connect(self._on_pin_clicked)
+        self._sync_pin_button()
+        self.pin_btn.move(self.W - 34, 9)
+        self.pin_btn.raise_()
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
@@ -668,6 +720,55 @@ class Popover(QWidget):
         ch.addWidget(self.opacity_slider, 1)
 
         root.addWidget(controls_row)
+
+    def _on_pin_clicked(self):
+        self.set_pinned(self.pin_btn.isChecked())
+        self.pinned_changed.emit(self._pinned)
+
+    def _sync_pin_button(self):
+        active = self._pinned
+        bg = C["blue"] if active else "transparent"
+        fg = C["bg"] if active else C["subtext"]
+        hover = "#b4befe" if active else C["surface"]
+        self.pin_btn.setChecked(active)
+        self.pin_btn.setToolTip("상단 고정 해제" if active else "상단 고정")
+        self.pin_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {bg};
+                color: {fg};
+                border: none;
+                border-radius: 5px;
+                font-size: 12px;
+                padding: 0;
+            }}
+            QPushButton:hover {{ background: {hover}; }}
+        """)
+
+    def _apply_window_flags(self):
+        flags = (
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.NoDropShadowWindowHint
+        )
+        if self._pinned:
+            flags |= Qt.WindowType.Window
+        else:
+            flags |= Qt.WindowType.Tool
+        was_visible = self.isVisible()
+        pos = self.pos()
+        self.setWindowFlags(flags)
+        self.move(pos)
+        if was_visible:
+            self.show()
+            self.raise_()
+
+    def set_pinned(self, pinned: bool):
+        self._pinned = bool(pinned)
+        self._sync_pin_button()
+        self._apply_window_flags()
+
+    def is_pinned(self) -> bool:
+        return self._pinned
 
     def _make_market_filter_btn(self, text: str, market: str) -> QPushButton:
         btn = QPushButton(text)
@@ -844,31 +945,87 @@ class Popover(QWidget):
         if self.isVisible():
             self.setFixedHeight(self._preferred_height)
 
+    def set_position_offset(self, offset: list | tuple | None):
+        """메뉴바 기본 위치에서 사용자가 드래그한 상대 offset 을 적용한다."""
+        if isinstance(offset, (list, tuple)) and len(offset) == 2:
+            try:
+                self._position_offset = QPoint(int(offset[0]), int(offset[1]))
+                return
+            except (TypeError, ValueError):
+                pass
+        self._position_offset = QPoint(0, 0)
+
+    def _base_pos_for_anchor(
+        self,
+        anchor_global_pos: QPoint,
+        anchor_width: int,
+        target_w: int,
+        target_h: int,
+        screen: QScreen | None = None,
+    ) -> QPoint:
+        screen = screen or QApplication.screenAt(anchor_global_pos) or QApplication.primaryScreen()
+        sg = screen.availableGeometry()
+        x = anchor_global_pos.x() + anchor_width // 2 - target_w // 2
+        y = anchor_global_pos.y() + 10
+        x = max(sg.x() + 4, min(x, sg.x() + sg.width() - target_w - 4))
+        y = max(sg.y() + 4, min(y, sg.y() + sg.height() - target_h - 4))
+        return QPoint(x, y)
+
+    def _clamp_position(self, pos: QPoint, screen: QScreen | None = None) -> QPoint:
+        screen = screen or QApplication.screenAt(pos) or QApplication.screenAt(self.frameGeometry().center())
+        screen = screen or QApplication.primaryScreen()
+        sg = screen.availableGeometry()
+        x = max(sg.x() + 4, min(pos.x(), sg.x() + sg.width() - self.width() - 4))
+        y = max(sg.y() + 4, min(pos.y(), sg.y() + sg.height() - self.height() - 4))
+        return QPoint(x, y)
+
     def show_below(self, anchor_global_pos: QPoint, anchor_width: int = 0):
         """anchor_global_pos 아래에 팝오버를 표시. 화면 우상단 메뉴바 아이콘 기준."""
         target_w = self.W + self.OUTER_M * 2
         screen = QApplication.screenAt(anchor_global_pos) or QApplication.primaryScreen()
-        sg = screen.availableGeometry()
         max_h = self._max_height_for_screen(screen)
         content_h = self._calc_content_height()
         auto_h = max(self.MIN_H, min(content_h, max_h))
         target_h = self._clamp_height(self._preferred_height or auto_h, screen)
 
         self.setFixedSize(target_w, target_h)
+        self._last_anchor_pos = QPoint(anchor_global_pos)
+        self._last_anchor_width = int(anchor_width)
 
         # 메뉴바 아이콘 가운데 아래로 떨어뜨림 (Qt 트레이는 geometry 가 비어있는 경우가
         # 있어 anchor 좌표 기준으로 보정). 메뉴바와 살짝 떨어뜨리기 위해 10px 갭.
-        x = anchor_global_pos.x() + anchor_width // 2 - target_w // 2
-        y = anchor_global_pos.y() + 10
-
-        # 화면 경계 안으로 보정
-        x = max(sg.x() + 4, min(x, sg.x() + sg.width() - target_w - 4))
-        y = max(sg.y() + 4, y)
-
-        self.move(x, y)
+        base_pos = self._base_pos_for_anchor(anchor_global_pos, anchor_width, target_w, target_h, screen)
+        self.move(self._clamp_position(base_pos + self._position_offset, screen))
         self.show()
+        self.pin_btn.raise_()
         self.raise_()
         self.activateWindow()
+
+    def _start_position_drag(self, global_pos: QPoint):
+        self._move_start_global_pos = QPoint(global_pos)
+        self._move_start_window_pos = self.pos()
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def _move_position_drag(self, global_pos: QPoint):
+        if self._move_start_global_pos is None or self._move_start_window_pos is None:
+            return
+        delta = global_pos - self._move_start_global_pos
+        self.move(self._clamp_position(self._move_start_window_pos + delta))
+
+    def _finish_position_drag(self):
+        self.unsetCursor()
+        self._move_start_global_pos = None
+        self._move_start_window_pos = None
+        if self._last_anchor_pos is None:
+            return
+        base_pos = self._base_pos_for_anchor(
+            self._last_anchor_pos,
+            self._last_anchor_width,
+            self.width(),
+            self.height(),
+        )
+        self._position_offset = self.pos() - base_pos
+        self.position_offset_changed.emit(self._position_offset.x(), self._position_offset.y())
 
     def _max_height_for_screen(self, screen: QScreen | None = None) -> int:
         screen = screen or QApplication.screenAt(self.frameGeometry().center())
