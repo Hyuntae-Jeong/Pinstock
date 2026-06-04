@@ -5,7 +5,7 @@ import sys
 import shutil
 from pathlib import Path
 
-from .portfolio import portfolio_totals
+from .portfolio import portfolio_totals, stock_metrics
 
 
 # ─── 설정 파일 경로 (OS별 표준 디렉토리) ──────────────────────────────────────
@@ -128,12 +128,16 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
     ws = wb.active
     ws.title = "보유종목"
 
-    headers = [h for h, _ in EXCEL_COLUMNS]
+    # 종목별 수익 금액/수익률은 현재가·환율로 계산되는 값이라 EXCEL_COLUMNS(=import
+    # 필수 컬럼)에는 넣지 않고 export 시에만 뒤에 덧붙인다. import 은 추가 컬럼을
+    # 무시하므로 라운드트립에 영향 없음.
+    headers = [h for h, _ in EXCEL_COLUMNS] + ["수익금액 (원)", "수익률 (%)"]
     ws.append(headers)
     bold = Font(bold=True)
     for col_idx in range(1, len(headers) + 1):
         ws.cell(row=1, column=col_idx).font = bold
 
+    prices = current_prices or {}
     for s in stocks:
         row = []
         for _, key in EXCEL_COLUMNS:
@@ -145,7 +149,21 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
                 row.append(float(s.get(key, 0)))
             else:
                 row.append(int(s.get(key, 0)))
+        metrics = stock_metrics(s, prices.get(s.get("code")), usd_krw_rate)
+        row.append(metrics["profit"])
+        row.append(round(metrics["profit_rate"], 2))
         ws.append(row)
+
+    # 수익금액/수익률 컬럼 숫자 포맷 (헤더 제외)
+    profit_col_idx = len(EXCEL_COLUMNS) + 1
+    rate_col_idx = len(EXCEL_COLUMNS) + 2
+    for row_idx in range(2, ws.max_row + 1):
+        pc = ws.cell(row=row_idx, column=profit_col_idx)
+        pc.number_format = "#,##0"
+        pc.alignment = Alignment(horizontal="right")
+        rc = ws.cell(row=row_idx, column=rate_col_idx)
+        rc.number_format = "0.00"
+        rc.alignment = Alignment(horizontal="right")
 
     # 종목코드 컬럼을 텍스트 포맷으로 (선행 0/영문 안전)
     code_col_idx = next(i for i, (_, k) in enumerate(EXCEL_COLUMNS, 1) if k == "code")
@@ -155,8 +173,9 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
         cell.alignment = Alignment(horizontal="left")
 
     # 컬럼 너비 자동 조정 (간단히 헤더+여유)
-    widths = {"종목코드": 12, "종목명": 28, "평단가": 12, "수량": 10}
-    for col_idx, (header, _) in enumerate(EXCEL_COLUMNS, 1):
+    widths = {"종목코드": 12, "종목명": 28, "평단가": 12, "수량": 10,
+              "수익금액 (원)": 14, "수익률 (%)": 12}
+    for col_idx, header in enumerate(headers, 1):
         letter = ws.cell(row=1, column=col_idx).column_letter
         ws.column_dimensions[letter].width = widths.get(header, 14)
 
