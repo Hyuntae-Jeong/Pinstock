@@ -168,23 +168,15 @@ class WidgetManager:
             groups.setdefault(screen, []).append((s, w))
 
         widget_w = self.uniform_w
-        step_y   = StockWidget.COMPACT_H + GAP
 
         for screen, items in groups.items():
             geo = screen.availableGeometry()
             col_top_y = geo.y() + MARGIN_Y + (master_offset if screen is master_screen else 0)
-            # 한 column에 들어가는 위젯 수 (하단 여백까지 고려)
-            avail_h = geo.y() + geo.height() - MARGIN_BOTTOM - col_top_y
-            max_per_col = max(1, avail_h // step_y)
-
             first_col_x = geo.x() + geo.width() - widget_w - MARGIN_X
-            for i, (s, w) in enumerate(items):
-                col_idx = i // max_per_col
-                row_idx = i %  max_per_col
-                x = first_col_x - col_idx * (widget_w + COL_GAP)
-                y = col_top_y + row_idx * step_y
-                w.move(x, y)
-                s["pos"] = [x, y]
+            bottom_y = geo.y() + geo.height() - MARGIN_BOTTOM
+            self._place_widgets_in_columns(
+                items, first_col_x, col_top_y, bottom_y, GAP, COL_GAP
+            )
 
         self._save_config()
         # 숨김 상태라면 자동으로 다시 표시
@@ -230,18 +222,12 @@ class WidgetManager:
             if not s.get("hidden", False) and s["code"] in self.widgets
         ]
         col_top_y = geo.y() + MARGIN_Y + master_offset
-        step_y    = StockWidget.COMPACT_H + GAP
-        avail_h   = geo.y() + geo.height() - MARGIN_BOTTOM - col_top_y
-        max_per_col = max(1, avail_h // step_y)
+        bottom_y = geo.y() + geo.height() - MARGIN_BOTTOM
         first_col_x = geo.x() + geo.width() - widget_w - MARGIN_X
 
-        for i, (s, w) in enumerate(visible_items):
-            col_idx = i // max_per_col
-            row_idx = i %  max_per_col
-            x = first_col_x - col_idx * (widget_w + COL_GAP)
-            y = col_top_y + row_idx * step_y
-            w.move(x, y)
-            s["pos"] = [x, y]
+        self._place_widgets_in_columns(
+            visible_items, first_col_x, col_top_y, bottom_y, GAP, COL_GAP
+        )
 
         self._save_config()
         # 숨김 상태라면 자동으로 다시 표시
@@ -278,6 +264,26 @@ class WidgetManager:
         if not stock:
             return False
         return not stock.get("hidden", False) and self._matches_market_filter(stock)
+
+    @staticmethod
+    def _place_widgets_in_columns(
+        items: list[tuple[dict, StockWidget]],
+        first_col_x: int,
+        col_top_y: int,
+        bottom_y: int,
+        gap: int,
+        col_gap: int,
+    ):
+        x = first_col_x
+        y = col_top_y
+        for s, w in items:
+            h = w.height() or StockWidget.COMPACT_H
+            if y > col_top_y and y + h > bottom_y:
+                x -= w.width() + col_gap
+                y = col_top_y
+            w.move(x, y)
+            s["pos"] = [x, y]
+            y += h + gap
 
     def _on_market_filter_changed(self, market: str):
         self.market_filter = market if market in {"ALL", "KR", "US"} else "ALL"
