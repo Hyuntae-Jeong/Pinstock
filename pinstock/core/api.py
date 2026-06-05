@@ -21,8 +21,52 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _signed_naver_value(value, compare_to_previous: dict | None, default: float = 0.0) -> float:
+    number = _to_float(value, default)
+    compare = compare_to_previous or {}
+    code = str(compare.get("code") or "").strip().upper()
+    name = str(compare.get("name") or compare.get("text") or "").strip().upper()
+    if code in {"5"} or "FALL" in name or "하락" in name:
+        return -abs(number)
+    return number
+
+
 def _normalize_us_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
+
+
+def _normalize_naver_trading_session(session_type: str | None) -> str:
+    session = str(session_type or "").strip().upper()
+    if not session:
+        return ""
+    if "AFTER" in session or "POST" in session:
+        return "POST"
+    if "PRE" in session or "BEFORE" in session:
+        return "PRE"
+    if "REGULAR" in session:
+        return "REGULAR"
+    return session
+
+
+def _naver_over_market_session(data: dict) -> dict | None:
+    info = data.get("overMarketPriceInfo") or {}
+    session = _normalize_naver_trading_session(info.get("tradingSessionType"))
+    if session not in {"PRE", "POST"}:
+        return None
+
+    price = _to_float(info.get("overPrice"))
+    regular_price = _to_float(data.get("closePrice"))
+    if price <= 0 or regular_price <= 0:
+        return None
+
+    change_price = price - regular_price
+    return {
+        "session":      session,
+        "price":        price,
+        "change_price": change_price,
+        "change_rate":  change_price / regular_price * 100.0,
+        "source":       "NXT",
+    }
 
 
 def _yahoo_market_session(meta: dict, now_ts: int | None = None) -> str:
@@ -124,11 +168,33 @@ def fetch_stock(code: str) -> dict | None:
         if r.status_code != 200:
             return None
         d = r.json()
+        compare = d.get("compareToPreviousPrice") or {}
+        regular_price = _to_float(d.get("closePrice"))
+        extended = _naver_over_market_session(d)
+        price = extended["price"] if extended else regular_price
+        if extended:
+            change_price = _signed_naver_value(
+                (d.get("overMarketPriceInfo") or {}).get("compareToPreviousClosePrice"),
+                (d.get("overMarketPriceInfo") or {}).get("compareToPreviousPrice"),
+            )
+            change_rate = _signed_naver_value(
+                (d.get("overMarketPriceInfo") or {}).get("fluctuationsRatio"),
+                (d.get("overMarketPriceInfo") or {}).get("compareToPreviousPrice"),
+            )
+        else:
+            change_price = _signed_naver_value(d.get("compareToPreviousClosePrice"), compare)
+            change_rate = _signed_naver_value(d.get("fluctuationsRatio"), compare)
         return {
             "name":         d.get("stockName", code),
-            "price":        int(str(d.get("closePrice", "0")).replace(",", "")),
-            "change_rate":  float(d.get("fluctuationsRatio", 0)),
-            "change_price": int(str(d.get("compareToPreviousClosePrice", "0")).replace(",", "")),
+            "price":        price,
+            "change_rate":  change_rate,
+            "change_price": change_price,
+            "currency":     "KRW",
+            "regular_price": regular_price,
+            "market_state":  _normalize_naver_trading_session(
+                ((d.get("overMarketPriceInfo") or {}).get("tradingSessionType"))
+            ) or "REGULAR",
+            "extended":      extended,
         }
     except Exception as e:
         print(f"[fetch_stock] {code} 오류: {e}")

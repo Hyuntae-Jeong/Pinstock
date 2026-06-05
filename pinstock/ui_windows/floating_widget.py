@@ -277,6 +277,15 @@ class StockWidget(QWidget):
         hour = datetime.now().hour
         return "☀️" if 5 <= hour < 17 else "🌙"
 
+    @staticmethod
+    def _extended_session_icon(extended: dict) -> str:
+        session = str(extended.get("session") or "").upper()
+        if session == "PRE":
+            return "🌅"
+        if session == "POST":
+            return "🌙"
+        return StockWidget._local_session_icon()
+
     # ── 데이터 갱신 ────────────────────────────────────────────────────────
     def _fetch_price(self):
         """현재가/등락률 갱신 (5초 주기)."""
@@ -314,14 +323,14 @@ class StockWidget(QWidget):
         rate  = result["change_rate"]
         display_price = price
         display_rate = rate
-        extended = result.get("extended") if is_us_stock(self.data) else None
+        extended = result.get("extended")
         regular_price = float(result.get("regular_price") or 0.0)
         if extended and regular_price > 0 and self._prev_close > 0:
             display_price = regular_price
             display_rate = (regular_price - self._prev_close) / self._prev_close * 100.0
 
         self.price_lbl.setText(
-            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,}"
+            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,.0f}"
         )
 
         if display_rate > 0:
@@ -342,7 +351,7 @@ class StockWidget(QWidget):
         self._update_detail(price)
 
     def _apply_extended_price(self, result: dict):
-        extended = result.get("extended") if is_us_stock(self.data) else None
+        extended = result.get("extended")
         if not extended:
             for widget in self.extended_widgets:
                 widget.hide()
@@ -363,8 +372,8 @@ class StockWidget(QWidget):
             color, sign = C["blue"], "▼"
         else:
             color, sign = C["subtext"], " "
-        session_icon = self._local_session_icon()
-        self.extended_price_lbl.setText(f"{price:,.4f}")
+        session_icon = self._extended_session_icon(extended)
+        self.extended_price_lbl.setText(f"{price:,.4f}" if is_us_stock(self.data) else f"{price:,.0f}")
         self.extended_price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.extended_rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
         self.extended_rate_lbl.setStyleSheet(f"color: {color}; font-size: 9px;")
