@@ -226,9 +226,8 @@ class MacAppManager(QObject):
         self.tray_menu = menu
 
     def _on_tray_context_menu(self, anchor_pos):
-        # 컨텍스트 메뉴를 띄울 때 팝오버는 같이 닫는다 — macOS 상태바
-        # 아이템의 native 동작(메뉴와 popover 는 동시에 떠 있지 않음).
-        self._hide_popover()
+        # 우클릭 메뉴는 팝오버 표시 상태를 바꾸지 않는다. 팝오버 닫기는
+        # 아이콘 좌클릭 토글, ESC, 비고정 상태의 앱 비활성화 경로에서 처리한다.
         self.tray_menu.popup(anchor_pos)
 
     # ── 앱 inactive 트랜지션 ──────────────────────────────────────────────
