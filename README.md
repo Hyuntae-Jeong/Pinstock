@@ -1,7 +1,13 @@
-# 📈 한국 주식 위젯 (Pinstock)
+<p align="center">
+  <img src="docs/logo.png" alt="Pinstock 로고" width="200">
+</p>
 
-실시간 한국 주식 현재가를 화면에 항상 띄워두는 미니 위젯 프로그램입니다.  
-**Windows · macOS** 모두 지원하며 같은 `stocks.json` 데이터를 공유합니다.
+<h1 align="center">📈 한국 &amp; 미국 주식 위젯 (Pinstock)</h1>
+
+<p align="center">
+  실시간 <b>한국 · 미국</b> 주식 현재가를 화면에 항상 띄워두는 미니 위젯 프로그램입니다.<br>
+  <b>Windows · macOS</b> 모두 지원하며 같은 <code>stocks.json</code> 데이터를 공유합니다.
+</p>
 
 <p align="center">
   <table>
