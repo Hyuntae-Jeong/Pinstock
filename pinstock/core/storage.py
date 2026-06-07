@@ -61,6 +61,38 @@ def normalize_stocks_schema(stocks: list[dict]) -> list[dict]:
     return [normalize_stock_schema(s) for s in stocks if isinstance(s, dict)]
 
 
+# ─── 관심종목(워치리스트) 스키마 ──────────────────────────────────────────────
+# 관심종목은 보유와 완전히 독립된 별도 목록이다. 평단가/수량/손익 개념이 없고,
+# 시세는 일봉 기준으로 본다. 같은 종목이 보유와 관심에 동시에 존재할 수 있다.
+def normalize_watch_item(item: dict) -> dict:
+    """관심종목 한 항목에 시장/통화 기본값을 보강하고 관심 전용 필드를 정규화한다.
+
+    보유 종목과 달리 avg_price/quantity 는 없다. tags(섹터 태그, Phase 2 에서
+    색상 레지스트리와 연결), hidden(표시 ON/OFF), pos(위젯 위치)는 있으면 보존한다.
+    """
+    normalized = dict(item)
+
+    market = str(normalized.get("market") or MARKET_KR).strip().upper()
+    if market not in {MARKET_KR, MARKET_US}:
+        market = MARKET_KR
+    normalized["market"] = market
+
+    default_currency = CURRENCY_USD if market == MARKET_US else CURRENCY_KRW
+    currency = str(normalized.get("currency") or default_currency).strip().upper()
+    normalized["currency"] = currency or default_currency
+
+    # 태그: 문자열 리스트만 허용 (Phase 2 에서 사용자 추가 태그/색상과 연결)
+    tags = normalized.get("tags")
+    normalized["tags"] = [str(t) for t in tags] if isinstance(tags, list) else []
+
+    normalized["hidden"] = bool(normalized.get("hidden", False))
+    return normalized
+
+
+def normalize_watchlist_schema(items: list[dict]) -> list[dict]:
+    return [normalize_watch_item(i) for i in items if isinstance(i, dict)]
+
+
 # ─── 레거시 위치(레포 루트/CWD)에서 새 위치로 1회 자동 이전 ───────────────
 def migrate_legacy_config() -> None:
     """저장소 루트(또는 현재 작업 디렉토리)에 있던 stocks.json 을 새 위치로 1회 이전.

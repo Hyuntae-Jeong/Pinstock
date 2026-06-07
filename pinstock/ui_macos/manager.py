@@ -28,6 +28,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
+    normalize_watchlist_schema,
 )
 from ..ui_windows.manage_dialog import (
     StockDialog, ManageStocksDialog, ImportModeDialog, fetch_quote_for_stock,
@@ -138,6 +139,7 @@ class MacAppManager(QObject):
         app.applicationStateChanged.connect(self._on_app_state_changed)
 
         self.stocks: list[dict] = []
+        self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.fetchers: dict[str, StockFetcher] = {}
         self.current_prices: dict[str, float] = {}
         self.usd_krw_rate: float | None = None
@@ -446,6 +448,7 @@ class MacAppManager(QObject):
             self.stocks = normalize_stocks_schema(data)
         elif isinstance(data, dict):
             self.stocks = normalize_stocks_schema(data.get("stocks", []) or [])
+            self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -487,8 +490,10 @@ class MacAppManager(QObject):
     def _save_config(self):
         # Windows 와 호환되는 스키마 — Mac 에서는 의미 없는 필드도 보존만 함
         self.stocks = normalize_stocks_schema(self.stocks)
+        self.watchlist = normalize_watchlist_schema(self.watchlist)
         data = {
             "stocks": self.stocks,
+            "watchlist": self.watchlist,
             "master": {
                 "visible": self.master_visible,
                 "pos": self.master_pos,

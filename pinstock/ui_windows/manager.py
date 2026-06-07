@@ -49,6 +49,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
+    normalize_watchlist_schema,
 )
 from .theme import C, TRAY_MENU_STYLE
 from .floating_widget import StockWidget
@@ -66,6 +67,7 @@ class WidgetManager:
     def __init__(self, app: QApplication):
         self.app = app
         self.stocks: list[dict] = []
+        self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.widgets: dict[str, StockWidget] = {}
         self.uniform_w: int = StockWidget.MIN_W
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
@@ -414,6 +416,7 @@ class WidgetManager:
             self.stocks = normalize_stocks_schema(data)
         elif isinstance(data, dict):
             self.stocks = normalize_stocks_schema(data.get("stocks", []) or [])
+            self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -440,8 +443,10 @@ class WidgetManager:
 
     def _save_config(self):
         self.stocks = normalize_stocks_schema(self.stocks)
+        self.watchlist = normalize_watchlist_schema(self.watchlist)
         data = {
             "stocks": self.stocks,
+            "watchlist": self.watchlist,
             "master": {
                 "visible": self.master_visible,
                 "pos": self.master_pos,
