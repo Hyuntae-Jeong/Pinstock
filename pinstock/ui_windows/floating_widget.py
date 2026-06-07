@@ -571,3 +571,181 @@ class StockWidget(QWidget):
             if self.current_price:
                 self._update_detail(self.current_price)
             self.edited.emit(self.data["code"])
+
+
+# ─── 관심종목 위젯 (간소 — 일봉 기준) ─────────────────────────────────────────
+class WatchWidget(QWidget):
+    """화면에 떠있는 관심종목 위젯 (간소 버전).
+
+    보유 StockWidget 과 달리 손익/평단가/수량/확장 패널이 없다. 종목명 +
+    현재가 + 전일대비% + 미니 일봉 스파크라인만 보여주고, 자체적으로 일봉
+    기준 시세를 60초마다 폴링한다 (macOS WatchFetcher 와 동일 주기·필드).
+    클릭 확장은 없고 드래그 이동 / 우클릭 삭제만 지원한다.
+    """
+
+    deleted = pyqtSignal(str)   # code 전달 (우클릭 삭제)
+
+    MIN_W     = 240    # 보유 위젯과 동일한 최소 가로폭 (같은 compact 레이아웃)
+    COMPACT_H = 58
+    RADIUS    = 13
+
+    POLL_MS    = 60_000   # 일봉 기준이라 느리게 (분봉은 쓰지 않음)
+    STAGGER_MS = 600      # 동시 호출 분산
+
+    def __init__(self, watch_data: dict, width: int | None = None, stagger_idx: int = 0):
+        super().__init__()
+        self.data = watch_data          # code, name, market, currency, tags, hidden, pos
+        self.current_price: float = 0
+        self._drag_pos = None
+        self._press_pos = None
+        self._moved: bool = False
+        self._stagger_idx = stagger_idx
+
+        name = self.data.get("name", self.data["code"])
+        self.W = width if width else self.calc_width_for_name(name)
+
+        self.poll_timer = QTimer()
+        self.poll_timer.timeout.connect(self._fetch)
+
+        self._build_ui()
+
+        # 첫 fetch/타이머를 stagger 만큼 지연 — 여러 위젯의 동시 HTTP 호출 분산
+        QTimer.singleShot(self._stagger_idx * self.STAGGER_MS, self._start_fetching)
+
+    def _start_fetching(self):
+        self.poll_timer.start(self.POLL_MS)
+        self._fetch()
+
+    # ── 종목명에 맞춰 가로폭 계산 (StockWidget 과 동일 레이아웃) ──────────
+    @staticmethod
+    def calc_width_for_name(name: str) -> int:
+        font = QFont("Malgun Gothic", 8, QFont.Weight.Bold)
+        fm = QFontMetrics(font)
+        name_w = fm.horizontalAdvance(name)
+        OVERHEAD = 138   # 좌마진 + 정보~sparkline spacing + sparkline(100) + 우마진 + 여유
+        return max(WatchWidget.MIN_W, name_w + OVERHEAD)
+
+    # ── UI 구성 ────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(self.W, self.COMPACT_H)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("card")
+        self.card.setGeometry(0, 0, self.W, self.COMPACT_H)
+        self.card.setStyleSheet(f"""
+            QFrame#card {{
+                background: {C['bg']};
+                border: 1px solid {C['border']};
+                border-radius: {self.RADIUS}px;
+            }}
+        """)
+
+        hl = QHBoxLayout(self.card)
+        hl.setContentsMargins(14, 5, 10, 5)
+        hl.setSpacing(8)
+
+        # 좌측: 종목명 + 가격/등락률
+        info = QVBoxLayout()
+        info.setContentsMargins(0, 0, 0, 0)
+        info.setSpacing(1)
+
+        self.name_lbl = QLabel(self.data.get("name", self.data["code"]))
+        self.name_lbl.setFont(QFont("Malgun Gothic", 8, QFont.Weight.Bold))
+        self.name_lbl.setStyleSheet(f"color: {C['subtext']};")
+        info.addWidget(self.name_lbl)
+
+        price_row = QHBoxLayout()
+        price_row.setContentsMargins(0, 0, 0, 0)
+        price_row.setSpacing(8)
+        self.price_lbl = QLabel("─")
+        self.price_lbl.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
+        self.price_lbl.setStyleSheet(f"color: {C['text']};")
+        price_row.addWidget(self.price_lbl)
+        self.rate_lbl = QLabel("")
+        self.rate_lbl.setFont(QFont("Malgun Gothic", 9))
+        self.rate_lbl.setStyleSheet(f"color: {C['subtext']};")
+        price_row.addWidget(self.rate_lbl)
+        price_row.addStretch()
+        info.addLayout(price_row)
+        hl.addLayout(info, 1)
+
+        # 우측: 미니 일봉 캔들 스파크라인
+        self.sparkline = SparklineWidget(self.card)
+        hl.addWidget(self.sparkline, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    # ── 외부에서 통일 너비 적용 ───────────────────────────────────────────
+    def set_width(self, new_w: int):
+        if new_w == self.W:
+            return
+        self.W = new_w
+        self.setFixedWidth(new_w)
+        self.card.setGeometry(0, 0, new_w, self.COMPACT_H)
+
+    # ── 데이터 갱신 (일봉 기준, 60초) ─────────────────────────────────────
+    def _fetch(self):
+        code = self.data["code"]
+        us = is_us_stock(self.data)
+        result = fetch_us_stock(code) if us else fetch_stock(code)
+        if result:
+            self._apply_price(result)
+        daily = fetch_us_daily_chart(code) if us else fetch_daily_chart(code)
+        if daily and daily.get("candles"):
+            self.sparkline.set_candles(daily["candles"])
+
+    def _apply_price(self, result: dict):
+        self.data["name"] = result["name"]
+        self.name_lbl.setText(result["name"])
+        self.current_price = result["price"]
+        price = result["price"]
+        rate  = result["change_rate"]
+        self.price_lbl.setText(
+            f"{price:,.4f}" if is_us_stock(self.data) else f"{price:,.0f}"
+        )
+        if rate > 0:
+            color, sign = C["red"], "▲"
+        elif rate < 0:
+            color, sign = C["blue"], "▼"
+        else:
+            color, sign = C["subtext"], "  "
+        self.price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        self.rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
+        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 9px;")
+
+    # ── 드래그 이동 (클릭 확장은 없음) ────────────────────────────────────
+    DRAG_THRESHOLD = 4
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos  = event.globalPosition().toPoint() - self.pos()
+            self._press_pos = event.globalPosition().toPoint()
+            self._moved     = False
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
+            if not self._moved and self._press_pos:
+                delta = event.globalPosition().toPoint() - self._press_pos
+                if abs(delta.x()) > self.DRAG_THRESHOLD or abs(delta.y()) > self.DRAG_THRESHOLD:
+                    self._moved = True
+            if self._moved:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos  = None
+        self._press_pos = None
+        self._moved     = False
+
+    # ── 우클릭 메뉴 (삭제만) ──────────────────────────────────────────────
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet(TRAY_MENU_STYLE)
+        del_act = menu.addAction("🗑️   삭제")
+        action = menu.exec(event.globalPos())
+        if action == del_act:
+            self.deleted.emit(self.data["code"])
+            self.close()

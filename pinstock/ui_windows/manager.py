@@ -52,10 +52,11 @@ from ..core.storage import (
     normalize_watchlist_schema,
 )
 from .theme import C, TRAY_MENU_STYLE
-from .floating_widget import StockWidget
+from .floating_widget import StockWidget, WatchWidget
 from .master_widget import MasterWidget
 from .manage_dialog import (
-    StockDialog, ManageStocksDialog, ImportModeDialog, fetch_quote_for_stock,
+    StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
+    fetch_quote_for_stock,
 )
 from ..ui_common.update_dialog import UpdateDialog
 from ..ui_common.help_dialog import HelpDialog
@@ -69,7 +70,9 @@ class WidgetManager:
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.widgets: dict[str, StockWidget] = {}
+        self.watch_widgets: dict[str, WatchWidget] = {}   # 관심종목 플로팅 위젯
         self.uniform_w: int = StockWidget.MIN_W
+        self.uniform_watch_w: int = WatchWidget.MIN_W   # 관심 위젯 통일 너비 (보유와 별개)
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
         # 마스터 위젯 (포트폴리오 요약)
         self.master_widget: MasterWidget | None = None
@@ -104,6 +107,7 @@ class WidgetManager:
         self._load_config()
         self._setup_tray()
         self._spawn_all()
+        self._spawn_all_watch()
         self._sync_fx_timer()
 
         # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
@@ -120,6 +124,15 @@ class WidgetManager:
             if self.is_hidden:
                 w.hide()
             elif self._is_stock_visible(stock_by_code.get(code, {})):
+                w.show()
+            else:
+                w.hide()
+        # 관심 위젯도 전체 토글에 함께 따름 (개별 hidden/시장 필터 상태 보존)
+        watch_by_code = {it["code"]: it for it in self.watchlist}
+        for code, w in self.watch_widgets.items():
+            if self.is_hidden:
+                w.hide()
+            elif self._is_watch_visible(watch_by_code.get(code, {})):
                 w.show()
             else:
                 w.hide()
@@ -179,6 +192,44 @@ class WidgetManager:
             bottom_y = geo.y() + geo.height() - MARGIN_BOTTOM
             self._place_widgets_in_columns(
                 items, first_col_x, col_top_y, bottom_y, GAP, COL_GAP
+            )
+
+        self._save_config()
+        # 숨김 상태라면 자동으로 다시 표시
+        if self.is_hidden:
+            self.toggle_visibility()
+
+    # ── 관심 위젯 위치 초기화 (좌상단) ─────────────────────────────────────
+    def reset_watch_positions(self):
+        """관심 위젯을 현재 모니터의 좌상단부터 column-wrap(오른쪽으로 확장) 정렬.
+        보유 reset_positions() 는 우상단→왼쪽이라 방향이 반대 — 관심은 별도 동작.
+        숨김(hidden)·시장 필터로 안 보이는 항목은 자리를 차지하지 않게 제외."""
+        MARGIN_X      = 20   # 화면 좌측 여백
+        MARGIN_Y      = 60   # 화면 상단 여백
+        MARGIN_BOTTOM = 20   # 화면 하단 여백
+        GAP           = 4    # 같은 column 내 세로 간격
+        COL_GAP       = 8    # column 사이 가로 간격
+
+        # 관심 위젯을 현재 속한 모니터별로 그룹화 (watchlist 순서 보존)
+        groups: dict = {}
+        for item in self.watchlist:
+            if not self._is_watch_visible(item):
+                continue
+            w = self.watch_widgets.get(item["code"])
+            if not w:
+                continue
+            center = w.frameGeometry().center()
+            screen = QApplication.screenAt(center) or QApplication.primaryScreen()
+            groups.setdefault(screen, []).append((item, w))
+
+        for screen, items in groups.items():
+            geo = screen.availableGeometry()
+            col_top_y   = geo.y() + MARGIN_Y
+            first_col_x = geo.x() + MARGIN_X
+            bottom_y    = geo.y() + geo.height() - MARGIN_BOTTOM
+            # direction=+1 → 좌→우로 새 column 진행 (보유는 기본값 -1 로 우→좌)
+            self._place_widgets_in_columns(
+                items, first_col_x, col_top_y, bottom_y, GAP, COL_GAP, direction=1
             )
 
         self._save_config()
@@ -268,6 +319,35 @@ class WidgetManager:
             return False
         return not stock.get("hidden", False) and self._matches_market_filter(stock)
 
+    # ── 관심 위젯 통일 너비 / 표시 여부 (보유와 동일 패턴, 별개 상태) ──────
+    def _calc_uniform_watch_width(self) -> int:
+        w = WatchWidget.MIN_W
+        for item in self.watchlist:
+            name = item.get("name", item["code"])
+            w = max(w, WatchWidget.calc_width_for_name(name))
+        return w
+
+    def _apply_uniform_watch_width(self):
+        new_w = self._calc_uniform_watch_width()
+        if new_w == self.uniform_watch_w:
+            return
+        self.uniform_watch_w = new_w
+        for w in self.watch_widgets.values():
+            w.set_width(new_w)
+
+    def _is_watch_visible(self, item: dict) -> bool:
+        # 관심도 보유와 동일하게 시장 필터를 적용 (macOS 팝오버 관심 뷰와 일관)
+        if not item:
+            return False
+        return not item.get("hidden", False) and self._matches_market_filter(item)
+
+    def _default_watch_pos(self, idx: int) -> tuple[int, int]:
+        """저장된 pos 가 없을 때의 기본 관심 위젯 위치 — 주 모니터 좌상단 아래로 stack."""
+        geo = QApplication.primaryScreen().availableGeometry()
+        x = geo.x() + 20
+        y = geo.y() + 60 + idx * (WatchWidget.COMPACT_H + 12)
+        return x, y
+
     @staticmethod
     def _place_widgets_in_columns(
         items: list[tuple[dict, StockWidget]],
@@ -276,13 +356,16 @@ class WidgetManager:
         bottom_y: int,
         gap: int,
         col_gap: int,
+        direction: int = -1,
     ):
+        """column-wrap 배치. direction=-1 이면 새 column 이 왼쪽으로(보유, 우상단 시작),
+        +1 이면 오른쪽으로(관심, 좌상단 시작) 진행한다."""
         x = first_col_x
         y = col_top_y
         for s, w in items:
             h = w.height() or StockWidget.COMPACT_H
             if y > col_top_y and y + h > bottom_y:
-                x -= w.width() + col_gap
+                x += direction * (w.width() + col_gap)
                 y = col_top_y
             w.move(x, y)
             s["pos"] = [x, y]
@@ -302,6 +385,16 @@ class WidgetManager:
                 w.hide()
             else:
                 w.show()
+        # 관심 위젯도 같은 시장 필터를 적용 (제자리 표시/숨김 — 재정렬은 '관심 위치
+        # 초기화' 로. 보유처럼 compact 재정렬은 하지 않아 단순함을 유지한다)
+        for item in self.watchlist:
+            w = self.watch_widgets.get(item["code"])
+            if not w:
+                continue
+            if self.is_hidden or not self._is_watch_visible(item):
+                w.hide()
+            else:
+                w.show()
         self._compact_visible_widgets()
         if self.master_widget:
             self.master_widget.set_market_filter(self.market_filter)
@@ -318,11 +411,14 @@ class WidgetManager:
 
         add_act    = QAction("➕   종목 추가",   menu)
         manage_act = QAction("📋   종목 관리",   menu)
+        watch_add_act    = QAction("⭐   관심종목 추가", menu)
+        watch_manage_act = QAction("⭐   관심종목 관리", menu)
         export_act = QAction("📤   Excel로 내보내기", menu)
         import_act = QAction("📥   Excel에서 가져오기", menu)
         self.toggle_act = QAction("🙈   숨기기", menu)
         self.master_toggle_act = QAction(self._master_toggle_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
+        watch_reset_act = QAction("📐   관심 위치 초기화", menu)
         gather_act = QAction("🎯   마스터 화면에 정렬", menu)
         self.autostart_act = QAction("🚀   시작 시 자동 실행", menu)
         self.autostart_act.setCheckable(True)
@@ -331,11 +427,14 @@ class WidgetManager:
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
+        watch_add_act.triggered.connect(self.open_add_watch_dialog)
+        watch_manage_act.triggered.connect(self.open_manage_watch_dialog)
         export_act.triggered.connect(self.open_export_dialog)
         import_act.triggered.connect(self.open_import_dialog)
         self.toggle_act.triggered.connect(self.toggle_visibility)
         self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
         reset_act.triggered.connect(self.reset_positions)
+        watch_reset_act.triggered.connect(self.reset_watch_positions)
         gather_act.triggered.connect(self.gather_to_master_screen)
         self.autostart_act.triggered.connect(self.toggle_autostart)
         help_act.triggered.connect(self.open_help_dialog)
@@ -345,12 +444,17 @@ class WidgetManager:
         menu.addAction(add_act)
         menu.addAction(manage_act)
         menu.addSeparator()
+        # 관심종목 — 보유와 구분선으로 분리 (별도 저장·독립 동작)
+        menu.addAction(watch_add_act)
+        menu.addAction(watch_manage_act)
+        menu.addSeparator()
         menu.addAction(export_act)
         menu.addAction(import_act)
         menu.addSeparator()
         menu.addAction(self.toggle_act)
         menu.addAction(self.master_toggle_act)
         menu.addAction(reset_act)
+        menu.addAction(watch_reset_act)
         menu.addAction(gather_act)
         if autostart_supported():
             menu.addSeparator()
@@ -470,6 +574,11 @@ class WidgetManager:
             if w:
                 pos = w.pos()
                 s["pos"] = [pos.x(), pos.y()]
+        for item in self.watchlist:
+            w = self.watch_widgets.get(item["code"])
+            if w:
+                pos = w.pos()
+                item["pos"] = [pos.x(), pos.y()]
         if self.master_widget:
             mpos = self.master_widget.pos()
             self.master_pos = [mpos.x(), mpos.y()]
@@ -487,6 +596,39 @@ class WidgetManager:
                 visible_idx += 1
         self._sync_fx_timer()
         self._spawn_master()
+
+    # ── 관심 위젯 생성 ─────────────────────────────────────────────────────
+    def _spawn_all_watch(self):
+        """저장된 관심종목으로 위젯 생성. 저장된 pos 사용, 없으면 좌상단 기본 배치.
+        stagger 는 0부터 — 보유와 독립적으로 분산(macOS 와 동일)."""
+        self.uniform_watch_w = self._calc_uniform_watch_width()
+        visible_idx = 0
+        for i, item in enumerate(self.watchlist):
+            nx, ny = self._default_watch_pos(visible_idx)
+            self._spawn_watch_widget(item, nx, ny, stagger_idx=i)
+            if not item.get("hidden", False):
+                visible_idx += 1
+
+    def _spawn_watch_widget(self, item: dict, def_x=20, def_y=60, stagger_idx: int = 0):
+        code = item["code"]
+        w = WatchWidget(item, width=self.uniform_watch_w, stagger_idx=stagger_idx)
+        w.deleted.connect(self._on_watch_delete)
+        pos = item.get("pos", [def_x, def_y])
+        w.move(pos[0], pos[1])
+        # 보유 위젯과 동일한 투명도 / 클릭 통과 정책 적용
+        w.setWindowOpacity(self.popover_opacity)
+        if self._is_click_through_opacity(self.popover_opacity):
+            w.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        if not self.is_hidden and self._is_watch_visible(item):
+            w.show()
+        self.watch_widgets[code] = w
+
+    def _on_watch_delete(self, code: str):
+        """관심 위젯 우클릭 삭제 — watchlist 에서 제거 + 저장 + 너비 재계산."""
+        self.watchlist = [w for w in self.watchlist if w["code"] != code]
+        self.watch_widgets.pop(code, None)
+        self._save_config()
+        self._apply_uniform_watch_width()
 
     def _compact_visible_widgets(self):
         if not self.widgets:
@@ -657,10 +799,12 @@ class WidgetManager:
         return opacity <= self.CLICK_THROUGH_OPACITY
 
     def _apply_opacity_to_all(self, opacity: float):
-        """마스터 + 모든 종목 위젯에 동일 투명도 적용."""
+        """마스터 + 모든 종목/관심 위젯에 동일 투명도 적용."""
         if self.master_widget:
             self.master_widget.setWindowOpacity(opacity)
         for w in self.widgets.values():
+            w.setWindowOpacity(opacity)
+        for w in self.watch_widgets.values():
             w.setWindowOpacity(opacity)
 
     def _apply_click_through(self, opacity: float):
@@ -670,7 +814,7 @@ class WidgetManager:
         enabled = self._is_click_through_opacity(opacity)
         flag = Qt.WindowType.WindowTransparentForInput
 
-        targets = list(self.widgets.values())
+        targets = list(self.widgets.values()) + list(self.watch_widgets.values())
         if self.master_widget:
             targets.append(self.master_widget)
 
@@ -798,6 +942,92 @@ class WidgetManager:
 
         # 숨김 상태에서 새 종목을 추가한 경우 자동으로 표시 상태로 전환
         if self.is_hidden:
+            self.toggle_visibility()
+
+    # ── 관심종목 추가 ──────────────────────────────────────────────────────
+    def open_add_watch_dialog(self):
+        """관심종목 추가 — 보유와 독립. 평단가/수량 없이 코드·시장만 받는다.
+        같은 종목이 보유에 있어도 관심에 따로 추가 가능(중복 검사는 관심목록 안에서만)."""
+        dlg = StockDialog(watch_mode=True)
+        if not dlg.exec():
+            return
+        d = dlg.get_data()
+        code = d["code"]
+        if not code:
+            return
+        if any(w["code"] == code for w in self.watchlist):
+            QMessageBox.information(None, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
+            return
+
+        result = fetch_quote_for_stock(d)
+        if not result:
+            QMessageBox.warning(None, "조회 실패", f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요.")
+            return
+
+        d["name"] = result["name"]
+        self.watchlist.append(d)
+        self._save_config()
+        # 새 관심종목명이 더 길면 관심 위젯 너비 재조정 (새 위젯도 이 값으로 생성됨)
+        self._apply_uniform_watch_width()
+
+        # 새 위젯 위치: 현재 보이는 관심 위젯들 아래(좌상단 stack)
+        visible_count = sum(
+            1 for w in self.watchlist
+            if w["code"] != code and self._is_watch_visible(w)
+        )
+        nx, ny = self._default_watch_pos(visible_count)
+        self._spawn_watch_widget(d, nx, ny, stagger_idx=0)
+
+        # 숨김 상태에서 추가한 경우 자동으로 표시 상태로 전환
+        if self.is_hidden:
+            self.toggle_visibility()
+
+    # ── 관심종목 일괄 관리 ──────────────────────────────────────────────────
+    def open_manage_watch_dialog(self):
+        """관심종목 일괄 관리 — 추가/삭제/표시 토글. old/new diff 로 위젯 추가·삭제."""
+        dlg = ManageWatchlistDialog(watchlist=copy.deepcopy(self.watchlist))
+        if not dlg.exec():
+            return
+        new_items = normalize_watchlist_schema(dlg.get_watchlist())
+        old_map = {w["code"]: w for w in self.watchlist}
+        new_map = {w["code"]: w for w in new_items}
+
+        # 삭제된 관심종목: 위젯 닫고 제거
+        for code in list(old_map):
+            if code not in new_map:
+                w = self.watch_widgets.pop(code, None)
+                if w:
+                    w.close()
+
+        # 추가된 관심종목: 위젯 생성 (좌상단 stack)
+        base = sum(
+            1 for it in new_items
+            if it["code"] in old_map and self._is_watch_visible(it)
+        )
+        added_idx = 0
+        for item in new_items:
+            if item["code"] not in old_map:
+                nx, ny = self._default_watch_pos(base + added_idx)
+                self._spawn_watch_widget(item, nx, ny, stagger_idx=added_idx)
+                added_idx += 1
+
+        # 기존 관심종목: hidden(표시) 변경 반영
+        for item in new_items:
+            code = item["code"]
+            if code in old_map and code in self.watch_widgets:
+                w = self.watch_widgets[code]
+                w.data.update(item)
+                if self.is_hidden or not self._is_watch_visible(item):
+                    w.hide()
+                else:
+                    w.show()
+
+        self.watchlist = new_items
+        self._apply_uniform_watch_width()
+        self._save_config()
+
+        # 숨김 상태에서 변경한 경우 자동으로 표시 상태로 전환
+        if self.is_hidden and self.watch_widgets:
             self.toggle_visibility()
 
     # ── 도움말 / 앱 정보 ──────────────────────────────────────────────────
