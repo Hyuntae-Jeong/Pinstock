@@ -46,6 +46,19 @@ _AUTO_CHECK_STARTUP_DELAY_MS = 10 * 1000      # 앱 시작 후 10초 뒤
 _PREV_ERROR_CHECK_DELAY_MS = 1500              # 시작 직후 1.5초
 
 
+# ─── 메뉴 체크 표시 ───────────────────────────────────────────────────────────
+# 네이티브 체크는 별도 인디케이터 칸에 시스템 스타일로 그려져 라벨과 따로 논다.
+# 대신 라벨 앞에 단색 ✓ 를 넣으면 메뉴 폰트·색(다크모드 포함)을 그대로 물려받아
+# 글자와 자연스럽게 붙는다. 켜짐이면 ✓, 꺼짐이면 마커 없이 텍스트만.
+_CHECK_PREFIX = "✓   "
+_LABEL_ASSETS_HIDDEN = "자산 정보 숨기기"
+_LABEL_AUTOSTART = "시작 시 자동 실행"
+
+
+def _checkmark_text(label: str, checked: bool) -> str:
+    return (_CHECK_PREFIX if checked else "") + label
+
+
 class _UpdateCheckSignals(QObject):
     """백그라운드 fetch 결과를 메인 스레드로 안전하게 옮기는 통로."""
     done = pyqtSignal(object)   # ReleaseInfo or None
@@ -174,7 +187,7 @@ class MacAppManager(QObject):
 
         # 로드한 자산 숨김 / 팝오버 투명도 상태를 팝오버에 한 번 주입
         self.popover.set_assets_hidden(self.assets_hidden)
-        self.tray_assets_action.setChecked(self.assets_hidden)
+        self.tray_assets_action.setText(_checkmark_text(_LABEL_ASSETS_HIDDEN, self.assets_hidden))
         self.popover.set_opacity(self.popover_opacity)
         self.popover.set_preferred_height(self.popover_height)
         self.popover.set_position_offset(self.popover_offset)
@@ -214,15 +227,13 @@ class MacAppManager(QObject):
         menu.addAction("Excel 가져오기", self.open_import_dialog)
         menu.addSeparator()
         self.tray_assets_action = menu.addAction(
-            "자산 정보 숨기기", self._toggle_assets_hidden
+            _LABEL_ASSETS_HIDDEN, self._toggle_assets_hidden
         )
-        self.tray_assets_action.setCheckable(True)
         if autostart_supported():
             self.autostart_action = menu.addAction(
-                "시작 시 자동 실행", self.toggle_autostart
+                _checkmark_text(_LABEL_AUTOSTART, is_autostart_enabled()),
+                self.toggle_autostart,
             )
-            self.autostart_action.setCheckable(True)
-            self.autostart_action.setChecked(is_autostart_enabled())
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
         self.tray_about_action = menu.addAction(
@@ -336,15 +347,14 @@ class MacAppManager(QObject):
         팝오버와 메뉴 체크 상태를 함께 동기화하고 설정에 저장한다."""
         self.assets_hidden = not self.assets_hidden
         self.popover.set_assets_hidden(self.assets_hidden)
-        self.tray_assets_action.setChecked(self.assets_hidden)
+        self.tray_assets_action.setText(_checkmark_text(_LABEL_ASSETS_HIDDEN, self.assets_hidden))
         self._save_config()
 
     def toggle_autostart(self):
         """로그인 시 자동 실행 등록/해제 (LaunchAgent). 실제 반영된 상태로
-        체크박스를 동기화한다 (plist 쓰기 실패 시 원복)."""
-        desired = self.autostart_action.isChecked()
-        applied = set_autostart(desired)
-        self.autostart_action.setChecked(applied)
+        라벨의 ✓ 체크를 동기화한다 (plist 쓰기 실패 시 원복)."""
+        applied = set_autostart(not is_autostart_enabled())
+        self.autostart_action.setText(_checkmark_text(_LABEL_AUTOSTART, applied))
 
     def _on_opacity_changed(self, opacity: float):
         self.popover_opacity = opacity
