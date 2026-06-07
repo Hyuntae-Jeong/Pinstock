@@ -20,6 +20,7 @@ from ..core.portfolio import is_us_stock, stock_metrics
 
 # macOS 시스템 한글 폰트 (Malgun Gothic 의 Mac 대체)
 _FONT_FAMILY = "Apple SD Gothic Neo"
+_NUMBER_FONT_FAMILY = "Arial"
 
 
 def format_quantity(value) -> str:
@@ -97,12 +98,12 @@ class StockRow(QWidget):
         price_row.setSpacing(8)
 
         self.price_lbl = QLabel("─")
-        self.price_lbl.setFont(QFont(_FONT_FAMILY, 13, QFont.Weight.Bold))
+        self.price_lbl.setFont(QFont(_NUMBER_FONT_FAMILY, 13, QFont.Weight.Bold))
         self.price_lbl.setStyleSheet(f"color: {C['text']};")
         price_row.addWidget(self.price_lbl)
 
         self.rate_lbl = QLabel("")
-        self.rate_lbl.setFont(QFont(_FONT_FAMILY, 11))
+        self.rate_lbl.setFont(QFont(_NUMBER_FONT_FAMILY, 11))
         self.rate_lbl.setStyleSheet(f"color: {C['subtext']};")
         price_row.addWidget(self.rate_lbl)
         price_row.addStretch()
@@ -184,6 +185,7 @@ class StockRow(QWidget):
         key_lbl.setFixedHeight(16)
 
         val_lbl = QLabel("─")
+        val_lbl.setFont(QFont(_NUMBER_FONT_FAMILY, 11, QFont.Weight.Bold if bold else QFont.Weight.Normal))
         style = f"color: {C['text']}; font-size: 11px;"
         if bold:
             style += " font-weight: bold;"
@@ -209,6 +211,15 @@ class StockRow(QWidget):
         hour = datetime.now().hour
         return "☀️" if 5 <= hour < 17 else "🌙"
 
+    @staticmethod
+    def _extended_session_icon(extended: dict) -> str:
+        session = str(extended.get("session") or "").upper()
+        if session == "PRE":
+            return "☀️"
+        if session == "POST":
+            return "🌙"
+        return StockRow._local_session_icon()
+
     # ── 데이터 적용 ───────────────────────────────────────────────────────
     def apply_price(self, result: dict):
         self.data["name"] = result["name"]
@@ -220,14 +231,14 @@ class StockRow(QWidget):
         rate  = result["change_rate"]
         display_price = price
         display_rate = rate
-        extended = result.get("extended") if is_us_stock(self.data) else None
+        extended = result.get("extended")
         regular_price = float(result.get("regular_price") or 0.0)
         if extended and regular_price > 0 and self._prev_close > 0:
             display_price = regular_price
             display_rate = (regular_price - self._prev_close) / self._prev_close * 100.0
 
         self.price_lbl.setText(
-            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,}"
+            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,.0f}"
         )
 
         if display_rate > 0:
@@ -245,7 +256,7 @@ class StockRow(QWidget):
         self._refresh_detail()
 
     def _apply_extended_price(self, result: dict):
-        extended = result.get("extended") if is_us_stock(self.data) else None
+        extended = result.get("extended")
         if not extended:
             for widget in self.extended_widgets:
                 widget.hide()
@@ -266,8 +277,8 @@ class StockRow(QWidget):
             color, sign = C["blue"], "▼"
         else:
             color, sign = C["subtext"], " "
-        session_icon = self._local_session_icon()
-        self.extended_price_lbl.setText(f"{price:,.4f}")
+        session_icon = self._extended_session_icon(extended)
+        self.extended_price_lbl.setText(f"{price:,.4f}" if is_us_stock(self.data) else f"{price:,.0f}")
         self.extended_price_lbl.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold;")
         self.extended_rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
         self.extended_rate_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
@@ -477,6 +488,7 @@ class PortfolioSummary(QWidget):
         if bold:
             style += " font-weight: bold;"
         val_lbl = QLabel("─")
+        val_lbl.setFont(QFont(_NUMBER_FONT_FAMILY, 13, QFont.Weight.Bold if bold else QFont.Weight.Normal))
         val_lbl.setStyleSheet(style)
         cell.addWidget(val_lbl)
 

@@ -33,6 +33,7 @@ class StockWidget(QWidget):
     deleted        = pyqtSignal(str)   # code 전달
     edited         = pyqtSignal(str)   # 수정 완료 후 저장 요청
     price_updated  = pyqtSignal(str)   # 현재가 갱신 시 (마스터 위젯 재집계용)
+    layout_changed = pyqtSignal(str)   # compact 높이 변경 시 재정렬 요청
 
     MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
@@ -277,6 +278,15 @@ class StockWidget(QWidget):
         hour = datetime.now().hour
         return "☀️" if 5 <= hour < 17 else "🌙"
 
+    @staticmethod
+    def _extended_session_icon(extended: dict) -> str:
+        session = str(extended.get("session") or "").upper()
+        if session == "PRE":
+            return "☀️"
+        if session == "POST":
+            return "🌙"
+        return StockWidget._local_session_icon()
+
     # ── 데이터 갱신 ────────────────────────────────────────────────────────
     def _fetch_price(self):
         """현재가/등락률 갱신 (5초 주기)."""
@@ -314,14 +324,14 @@ class StockWidget(QWidget):
         rate  = result["change_rate"]
         display_price = price
         display_rate = rate
-        extended = result.get("extended") if is_us_stock(self.data) else None
+        extended = result.get("extended")
         regular_price = float(result.get("regular_price") or 0.0)
         if extended and regular_price > 0 and self._prev_close > 0:
             display_price = regular_price
             display_rate = (regular_price - self._prev_close) / self._prev_close * 100.0
 
         self.price_lbl.setText(
-            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,}"
+            f"{display_price:,.4f}" if is_us_stock(self.data) else f"{display_price:,.0f}"
         )
 
         if display_rate > 0:
@@ -342,7 +352,7 @@ class StockWidget(QWidget):
         self._update_detail(price)
 
     def _apply_extended_price(self, result: dict):
-        extended = result.get("extended") if is_us_stock(self.data) else None
+        extended = result.get("extended")
         if not extended:
             for widget in self.extended_widgets:
                 widget.hide()
@@ -363,8 +373,8 @@ class StockWidget(QWidget):
             color, sign = C["blue"], "▼"
         else:
             color, sign = C["subtext"], " "
-        session_icon = self._local_session_icon()
-        self.extended_price_lbl.setText(f"{price:,.4f}")
+        session_icon = self._extended_session_icon(extended)
+        self.extended_price_lbl.setText(f"{price:,.4f}" if is_us_stock(self.data) else f"{price:,.0f}")
         self.extended_price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
         self.extended_rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
         self.extended_rate_lbl.setStyleSheet(f"color: {color}; font-size: 9px;")
@@ -374,18 +384,21 @@ class StockWidget(QWidget):
         self._set_compact_height(self.EXTENDED_COMPACT_H)
 
     def _set_compact_height(self, height: int):
+        old_height = self._compact_height
+        if old_height == height:
+            return
         self._compact_height = height
         if self.is_expanded:
             self.setFixedHeight(self._expanded_height())
             self.card.setGeometry(0, 0, self.W, self._expanded_height())
             self.compact.setGeometry(0, 0, self.W, height)
             self.expand_panel.setGeometry(0, height, self.W, self.expand_panel.height())
-            return
-        if self.height() == height:
+            self.layout_changed.emit(self.data["code"])
             return
         self.setFixedHeight(height)
         self.card.setGeometry(0, 0, self.W, height)
         self.compact.setGeometry(0, 0, self.W, height)
+        self.layout_changed.emit(self.data["code"])
 
     def _expanded_height(self) -> int:
         return self.EXPAND_H + max(0, self._compact_height - self.COMPACT_H)
