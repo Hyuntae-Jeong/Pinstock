@@ -224,6 +224,7 @@ class MacAppManager(QObject):
         menu = QMenu()
         menu.addAction("종목 추가", self.open_add_dialog)
         menu.addAction("종목 관리", self.open_manage_dialog)
+        menu.addAction("관심종목 추가", self.open_add_watch_dialog)
         menu.addSeparator()
         menu.addAction("Excel 내보내기", self.open_export_dialog)
         menu.addAction("Excel 가져오기", self.open_import_dialog)
@@ -545,6 +546,34 @@ class MacAppManager(QObject):
         self._sync_popover_stocks()
         self._spawn_fetcher(d, stagger_idx=0)
         self._recompute_summary()
+
+    # ── 관심종목 추가 ──────────────────────────────────────────────────────
+    def open_add_watch_dialog(self):
+        """관심종목 추가 — 보유와 독립. 평단가/수량 없이 코드·종목명만 받는다.
+        같은 종목이 보유에 있어도 관심에 따로 추가할 수 있다(중복 검사는 관심목록 안에서만).
+        표시(팝오버 관심 뷰)·일봉 폴러 연결은 Step 2b 에서."""
+        dlg = StockDialog(watch_mode=True)
+        if not dlg.exec():
+            return
+        d = dlg.get_data()
+        code = d["code"]
+        if not code:
+            return
+        if any(w["code"] == code for w in self.watchlist):
+            QMessageBox.information(None, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
+            return
+
+        result = fetch_quote_for_stock(d)
+        if not result:
+            QMessageBox.warning(
+                None, "조회 실패",
+                f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요."
+            )
+            return
+
+        d["name"] = result["name"]
+        self.watchlist.append(d)
+        self._save_config()
 
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
     def open_manage_dialog(self):

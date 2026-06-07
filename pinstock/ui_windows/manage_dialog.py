@@ -111,15 +111,20 @@ class ImportModeDialog(QDialog):
 
 # ─── 종목 추가 / 수정 다이얼로그 ──────────────────────────────────────────────
 class StockDialog(QDialog):
-    def __init__(self, parent=None, data: dict | None = None):
+    def __init__(self, parent=None, data: dict | None = None, watch_mode: bool = False):
         super().__init__(parent)
         self.is_edit = data is not None
-        self.setWindowTitle("종목 수정" if self.is_edit else "종목 추가")
-        self.setFixedSize(380, 360)
+        self.watch_mode = watch_mode   # 관심종목 모드: 평단가/수량 입력 숨김
+        if watch_mode:
+            self.setWindowTitle("관심종목 수정" if self.is_edit else "관심종목 추가")
+        else:
+            self.setWindowTitle("종목 수정" if self.is_edit else "종목 추가")
+        self.setFixedSize(380, 230 if watch_mode else 360)
         self.setStyleSheet(DIALOG_STYLE)
         self._preview_result: dict | None = None
 
         layout = QFormLayout(self)
+        self.form_layout = layout   # _collapse_price_fields 에서 행 접기용
         layout.setSpacing(12)
         layout.setContentsMargins(24, 24, 24, 20)
         # 라벨과 입력 위젯의 세로 중심을 일치시킴 (이슈 #2)
@@ -206,7 +211,8 @@ class StockDialog(QDialog):
         self.qty_spin.setDecimals(3)
         self.qty_spin.setSuffix("  주")
         self.qty_spin.setValue(1)
-        layout.addRow(self._row_label("수  량"), self.qty_spin)
+        self.qty_label = self._row_label("수  량")
+        layout.addRow(self.qty_label, self.qty_spin)
 
         # 기존 데이터 채우기
         if self.is_edit:
@@ -226,6 +232,10 @@ class StockDialog(QDialog):
                 self._set_preview_found(data["name"])
 
         self._on_market_changed()
+
+        # 관심종목 모드: 평단가/원화단가/수량 행을 접어 코드·종목명만 입력받는다
+        if self.watch_mode:
+            self._collapse_price_fields()
 
         # 버튼
         btns = QDialogButtonBox(
@@ -403,6 +413,14 @@ class StockDialog(QDialog):
             self.avg_spin.setSuffix("  원")
             self.krw_avg_spin.setVisible(False)
             self.krw_avg_label.setVisible(False)
+        # 관심종목 모드에서는 시장이 바뀌어도 가격/수량 행을 항상 접어둔다
+        if getattr(self, "watch_mode", False):
+            self._collapse_price_fields()
+
+    def _collapse_price_fields(self):
+        """관심종목 다이얼로그: 평단가/원화단가/수량 행을 레이아웃에서 접는다."""
+        for w in (self.avg_spin, self.krw_avg_spin, self.qty_spin):
+            self.form_layout.setRowVisible(w, False)
 
     def _set_preview_neutral(self):
         self.preview_lbl.setText("─")
@@ -441,6 +459,14 @@ class StockDialog(QDialog):
 
     def get_data(self) -> dict:
         market = self.market()
+        if self.watch_mode:
+            # 관심종목: 평단가/수량/손익 없음 — 코드·시장·태그만. 종목명은 매니저가 조회해 채운다.
+            return {
+                "code":     self.code_edit.text().strip().upper(),
+                "market":   market,
+                "currency": CURRENCY_USD if market == MARKET_US else CURRENCY_KRW,
+                "tags":     [],
+            }
         avg_price = self.avg_spin.value()
         data = {
             "code":      self.code_edit.text().strip().upper(),
