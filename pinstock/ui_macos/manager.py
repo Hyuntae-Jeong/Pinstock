@@ -119,6 +119,42 @@ class StockFetcher(QObject):
         self.chart_timer.stop()
 
 
+# ─── 관심종목 일봉 폴링 워커 ───────────────────────────────────────────────────
+class WatchFetcher(QObject):
+    """한 관심종목의 일봉 기준 시세 폴링 (60초). 보유 워커(StockFetcher)와 달리
+    분봉을 쓰지 않고 현재가(전일대비) + 일봉 캔들만 가져온다."""
+
+    price_updated = pyqtSignal(str, dict)    # code, result (현재가 + 전일대비)
+    daily_updated = pyqtSignal(str, list)    # code, candles
+
+    STAGGER_MS = 600
+    INTERVAL_MS = 60_000
+
+    def __init__(self, item: dict, stagger_idx: int = 0, parent: QObject | None = None):
+        super().__init__(parent)
+        self.item = item
+        self.code = item["code"]
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._fetch)
+        QTimer.singleShot(stagger_idx * self.STAGGER_MS, self._start)
+
+    def _start(self):
+        self.timer.start(self.INTERVAL_MS)
+        self._fetch()
+
+    def _fetch(self):
+        us = is_us_stock(self.item)
+        result = fetch_us_stock(self.code) if us else fetch_stock(self.code)
+        if result:
+            self.price_updated.emit(self.code, result)
+        daily = fetch_us_daily_chart(self.code) if us else fetch_daily_chart(self.code)
+        if daily and daily.get("candles"):
+            self.daily_updated.emit(self.code, daily["candles"])
+
+    def stop(self):
+        self.timer.stop()
+
+
 # ─── 매니저 ─────────────────────────────────────────────────────────────────
 class MacAppManager(QObject):
     """macOS Pinstock 메인 매니저."""
@@ -141,6 +177,7 @@ class MacAppManager(QObject):
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.fetchers: dict[str, StockFetcher] = {}
+        self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
         self.usd_krw_rate: float | None = None
         # 마지막 폴링 결과 캐시. set_stocks() 가 행 위젯을 폐기·재생성하면
@@ -204,6 +241,9 @@ class MacAppManager(QObject):
         # 종목별 폴링 시작
         for i, s in enumerate(self.stocks):
             self._spawn_fetcher(s, stagger_idx=i)
+        # 관심종목 일봉 폴링 시작
+        for i, w in enumerate(self.watchlist):
+            self._spawn_watch_fetcher(w, stagger_idx=i)
         self._sync_fx_timer()
 
         # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
@@ -347,6 +387,30 @@ class MacAppManager(QObject):
         self.last_daily_data[code] = candles
         self.last_minute_data.pop(code, None)
         self.popover.update_stock_daily(code, candles)
+
+    # ── 관심종목 폴링 워커 관리 ─────────────────────────────────────────────
+    def _spawn_watch_fetcher(self, item: dict, stagger_idx: int = 0):
+        code = item["code"]
+        f = WatchFetcher(item, stagger_idx, parent=self)
+        f.price_updated.connect(self._on_watch_price_updated)
+        f.daily_updated.connect(self._on_watch_daily_updated)
+        self.watch_fetchers[code] = f
+
+    def _kill_watch_fetcher(self, code: str):
+        f = self.watch_fetchers.pop(code, None)
+        if f:
+            f.stop()
+            f.deleteLater()
+
+    def _on_watch_price_updated(self, code: str, result: dict):
+        for w in self.watchlist:
+            if w["code"] == code:
+                w["name"] = result["name"]
+                break
+        self.popover.update_watch_price(code, result)
+
+    def _on_watch_daily_updated(self, code: str, candles: list):
+        self.popover.update_watch_daily(code, candles)
 
     def _toggle_assets_hidden(self):
         """자산 숨김 토글 — 우클릭 메뉴 / 팝오버 상단 카드 클릭 양쪽에서 호출.
@@ -582,6 +646,7 @@ class MacAppManager(QObject):
         self.watchlist.append(d)
         self._save_config()
         self._sync_popover_watchlist()
+        self._spawn_watch_fetcher(d, stagger_idx=0)
 
     # ── 관심종목 일괄 관리 ──────────────────────────────────────────────────
     def open_manage_watch_dialog(self):
@@ -590,7 +655,17 @@ class MacAppManager(QObject):
         dlg = ManageWatchlistDialog(watchlist=copy.deepcopy(self.watchlist))
         if not dlg.exec():
             return
+        old_codes = {w["code"] for w in self.watchlist}
         self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
+        new_codes = {w["code"] for w in self.watchlist}
+        # 삭제된 관심종목: 폴러 정지 / 추가된 관심종목: 폴러 시작
+        for code in old_codes - new_codes:
+            self._kill_watch_fetcher(code)
+        added_idx = 0
+        for w in self.watchlist:
+            if w["code"] not in old_codes:
+                self._spawn_watch_fetcher(w, stagger_idx=added_idx)
+                added_idx += 1
         self._save_config()
         self._sync_popover_watchlist()
 
