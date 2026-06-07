@@ -973,3 +973,151 @@ class ManageStocksDialog(QDialog):
 
     def get_stocks(self) -> list[dict]:
         return self._stocks
+
+
+# ─── 관심종목 관리 다이얼로그 ─────────────────────────────────────────────────
+class ManageWatchlistDialog(QDialog):
+    """관심종목을 표로 관리 — 추가 / 삭제 / 표시(ON·OFF) 토글.
+
+    보유 관리(ManageStocksDialog)와 달리 평단가/수량/평가손익이 없다. 시세는
+    일봉 기준이라 종목명/코드/시장과 표시 여부만 다룬다. (태그 컬럼은 Phase 2.)
+    """
+
+    COLS = ["종목명", "종목코드", "시장", "표시"]
+
+    def __init__(self, watchlist: list[dict], parent=None):
+        super().__init__(parent)
+        self._items: list[dict] = watchlist   # 호출측에서 deepcopy 해서 전달
+
+        self.setWindowTitle("관심종목 관리")
+        self.setMinimumSize(520, 380)
+        self.setStyleSheet(DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(12)
+
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(False)
+
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)            # 종목명
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)   # 코드
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)   # 시장
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)             # 표시 토글
+        self.table.setColumnWidth(3, 64)
+        hdr.setStretchLastSection(False)
+        hdr.setSectionsClickable(False)
+        root.addWidget(self.table, 1)
+
+        # ── 행 액션 (추가 / 삭제) ─────────────────────────────────────────
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        add_btn = QPushButton("➕  추가")
+        add_btn.clicked.connect(self._add)
+        action_row.addWidget(add_btn)
+        del_btn = QPushButton("🗑  삭제")
+        del_btn.setProperty("flat", "true")
+        del_btn.clicked.connect(self._delete_selected)
+        action_row.addWidget(del_btn)
+        action_row.addStretch()
+        root.addLayout(action_row)
+
+        # ── 확인 / 취소 ───────────────────────────────────────────────────
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._rebuild_table()
+
+    def _rebuild_table(self, select_row: int | None = None):
+        self.table.setRowCount(0)
+        for i, item in enumerate(self._items):
+            self.table.insertRow(i)
+            self._fill_row(i, item)
+        if select_row is not None and 0 <= select_row < self.table.rowCount():
+            self.table.selectRow(select_row)
+
+    def _fill_row(self, row: int, item: dict):
+        name = item.get("name", item.get("code", ""))
+        code = item.get("code", "")
+        market = "미국" if str(item.get("market", "")).upper() == MARKET_US else "한국"
+        for col, text in enumerate([name, code, market]):
+            cell = QTableWidgetItem(text)
+            align = Qt.AlignmentFlag.AlignLeft if col == 0 else Qt.AlignmentFlag.AlignCenter
+            cell.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+            cell.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(row, col, cell)
+
+        # 표시 토글 스위치 (ON=표시, OFF=숨김) — 행 인덱스 == 항목 인덱스(필터 없음)
+        hidden = bool(item.get("hidden", False))
+        toggle = ToggleSwitch(checked=not hidden)
+        toggle.toggled.connect(lambda checked, idx=row: self._on_visibility_toggled(idx, checked))
+        container = QWidget()
+        hl = QHBoxLayout(container)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addStretch()
+        hl.addWidget(toggle)
+        hl.addStretch()
+        placeholder = QTableWidgetItem("")
+        placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 3, placeholder)
+        self.table.setCellWidget(row, 3, container)
+
+    def _on_visibility_toggled(self, row: int, checked: bool):
+        if 0 <= row < len(self._items):
+            self._items[row]["hidden"] = not checked
+
+    def _add(self):
+        dlg = StockDialog(watch_mode=True, parent=self)
+        if not dlg.exec():
+            return
+        d = dlg.get_data()
+        code = d["code"]
+        if not code:
+            return
+        if any(w["code"] == code for w in self._items):
+            QMessageBox.information(self, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
+            return
+        result = fetch_quote_for_stock(d)
+        if not result:
+            QMessageBox.warning(
+                self, "조회 실패",
+                f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요.",
+            )
+            return
+        d["name"] = result["name"]
+        self._items.append(d)
+        self._rebuild_table(select_row=len(self._items) - 1)
+
+    def _delete_selected(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._items)):
+            return
+        name = self._items[row].get("name", self._items[row].get("code", ""))
+        ret = QMessageBox.question(
+            self, "삭제 확인",
+            f"'{name}' 을(를) 관심종목에서 삭제할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        self._items.pop(row)
+        next_sel = min(row, len(self._items) - 1) if self._items else None
+        self._rebuild_table(select_row=next_sel)
+
+    def get_watchlist(self) -> list[dict]:
+        return self._items

@@ -31,7 +31,7 @@ from ..core.storage import (
     normalize_watchlist_schema,
 )
 from ..ui_windows.manage_dialog import (
-    StockDialog, ManageStocksDialog, ImportModeDialog, fetch_quote_for_stock,
+    StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog, fetch_quote_for_stock,
 )
 from ..ui_common.update_dialog import UpdateDialog
 from ..ui_common.help_dialog import HelpDialog
@@ -224,7 +224,9 @@ class MacAppManager(QObject):
         menu = QMenu()
         menu.addAction("종목 추가", self.open_add_dialog)
         menu.addAction("종목 관리", self.open_manage_dialog)
+        menu.addSeparator()
         menu.addAction("관심종목 추가", self.open_add_watch_dialog)
+        menu.addAction("관심종목 관리", self.open_manage_watch_dialog)
         menu.addSeparator()
         menu.addAction("Excel 내보내기", self.open_export_dialog)
         menu.addAction("Excel 가져오기", self.open_import_dialog)
@@ -573,6 +575,16 @@ class MacAppManager(QObject):
 
         d["name"] = result["name"]
         self.watchlist.append(d)
+        self._save_config()
+
+    # ── 관심종목 일괄 관리 ──────────────────────────────────────────────────
+    def open_manage_watch_dialog(self):
+        """관심종목 일괄 관리 — 추가/삭제/표시 토글. 표시(팝오버 관심 뷰)·일봉
+        폴러 갱신은 Step 2b 에서 연결한다."""
+        dlg = ManageWatchlistDialog(watchlist=copy.deepcopy(self.watchlist))
+        if not dlg.exec():
+            return
+        self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
         self._save_config()
 
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
