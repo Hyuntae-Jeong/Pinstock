@@ -23,6 +23,7 @@ from ..core.api import (
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
     fetch_usd_krw_rate,
 )
+from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
@@ -216,6 +217,12 @@ class MacAppManager(QObject):
             "자산 정보 숨기기", self._toggle_assets_hidden
         )
         self.tray_assets_action.setCheckable(True)
+        if autostart_supported():
+            self.autostart_action = menu.addAction(
+                "시작 시 자동 실행", self.toggle_autostart
+            )
+            self.autostart_action.setCheckable(True)
+            self.autostart_action.setChecked(is_autostart_enabled())
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
         self.tray_about_action = menu.addAction(
@@ -331,6 +338,13 @@ class MacAppManager(QObject):
         self.popover.set_assets_hidden(self.assets_hidden)
         self.tray_assets_action.setChecked(self.assets_hidden)
         self._save_config()
+
+    def toggle_autostart(self):
+        """로그인 시 자동 실행 등록/해제 (LaunchAgent). 실제 반영된 상태로
+        체크박스를 동기화한다 (plist 쓰기 실패 시 원복)."""
+        desired = self.autostart_action.isChecked()
+        applied = set_autostart(desired)
+        self.autostart_action.setChecked(applied)
 
     def _on_opacity_changed(self, opacity: float):
         self.popover_opacity = opacity

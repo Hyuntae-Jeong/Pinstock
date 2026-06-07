@@ -4,11 +4,13 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
+from .core.autostart import reconcile_autostart
 from .core.storage import migrate_legacy_config
 
 
 def main():
     migrate_legacy_config()
+    reconcile_autostart()   # 죽은 자동 실행 잔재(없어진 exe 경로) 정리
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # 트레이만 있어도 계속 실행

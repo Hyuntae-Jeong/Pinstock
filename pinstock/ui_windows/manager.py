@@ -43,6 +43,7 @@ def _resolve_app_icon() -> QIcon:
 
 from ..__version__ import __version__
 from ..core import updater
+from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.api import fetch_usd_krw_rate
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
@@ -321,6 +322,8 @@ class WidgetManager:
         self.master_toggle_act = QAction(self._master_toggle_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
         gather_act = QAction("🎯   마스터 화면에 정렬", menu)
+        self.autostart_act = QAction("🚀   시작 시 자동 실행", menu)
+        self.autostart_act.setCheckable(True)
         help_act   = QAction("❓   도움말",      menu)
         self.about_act = QAction("ℹ️   앱 정보",  menu)
         quit_act   = QAction("❌   종료",        menu)
@@ -332,6 +335,7 @@ class WidgetManager:
         self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
         reset_act.triggered.connect(self.reset_positions)
         gather_act.triggered.connect(self.gather_to_master_screen)
+        self.autostart_act.triggered.connect(self.toggle_autostart)
         help_act.triggered.connect(self.open_help_dialog)
         self.about_act.triggered.connect(self.open_about_dialog)
         quit_act.triggered.connect(self.app.quit)
@@ -346,6 +350,10 @@ class WidgetManager:
         menu.addAction(self.master_toggle_act)
         menu.addAction(reset_act)
         menu.addAction(gather_act)
+        if autostart_supported():
+            menu.addSeparator()
+            self.autostart_act.setChecked(is_autostart_enabled())
+            menu.addAction(self.autostart_act)
         menu.addSeparator()
         menu.addAction(help_act)
         menu.addAction(self.about_act)
@@ -695,6 +703,13 @@ class WidgetManager:
             self.master_widget.set_assets_hidden(not self.master_visible)
         self.master_toggle_act.setText(self._master_toggle_text())
         self._save_config()
+
+    def toggle_autostart(self):
+        """시스템 시작(로그인) 시 자동 실행 등록/해제. 실제 반영된 상태로
+        체크박스를 동기화한다 (레지스트리 쓰기 실패 시 원복)."""
+        desired = self.autostart_act.isChecked()
+        applied = set_autostart(desired)
+        self.autostart_act.setChecked(applied)
 
     def _recompute_master(self):
         """모든 종목 위젯의 current_price 를 모아 마스터 4지표 및 보유 종목 상세를 갱신."""
