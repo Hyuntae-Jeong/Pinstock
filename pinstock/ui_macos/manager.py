@@ -198,6 +198,7 @@ class MacAppManager(QObject):
 
         # 초기 데이터 푸시
         self._sync_popover_stocks()
+        self._sync_popover_watchlist()
         self._recompute_summary()
 
         # 종목별 폴링 시작
@@ -389,6 +390,9 @@ class MacAppManager(QObject):
         for code, candles in self.last_daily_data.items():
             self.popover.update_stock_daily(code, candles)
 
+    def _sync_popover_watchlist(self):
+        self.popover.set_watchlist(self.watchlist)
+
     def _sync_popover_stocks(self):
         self.popover.set_stocks(self.stocks)
         self._reapply_cached_data()
@@ -416,6 +420,7 @@ class MacAppManager(QObject):
     def _on_market_filter_changed(self, market: str):
         self.market_filter = market if market in {"ALL", "KR", "US"} else "ALL"
         self._sync_popover_stocks()
+        self._sync_popover_watchlist()
         self._recompute_summary()
 
     def _fetch_usd_krw_rate(self):
@@ -576,6 +581,7 @@ class MacAppManager(QObject):
         d["name"] = result["name"]
         self.watchlist.append(d)
         self._save_config()
+        self._sync_popover_watchlist()
 
     # ── 관심종목 일괄 관리 ──────────────────────────────────────────────────
     def open_manage_watch_dialog(self):
@@ -586,6 +592,7 @@ class MacAppManager(QObject):
             return
         self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
         self._save_config()
+        self._sync_popover_watchlist()
 
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
     def open_manage_dialog(self):
