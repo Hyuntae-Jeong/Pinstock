@@ -668,6 +668,9 @@ class WidgetManager:
                 nx, ny = self._default_watch_group_pos(idx)
                 w.move(nx, ny)
             w.setWindowOpacity(self.popover_opacity)
+            # 보유 위젯과 동일 — 투명도 낮으면 생성 시점부터 클릭 통과로
+            if self._is_click_through_opacity(self.popover_opacity):
+                w.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
             if not self.is_hidden:
                 w.show()
             self.watch_groups[key] = w
@@ -854,14 +857,15 @@ class WidgetManager:
             w.setWindowOpacity(opacity)
 
     def _apply_click_through(self, opacity: float):
-        """종목 위젯 + 마스터 카드에 OS-레벨 click-through 토글.
+        """종목 위젯 + 관심 그룹 위젯 + 마스터 카드에 OS-레벨 click-through 토글.
         슬라이더는 별도 top-level 윈도우라 마스터가 통과 상태여도 그대로 조작 가능,
         자물쇠 오버레이는 항상 WindowTransparentForInput 라 변동 없음.
-        관심 그룹 위젯은 클릭으로 펼쳐야 하므로 클릭 통과 대상에서 제외한다."""
+        관심 그룹도 통과 대상에 포함 — 단, 통과 모드에선 클릭 펼침/고정·hover 확대가
+        막히므로 고정해 둔 그룹만 펼쳐진 채 표시된다."""
         enabled = self._is_click_through_opacity(opacity)
         flag = Qt.WindowType.WindowTransparentForInput
 
-        targets = list(self.widgets.values())
+        targets = list(self.widgets.values()) + list(self.watch_groups.values())
         if self.master_widget:
             targets.append(self.master_widget)
 
