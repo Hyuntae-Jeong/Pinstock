@@ -628,7 +628,7 @@ class MacAppManager(QObject):
         """관심종목 추가 — 보유와 독립. 평단가/수량 없이 코드·종목명만 받는다.
         같은 종목이 보유에 있어도 관심에 따로 추가할 수 있다(중복 검사는 관심목록 안에서만).
         표시(팝오버 관심 뷰)·일봉 폴러 연결은 Step 2b 에서."""
-        dlg = StockDialog(watch_mode=True)
+        dlg = StockDialog(watch_mode=True, tags=self.watch_tags)
         if not dlg.exec():
             return
         d = dlg.get_data()

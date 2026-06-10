@@ -83,6 +83,7 @@ class WidgetManager:
         self.uniform_w: int = StockWidget.MIN_W
         self.uniform_watch_w: int = TagGroupWidget.WIDTH   # 관심 그룹 고정 너비 (보유와 별개)
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
+        self.watch_visible: bool = True  # 관심종목 위젯 표시 여부 (메뉴 켜기/끄기)
         # 마스터 위젯 (포트폴리오 요약)
         self.master_widget: MasterWidget | None = None
         # 마스터 위젯의 데이터를 표시할지 여부. False 면 위젯은 그대로 화면에 있지만
@@ -136,9 +137,9 @@ class WidgetManager:
                 w.show()
             else:
                 w.hide()
-        # 관심 그룹 위젯도 전체 토글에 함께 따름 (그룹은 보이는 멤버가 있을 때만 존재)
+        # 관심 그룹 위젯도 전체 토글에 함께 따름 (관심종목 켜기/끄기 상태도 함께 존중)
         for w in self.watch_groups.values():
-            if self.is_hidden:
+            if self.is_hidden or not self.watch_visible:
                 w.hide()
             else:
                 w.show()
@@ -150,6 +151,21 @@ class WidgetManager:
             else:
                 self.master_widget.show()
         self.toggle_act.setText("👀   표시하기" if self.is_hidden else "🙈   숨기기")
+
+    # ── 관심종목 위젯만 켜기/끄기 ────────────────────────────────────────────
+    def _watch_toggle_text(self) -> str:
+        return "⭐   관심종목 끄기" if self.watch_visible else "⭐   관심종목 켜기"
+
+    def toggle_watch_visible(self):
+        """관심종목 위젯 전체를 켜고/끈다 (보유 위젯·전체 숨김과 별개)."""
+        self.watch_visible = not self.watch_visible
+        for w in self.watch_groups.values():
+            if self.watch_visible and not self.is_hidden:
+                w.show()
+            else:
+                w.hide()
+        self.watch_toggle_act.setText(self._watch_toggle_text())
+        self._save_config()
 
     # ── 위치 초기화 ───────────────────────────────────────────────────────
     def reset_positions(self):
@@ -399,6 +415,7 @@ class WidgetManager:
         manage_act = QAction("📋   종목 관리",   menu)
         watch_add_act    = QAction("⭐   관심종목 추가", menu)
         watch_manage_act = QAction("⭐   관심종목 관리", menu)
+        self.watch_toggle_act = QAction(self._watch_toggle_text(), menu)
         export_act = QAction("📤   Excel로 내보내기", menu)
         import_act = QAction("📥   Excel에서 가져오기", menu)
         self.toggle_act = QAction("🙈   숨기기", menu)
@@ -415,6 +432,7 @@ class WidgetManager:
         manage_act.triggered.connect(self.open_manage_dialog)
         watch_add_act.triggered.connect(self.open_add_watch_dialog)
         watch_manage_act.triggered.connect(self.open_manage_watch_dialog)
+        self.watch_toggle_act.triggered.connect(self.toggle_watch_visible)
         export_act.triggered.connect(self.open_export_dialog)
         import_act.triggered.connect(self.open_import_dialog)
         self.toggle_act.triggered.connect(self.toggle_visibility)
@@ -433,6 +451,8 @@ class WidgetManager:
         # 관심종목 — 보유와 구분선으로 분리 (별도 저장·독립 동작)
         menu.addAction(watch_add_act)
         menu.addAction(watch_manage_act)
+        menu.addAction(self.watch_toggle_act)
+        menu.addAction(watch_reset_act)   # 관심 위치 초기화 — 관심종목 메뉴 그룹으로
         menu.addSeparator()
         menu.addAction(export_act)
         menu.addAction(import_act)
@@ -440,7 +460,6 @@ class WidgetManager:
         menu.addAction(self.toggle_act)
         menu.addAction(self.master_toggle_act)
         menu.addAction(reset_act)
-        menu.addAction(watch_reset_act)
         menu.addAction(gather_act)
         if autostart_supported():
             menu.addSeparator()
@@ -519,6 +538,7 @@ class WidgetManager:
                 except (TypeError, ValueError):
                     self.master_pos = None
             self.assets_hidden = bool(data.get("assets_hidden", False))
+            self.watch_visible = bool(data.get("watch_visible", True))
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
                 # Windows 는 10–100% 까지 허용 (macOS 는 자체적으로 60% 미만은 60% 로 clamp).
@@ -549,6 +569,7 @@ class WidgetManager:
                 "pos": self.master_pos,
             },
             "assets_hidden": self.assets_hidden,
+            "watch_visible": self.watch_visible,
             "popover_opacity": self.popover_opacity,
         }
         if self.update_last_check_at is not None:
@@ -671,7 +692,7 @@ class WidgetManager:
             # 보유 위젯과 동일 — 투명도 낮으면 생성 시점부터 클릭 통과로
             if self._is_click_through_opacity(self.popover_opacity):
                 w.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-            if not self.is_hidden:
+            if not self.is_hidden and self.watch_visible:
                 w.show()
             self.watch_groups[key] = w
 
@@ -999,7 +1020,7 @@ class WidgetManager:
     def open_add_watch_dialog(self):
         """관심종목 추가 — 보유와 독립. 평단가/수량 없이 코드·시장만 받는다.
         같은 종목이 보유에 있어도 관심에 따로 추가 가능(중복 검사는 관심목록 안에서만)."""
-        dlg = StockDialog(watch_mode=True)
+        dlg = StockDialog(watch_mode=True, tags=self.watch_tags)
         if not dlg.exec():
             return
         d = dlg.get_data()
@@ -1021,6 +1042,9 @@ class WidgetManager:
         # 태그 그룹 위젯 다시 구성 (새 종목이 속한 그룹에 반영)
         self._rebuild_watch_groups()
 
+        # 관심종목이 꺼져 있었으면 새로 추가한 항목이 보이도록 자동으로 켠다
+        if not self.watch_visible:
+            self.toggle_watch_visible()
         # 숨김 상태에서 추가한 경우 자동으로 표시 상태로 전환
         if self.is_hidden:
             self.toggle_visibility()

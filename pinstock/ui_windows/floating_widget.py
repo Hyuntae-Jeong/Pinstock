@@ -1069,16 +1069,7 @@ class TagGroupWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(TRAY_MENU_STYLE)
         manage_act = menu.addAction("⭐   관심종목 관리")
-        action = menu.exec(event.globalPos())
-        if action == manage_act:
-            self.manage_requested.emit()
-
-    # ── 우클릭 메뉴 (삭제만) ──────────────────────────────────────────────
-    def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet(TRAY_MENU_STYLE)
-        del_act = menu.addAction("🗑️   삭제")
-        action = menu.exec(event.globalPos())
-        if action == del_act:
-            self.deleted.emit(self.data["code"])
-            self.close()
+        if menu.exec(event.globalPos()) == manage_act:
+            # 관리 → 그룹 재구성(이 위젯 파괴 가능)이 contextMenu 처리 중에 일어나
+            # 크래시하지 않도록, 이벤트 루프로 넘겨 안전하게 연다.
+            QTimer.singleShot(0, self.manage_requested.emit)

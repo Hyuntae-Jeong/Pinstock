@@ -168,15 +168,17 @@ class ImportModeDialog(QDialog):
 
 # ─── 종목 추가 / 수정 다이얼로그 ──────────────────────────────────────────────
 class StockDialog(QDialog):
-    def __init__(self, parent=None, data: dict | None = None, watch_mode: bool = False):
+    def __init__(self, parent=None, data: dict | None = None, watch_mode: bool = False,
+                 tags: list[dict] | None = None):
         super().__init__(parent)
         self.is_edit = data is not None
         self.watch_mode = watch_mode   # 관심종목 모드: 평단가/수량 입력 숨김
+        self._tags = tags or []        # 관심종목 태그 레지스트리 (추가/수정 시 태그 지정용)
         if watch_mode:
             self.setWindowTitle("관심종목 수정" if self.is_edit else "관심종목 추가")
         else:
             self.setWindowTitle("종목 수정" if self.is_edit else "종목 추가")
-        self.setFixedSize(380, 230 if watch_mode else 360)
+        self.setFixedSize(380, 270 if watch_mode else 360)
         self.setStyleSheet(DIALOG_STYLE)
         self._preview_result: dict | None = None
 
@@ -270,6 +272,22 @@ class StockDialog(QDialog):
         self.qty_spin.setValue(1)
         self.qty_label = self._row_label("수  량")
         layout.addRow(self.qty_label, self.qty_spin)
+
+        # 관심종목 모드: 태그 선택 — 추가/수정 시 바로 태그를 지정한다.
+        if self.watch_mode:
+            self.tag_combo = _NoScrollComboBox()
+            self.tag_combo.addItem("— 없음 —", "")
+            cur_tag = str((data or {}).get("tag") or "")
+            sel = 0
+            for i, t in enumerate(self._tags, start=1):
+                self.tag_combo.addItem(
+                    _color_icon(t.get("color", DEFAULT_TAG_COLOR)), t.get("name", ""), t["id"]
+                )
+                if t["id"] == cur_tag:
+                    sel = i
+            self.tag_combo.setCurrentIndex(sel)
+            self.tag_combo.setIconSize(QSize(12, 12))
+            layout.addRow(self._row_label("태그"), self.tag_combo)
 
         # 기존 데이터 채우기
         if self.is_edit:
@@ -497,6 +515,12 @@ class StockDialog(QDialog):
         for w in (self.avg_spin, self.krw_avg_spin, self.qty_spin):
             self.form_layout.setRowVisible(w, False)
 
+    def _selected_tag(self) -> str:
+        """관심종목 모드에서 콤보로 고른 태그 id (없음이면 "")."""
+        if self.watch_mode and hasattr(self, "tag_combo"):
+            return self.tag_combo.currentData() or ""
+        return ""
+
     def _set_preview_neutral(self):
         self.preview_lbl.setText("─")
         self.preview_lbl.setStyleSheet(
@@ -549,7 +573,7 @@ class StockDialog(QDialog):
                     "market":   idx["market"],
                     "currency": idx["currency"],
                     "type":     "index",
-                    "tag":      "",
+                    "tag":      self._selected_tag(),
                 }
             # 관심종목(개별 종목): 평단가/수량/손익 없음 — 코드·시장·태그만.
             # 종목명은 매니저가 조회해 채운다.
@@ -558,7 +582,7 @@ class StockDialog(QDialog):
                 "market":   market,
                 "currency": CURRENCY_USD if market == MARKET_US else CURRENCY_KRW,
                 "type":     "stock",
-                "tag":      "",
+                "tag":      self._selected_tag(),
             }
         avg_price = self.avg_spin.value()
         data = {
@@ -1541,7 +1565,7 @@ class ManageWatchlistDialog(QDialog):
         self._rebuild_table()
 
     def _add(self):
-        dlg = StockDialog(watch_mode=True, parent=self)
+        dlg = StockDialog(watch_mode=True, parent=self, tags=self._tags)
         if not dlg.exec():
             return
         d = dlg.get_data()
