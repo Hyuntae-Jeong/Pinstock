@@ -28,7 +28,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
-    normalize_watchlist_schema,
+    normalize_watchlist_schema, normalize_tags, prune_watch_tags,
 )
 from ..ui_windows.manage_dialog import (
     StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog, fetch_quote_for_stock,
@@ -176,6 +176,7 @@ class MacAppManager(QObject):
 
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
+        self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
         self.fetchers: dict[str, StockFetcher] = {}
         self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
@@ -521,6 +522,8 @@ class MacAppManager(QObject):
         elif isinstance(data, dict):
             self.stocks = normalize_stocks_schema(data.get("stocks", []) or [])
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
+            self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
+            prune_watch_tags(self.watchlist, self.watch_tags)
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -563,9 +566,11 @@ class MacAppManager(QObject):
         # Windows 와 호환되는 스키마 — Mac 에서는 의미 없는 필드도 보존만 함
         self.stocks = normalize_stocks_schema(self.stocks)
         self.watchlist = normalize_watchlist_schema(self.watchlist)
+        self.watch_tags = normalize_tags(self.watch_tags)
         data = {
             "stocks": self.stocks,
             "watchlist": self.watchlist,
+            "watch_tags": self.watch_tags,
             "master": {
                 "visible": self.master_visible,
                 "pos": self.master_pos,
@@ -652,11 +657,16 @@ class MacAppManager(QObject):
     def open_manage_watch_dialog(self):
         """관심종목 일괄 관리 — 추가/삭제/표시 토글. 표시(팝오버 관심 뷰)·일봉
         폴러 갱신은 Step 2b 에서 연결한다."""
-        dlg = ManageWatchlistDialog(watchlist=copy.deepcopy(self.watchlist))
+        dlg = ManageWatchlistDialog(
+            watchlist=copy.deepcopy(self.watchlist),
+            tags=copy.deepcopy(self.watch_tags),
+        )
         if not dlg.exec():
             return
         old_codes = {w["code"] for w in self.watchlist}
         self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
+        self.watch_tags = normalize_tags(dlg.get_tags())
+        prune_watch_tags(self.watchlist, self.watch_tags)
         new_codes = {w["code"] for w in self.watchlist}
         # 삭제된 관심종목: 폴러 정지 / 추가된 관심종목: 폴러 시작
         for code in old_codes - new_codes:

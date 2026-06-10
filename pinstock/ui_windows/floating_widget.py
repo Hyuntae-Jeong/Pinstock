@@ -595,7 +595,7 @@ class WatchWidget(QWidget):
 
     def __init__(self, watch_data: dict, width: int | None = None, stagger_idx: int = 0):
         super().__init__()
-        self.data = watch_data          # code, name, market, currency, tags, hidden, pos
+        self.data = watch_data          # code, name, market, currency, tag, hidden, pos
         self.current_price: float = 0
         self._drag_pos = None
         self._press_pos = None

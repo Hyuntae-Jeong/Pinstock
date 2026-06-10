@@ -1,14 +1,16 @@
 """종목 관리 다이얼로그 모음."""
 
+import copy
+
 from PyQt6.QtWidgets import (
-    QDialog, QLabel, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QDialog, QLabel, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QSpinBox, QDialogButtonBox, QPushButton, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyledItemDelegate, QRadioButton, QButtonGroup, QWidget,
-    QCompleter,
+    QCompleter, QComboBox, QColorDialog, QFrame,
 )
-from PyQt6.QtCore import Qt, QTimer, QModelIndex
-from PyQt6.QtGui import QColor, QStandardItemModel, QStandardItem
+from PyQt6.QtCore import Qt, QTimer, QModelIndex, QSize
+from PyQt6.QtGui import QColor, QStandardItemModel, QStandardItem, QPixmap, QIcon
 
 from ..core.api import (
     fetch_stock, fetch_us_stock, fetch_index,
@@ -16,11 +18,60 @@ from ..core.api import (
 )
 from ..core.indices import index_by_code, search_indices, index_exact_match
 from ..core.portfolio import is_us_stock, stock_metrics
-from ..core.storage import MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD
-from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE
-from .form_widgets import (
-    AutoSelectDoubleSpinBox, SearchLineEdit, QuantitySpinBox, ToggleSwitch,
+from ..core.storage import (
+    MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD,
+    DEFAULT_TAG_COLOR, new_tag_id, normalize_tags, prune_watch_tags,
 )
+from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE, TAG_PALETTE
+from .form_widgets import (
+    AutoSelectDoubleSpinBox, AutoSelectLineEdit, SearchLineEdit,
+    QuantitySpinBox, ToggleSwitch,
+)
+
+
+# ─── 태그 색상 유틸 ───────────────────────────────────────────────────────────
+def _is_hex_color(value) -> bool:
+    return isinstance(value, str) and len(value) == 7 and value.startswith("#")
+
+
+def _contrast_text(hex_color: str) -> str:
+    """배경색 위에 읽기 좋은 글자색(검정/흰색)을 휘도로 고른다."""
+    if not _is_hex_color(hex_color):
+        return "#000000"
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    return "#11111b" if luminance > 0.6 else "#ffffff"
+
+
+def _color_icon(color: str, size: int = 12) -> QIcon:
+    """단색 둥근 사각형 아이콘 (콤보박스/표의 태그 색 표시용)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    from PyQt6.QtGui import QPainter
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color if _is_hex_color(color) else DEFAULT_TAG_COLOR))
+    p.drawRoundedRect(0, 0, size, size, 3, 3)
+    p.end()
+    return QIcon(pm)
+
+
+class _NoScrollComboBox(QComboBox):
+    """드롭다운이 닫힌 상태에서는 마우스 휠로 항목이 바뀌지 않게 한다.
+
+    표(관심종목 목록)를 휠로 스크롤하다 마우스가 콤보 위를 지날 때 태그가
+    제멋대로 바뀌는 사고를 막는다. 휠 이벤트를 무시해 부모(표)로 넘기므로 표
+    스크롤은 정상 동작하고, 드롭다운이 열려 있을 때는 팝업 리스트가 자체적으로
+    휠을 처리한다(콤보 본체로는 휠이 오지 않음)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 휠로 포커스를 가로채 값이 바뀌지 않도록 강포커스로 제한
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class _StockSearchCompleter(QCompleter):
@@ -498,7 +549,7 @@ class StockDialog(QDialog):
                     "market":   idx["market"],
                     "currency": idx["currency"],
                     "type":     "index",
-                    "tags":     [],
+                    "tag":      "",
                 }
             # 관심종목(개별 종목): 평단가/수량/손익 없음 — 코드·시장·태그만.
             # 종목명은 매니저가 조회해 채운다.
@@ -507,7 +558,7 @@ class StockDialog(QDialog):
                 "market":   market,
                 "currency": CURRENCY_USD if market == MARKET_US else CURRENCY_KRW,
                 "type":     "stock",
-                "tags":     [],
+                "tag":      "",
             }
         avg_price = self.avg_spin.value()
         data = {
@@ -1017,19 +1068,317 @@ class ManageStocksDialog(QDialog):
         return self._stocks
 
 
-# ─── 관심종목 관리 다이얼로그 ─────────────────────────────────────────────────
-class ManageWatchlistDialog(QDialog):
-    """관심종목을 표로 관리 — 추가 / 삭제 / 표시(ON·OFF) 토글.
+# ─── 색상 선택 창 ─────────────────────────────────────────────────────────────
+class ColorPickerDialog(QDialog):
+    """프리셋 스와치 그리드로 색을 고르고, 필요하면 '직접 선택'으로 임의 색까지.
 
-    보유 관리(ManageStocksDialog)와 달리 평단가/수량/평가손익이 없다. 시세는
-    일봉 기준이라 종목명/코드/시장과 표시 여부만 다룬다. (태그 컬럼은 Phase 2.)
+    선택 결과는 selected_color() 로 '#rrggbb' 소문자 문자열을 돌려준다.
     """
 
-    COLS = ["종목명", "종목코드", "시장", "표시"]
+    SWATCH = 30
+    COLS = 8
 
-    def __init__(self, watchlist: list[dict], parent=None):
+    def __init__(self, current: str = DEFAULT_TAG_COLOR, parent=None):
         super().__init__(parent)
-        self._items: list[dict] = watchlist   # 호출측에서 deepcopy 해서 전달
+        self.setWindowTitle("색상 선택")
+        self.setStyleSheet(DIALOG_STYLE)
+        self._color = current.lower() if _is_hex_color(current) else DEFAULT_TAG_COLOR
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(14)
+
+        title = QLabel("태그 색상을 선택하세요")
+        title.setStyleSheet(f"color: {C['text']}; font-size: 13px; font-weight: bold;")
+        root.addWidget(title)
+
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        self._swatches: dict[str, QPushButton] = {}
+        for i, color in enumerate(TAG_PALETTE):
+            color = color.lower()
+            btn = QPushButton()
+            btn.setFixedSize(self.SWATCH, self.SWATCH)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, c=color: self._select(c))
+            grid.addWidget(btn, i // self.COLS, i % self.COLS)
+            self._swatches[color] = btn
+        root.addLayout(grid)
+
+        # 미리보기 + 직접 선택
+        prev_row = QHBoxLayout()
+        prev_row.setSpacing(10)
+        self.preview = QFrame()
+        self.preview.setFixedSize(28, 28)
+        prev_row.addWidget(self.preview)
+        self.hex_lbl = QLabel()
+        self.hex_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        prev_row.addWidget(self.hex_lbl)
+        prev_row.addStretch()
+        custom_btn = QPushButton("직접 선택…")
+        custom_btn.setProperty("flat", "true")
+        custom_btn.clicked.connect(self._pick_custom)
+        prev_row.addWidget(custom_btn)
+        root.addLayout(prev_row)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._select(self._color)
+
+    def _swatch_style(self, color: str, selected: bool) -> str:
+        border = f"2px solid {C['text']}" if selected else f"1px solid {C['surface2']}"
+        return f"QPushButton {{ background: {color}; border: {border}; border-radius: 6px; }}"
+
+    def _select(self, color: str):
+        self._color = color.lower()
+        for c, b in self._swatches.items():
+            b.setStyleSheet(self._swatch_style(c, c == self._color))
+        self.preview.setStyleSheet(
+            f"background: {self._color}; border-radius: 6px; border: 1px solid {C['surface2']};"
+        )
+        self.hex_lbl.setText(self._color.upper())
+
+    def _pick_custom(self):
+        col = QColorDialog.getColor(QColor(self._color), self, "색상 직접 선택")
+        if col.isValid():
+            self._select(col.name())
+
+    def selected_color(self) -> str:
+        return self._color
+
+
+# ─── 태그 추가/수정 창 ────────────────────────────────────────────────────────
+class TagEditDialog(QDialog):
+    """태그명 + 색상(색상 선택 창 연동)을 입력받는다."""
+
+    def __init__(self, parent=None, tag: dict | None = None):
+        super().__init__(parent)
+        self.is_edit = tag is not None
+        self.setWindowTitle("태그 수정" if self.is_edit else "태그 추가")
+        self.setFixedSize(340, 190)
+        self.setStyleSheet(DIALOG_STYLE)
+        self._color = (tag or {}).get("color", DEFAULT_TAG_COLOR)
+        if not _is_hex_color(self._color):
+            self._color = DEFAULT_TAG_COLOR
+
+        layout = QFormLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(24, 24, 24, 18)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.name_edit = AutoSelectLineEdit()
+        self.name_edit.setPlaceholderText("예: 반도체")
+        if self.is_edit:
+            self.name_edit.setText(str(tag.get("name", "")))
+        layout.addRow(self._label("태그명"), self.name_edit)
+
+        self.color_btn = QPushButton()
+        self.color_btn.setFixedHeight(32)
+        self.color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.color_btn.clicked.connect(self._choose_color)
+        layout.addRow(self._label("색상"), self.color_btn)
+        self._update_color_btn()
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self._on_ok)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    @staticmethod
+    def _label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl.setFixedWidth(70)
+        lbl.setMinimumHeight(32)
+        return lbl
+
+    def _choose_color(self):
+        dlg = ColorPickerDialog(self._color, self)
+        if dlg.exec():
+            self._color = dlg.selected_color()
+            self._update_color_btn()
+
+    def _update_color_btn(self):
+        self.color_btn.setText(self._color.upper())
+        self.color_btn.setStyleSheet(
+            f"QPushButton {{ background: {self._color}; color: {_contrast_text(self._color)};"
+            f" border: 1px solid {C['surface2']}; border-radius: 7px; font-weight: bold; }}"
+        )
+
+    def _on_ok(self):
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "입력 오류", "태그명을 입력하세요.")
+            return
+        self.accept()
+
+    def get_data(self) -> dict:
+        return {"name": self.name_edit.text().strip(), "color": self._color}
+
+
+# ─── 태그 관리 창 ─────────────────────────────────────────────────────────────
+class TagManagerDialog(QDialog):
+    """태그 신규 추가 / 수정(이름·색상) / 삭제. get_tags() 로 갱신된 목록 반환."""
+
+    COLS = ["색상", "태그명"]
+
+    def __init__(self, tags: list[dict], parent=None):
+        super().__init__(parent)
+        self._tags: list[dict] = tags   # 호출측에서 deepcopy 해서 전달
+
+        self.setWindowTitle("태그 관리")
+        self.setMinimumSize(360, 380)
+        self.setStyleSheet(DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(12)
+
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(False)
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)     # 색상
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)   # 태그명
+        self.table.setColumnWidth(0, 64)
+        hdr.setStretchLastSection(False)
+        hdr.setSectionsClickable(False)
+        self.table.doubleClicked.connect(lambda _: self._edit_selected())
+        root.addWidget(self.table, 1)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        add_btn = QPushButton("➕  추가")
+        add_btn.clicked.connect(self._add)
+        action_row.addWidget(add_btn)
+        edit_btn = QPushButton("✏  수정")
+        edit_btn.setProperty("flat", "true")
+        edit_btn.clicked.connect(self._edit_selected)
+        action_row.addWidget(edit_btn)
+        del_btn = QPushButton("🗑  삭제")
+        del_btn.setProperty("flat", "true")
+        del_btn.clicked.connect(self._delete_selected)
+        action_row.addWidget(del_btn)
+        action_row.addStretch()
+        root.addLayout(action_row)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._rebuild_table()
+
+    def _rebuild_table(self, select_row: int | None = None):
+        self.table.setRowCount(0)
+        for i, tag in enumerate(self._tags):
+            self.table.insertRow(i)
+            self._fill_row(i, tag)
+        if select_row is not None and 0 <= select_row < self.table.rowCount():
+            self.table.selectRow(select_row)
+
+    def _fill_row(self, row: int, tag: dict):
+        # 색상 스와치 (가운데 정렬 컨테이너)
+        swatch = QFrame()
+        swatch.setFixedSize(18, 18)
+        swatch.setStyleSheet(
+            f"background: {tag.get('color', DEFAULT_TAG_COLOR)};"
+            f" border-radius: 5px; border: 1px solid {C['surface2']};"
+        )
+        container = QWidget()
+        hl = QHBoxLayout(container)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addStretch()
+        hl.addWidget(swatch)
+        hl.addStretch()
+        placeholder = QTableWidgetItem("")
+        placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 0, placeholder)
+        self.table.setCellWidget(row, 0, container)
+
+        name_item = QTableWidgetItem(str(tag.get("name", "")))
+        name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 1, name_item)
+
+    def _add(self):
+        dlg = TagEditDialog(parent=self)
+        if not dlg.exec():
+            return
+        data = dlg.get_data()
+        self._tags.append({"id": new_tag_id(), "name": data["name"], "color": data["color"]})
+        self._rebuild_table(select_row=len(self._tags) - 1)
+
+    def _edit_selected(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._tags)):
+            return
+        dlg = TagEditDialog(parent=self, tag=self._tags[row])
+        if not dlg.exec():
+            return
+        data = dlg.get_data()
+        self._tags[row]["name"] = data["name"]
+        self._tags[row]["color"] = data["color"]
+        self._rebuild_table(select_row=row)
+
+    def _delete_selected(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._tags)):
+            return
+        name = self._tags[row].get("name", "")
+        ret = QMessageBox.question(
+            self, "삭제 확인",
+            f"태그 '{name}' 을(를) 삭제할까요?\n이 태그가 부여된 관심종목에서도 해제됩니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        self._tags.pop(row)
+        next_sel = min(row, len(self._tags) - 1) if self._tags else None
+        self._rebuild_table(select_row=next_sel)
+
+    def get_tags(self) -> list[dict]:
+        return normalize_tags(self._tags)
+
+
+# ─── 관심종목 관리 다이얼로그 ─────────────────────────────────────────────────
+class ManageWatchlistDialog(QDialog):
+    """관심종목을 표로 관리 — 추가 / 삭제 / 표시(ON·OFF) 토글 / 태그 부여.
+
+    보유 관리(ManageStocksDialog)와 달리 평단가/수량/평가손익이 없다. 시세는
+    일봉 기준이라 종목명/코드/시장·태그·표시 여부만 다룬다. 태그는 종목당 1개이며
+    '태그 관리' 버튼으로 태그 자체(이름·색상)를 추가/수정/삭제한다.
+    """
+
+    COLS = ["종목명", "종목코드", "시장", "태그", "표시"]
+
+    def __init__(self, watchlist: list[dict], tags: list[dict] | None = None, parent=None):
+        super().__init__(parent)
+        self._items: list[dict] = watchlist          # 호출측에서 deepcopy 해서 전달
+        self._tags: list[dict] = tags or []          # 태그 레지스트리 (deepcopy)
 
         self.setWindowTitle("관심종목 관리")
         self.setMinimumSize(520, 380)
@@ -1047,18 +1396,22 @@ class ManageWatchlistDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(False)
+        # 태그 콤보 글자(한글)가 위아래로 잘리지 않도록 행 높이를 충분히 준다
+        self.table.verticalHeader().setDefaultSectionSize(38)
 
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)            # 종목명
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)   # 코드
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)   # 시장
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)             # 표시 토글
-        self.table.setColumnWidth(3, 64)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)             # 태그 콤보
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)             # 표시 토글
+        self.table.setColumnWidth(3, 140)
+        self.table.setColumnWidth(4, 64)
         hdr.setStretchLastSection(False)
         hdr.setSectionsClickable(False)
         root.addWidget(self.table, 1)
 
-        # ── 행 액션 (추가 / 삭제) ─────────────────────────────────────────
+        # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
         add_btn = QPushButton("➕  추가")
@@ -1069,6 +1422,10 @@ class ManageWatchlistDialog(QDialog):
         del_btn.clicked.connect(self._delete_selected)
         action_row.addWidget(del_btn)
         action_row.addStretch()
+        tag_btn = QPushButton("🏷  태그 관리")
+        tag_btn.setProperty("flat", "true")
+        tag_btn.clicked.connect(self._open_tag_manager)
+        action_row.addWidget(tag_btn)
         root.addLayout(action_row)
 
         # ── 확인 / 취소 ───────────────────────────────────────────────────
@@ -1103,6 +1460,15 @@ class ManageWatchlistDialog(QDialog):
             cell.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
             self.table.setItem(row, col, cell)
 
+        # 태그 콤보박스 (— 없음 — + 등록된 태그들) — 종목당 1개.
+        # 셀 위젯으로 직접 배치 → 글자가 옆 칸들과 같은 높이로 세로 중앙 정렬됨.
+        combo = self._make_tag_combo(item.get("tag", ""))
+        combo.activated.connect(lambda _, idx=row, c=combo: self._on_tag_changed(idx, c))
+        placeholder_tag = QTableWidgetItem("")
+        placeholder_tag.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 3, placeholder_tag)
+        self.table.setCellWidget(row, 3, combo)
+
         # 표시 토글 스위치 (ON=표시, OFF=숨김) — 행 인덱스 == 항목 인덱스(필터 없음)
         hidden = bool(item.get("hidden", False))
         toggle = ToggleSwitch(checked=not hidden)
@@ -1115,12 +1481,64 @@ class ManageWatchlistDialog(QDialog):
         hl.addStretch()
         placeholder = QTableWidgetItem("")
         placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.table.setItem(row, 3, placeholder)
-        self.table.setCellWidget(row, 3, container)
+        self.table.setItem(row, 4, placeholder)
+        self.table.setCellWidget(row, 4, container)
+
+    def _make_tag_combo(self, current_tag_id: str) -> QComboBox:
+        """태그 선택 콤보. 첫 항목은 '없음'(빈 id), 이어서 색 아이콘+이름.
+        닫힌 상태에서 휠로 값이 안 바뀌도록 _NoScrollComboBox 사용."""
+        combo = _NoScrollComboBox()
+        combo.addItem("— 없음 —", "")
+        select_idx = 0
+        for i, tag in enumerate(self._tags, start=1):
+            combo.addItem(_color_icon(tag.get("color", DEFAULT_TAG_COLOR)), tag.get("name", ""), tag["id"])
+            if tag["id"] == current_tag_id:
+                select_idx = i
+        combo.setCurrentIndex(select_idx)
+        combo.setIconSize(QSize(12, 12))
+        # 뒤 배경/테두리 없이 깔끔하게(셀에 녹아들게). 세로 패딩 0 으로 글자가
+        # 옆 칸들과 같은 높이에서 중앙 정렬되게 한다(셀 위젯을 직접 배치).
+        combo.setStyleSheet(f"""
+            QComboBox {{
+                background: transparent;
+                border: none;
+                padding: 0px 6px;
+                color: {C['text']};
+                font-size: 12px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 16px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C['bg']};
+                color: {C['text']};
+                border: 1px solid {C['surface2']};
+                border-radius: 6px;
+                padding: 4px;
+                outline: 0;
+                selection-background-color: {C['surface']};
+                selection-color: {C['text']};
+            }}
+        """)
+        return combo
+
+    def _on_tag_changed(self, row: int, combo: QComboBox):
+        if 0 <= row < len(self._items):
+            self._items[row]["tag"] = combo.currentData() or ""
 
     def _on_visibility_toggled(self, row: int, checked: bool):
         if 0 <= row < len(self._items):
             self._items[row]["hidden"] = not checked
+
+    def _open_tag_manager(self):
+        dlg = TagManagerDialog(tags=copy.deepcopy(self._tags), parent=self)
+        if not dlg.exec():
+            return
+        self._tags = dlg.get_tags()
+        # 삭제된 태그를 참조하던 항목은 태그 해제 후 표를 다시 그려 콤보를 갱신
+        prune_watch_tags(self._items, self._tags)
+        self._rebuild_table()
 
     def _add(self):
         dlg = StockDialog(watch_mode=True, parent=self)
@@ -1163,3 +1581,6 @@ class ManageWatchlistDialog(QDialog):
 
     def get_watchlist(self) -> list[dict]:
         return self._items
+
+    def get_tags(self) -> list[dict]:
+        return self._tags

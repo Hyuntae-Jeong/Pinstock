@@ -49,7 +49,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
-    normalize_watchlist_schema,
+    normalize_watchlist_schema, normalize_tags, prune_watch_tags,
 )
 from .theme import C, TRAY_MENU_STYLE
 from .floating_widget import StockWidget, WatchWidget
@@ -69,6 +69,7 @@ class WidgetManager:
         self.app = app
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
+        self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
         self.widgets: dict[str, StockWidget] = {}
         self.watch_widgets: dict[str, WatchWidget] = {}   # 관심종목 플로팅 위젯
         self.uniform_w: int = StockWidget.MIN_W
@@ -521,6 +522,8 @@ class WidgetManager:
         elif isinstance(data, dict):
             self.stocks = normalize_stocks_schema(data.get("stocks", []) or [])
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
+            self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
+            prune_watch_tags(self.watchlist, self.watch_tags)
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -548,9 +551,11 @@ class WidgetManager:
     def _save_config(self):
         self.stocks = normalize_stocks_schema(self.stocks)
         self.watchlist = normalize_watchlist_schema(self.watchlist)
+        self.watch_tags = normalize_tags(self.watch_tags)
         data = {
             "stocks": self.stocks,
             "watchlist": self.watchlist,
+            "watch_tags": self.watch_tags,
             "master": {
                 "visible": self.master_visible,
                 "pos": self.master_pos,
@@ -985,10 +990,15 @@ class WidgetManager:
     # ── 관심종목 일괄 관리 ──────────────────────────────────────────────────
     def open_manage_watch_dialog(self):
         """관심종목 일괄 관리 — 추가/삭제/표시 토글. old/new diff 로 위젯 추가·삭제."""
-        dlg = ManageWatchlistDialog(watchlist=copy.deepcopy(self.watchlist))
+        dlg = ManageWatchlistDialog(
+            watchlist=copy.deepcopy(self.watchlist),
+            tags=copy.deepcopy(self.watch_tags),
+        )
         if not dlg.exec():
             return
         new_items = normalize_watchlist_schema(dlg.get_watchlist())
+        self.watch_tags = normalize_tags(dlg.get_tags())
+        prune_watch_tags(new_items, self.watch_tags)
         old_map = {w["code"]: w for w in self.watchlist}
         new_map = {w["code"]: w for w in new_items}
 
