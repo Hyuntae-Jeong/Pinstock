@@ -10,8 +10,9 @@ from datetime import datetime
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
+    fetch_watch_quote, fetch_watch_daily,
 )
-from ..core.portfolio import is_us_stock, stock_metrics
+from ..core.portfolio import is_us_stock, is_index, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .chart_widget import SparklineWidget
 from .manage_dialog import StockDialog
@@ -689,12 +690,11 @@ class WatchWidget(QWidget):
 
     # ── 데이터 갱신 (일봉 기준, 60초) ─────────────────────────────────────
     def _fetch(self):
-        code = self.data["code"]
-        us = is_us_stock(self.data)
-        result = fetch_us_stock(code) if us else fetch_stock(code)
+        # 지수/국내/해외를 타입·시장에 맞게 라우팅 (fetch_watch_* 가 분기)
+        result = fetch_watch_quote(self.data)
         if result:
             self._apply_price(result)
-        daily = fetch_us_daily_chart(code) if us else fetch_daily_chart(code)
+        daily = fetch_watch_daily(self.data)
         if daily and daily.get("candles"):
             self.sparkline.set_candles(daily["candles"])
 
@@ -704,9 +704,12 @@ class WatchWidget(QWidget):
         self.current_price = result["price"]
         price = result["price"]
         rate  = result["change_rate"]
-        self.price_lbl.setText(
-            f"{price:,.4f}" if is_us_stock(self.data) else f"{price:,.0f}"
-        )
+        if is_index(self.data):
+            self.price_lbl.setText(f"{price:,.2f}")   # 지수는 소수 2자리
+        elif is_us_stock(self.data):
+            self.price_lbl.setText(f"{price:,.4f}")
+        else:
+            self.price_lbl.setText(f"{price:,.0f}")
         if rate > 0:
             color, sign = C["red"], "▲"
         elif rate < 0:

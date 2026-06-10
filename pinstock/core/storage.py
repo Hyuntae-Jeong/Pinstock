@@ -81,6 +81,11 @@ def normalize_watch_item(item: dict) -> dict:
     currency = str(normalized.get("currency") or default_currency).strip().upper()
     normalized["currency"] = currency or default_currency
 
+    # 타입: 'index'(지수) 또는 'stock'(개별 종목). 지수는 시세 라우팅·표시 포맷이
+    # 다르므로 구분해 보존한다. 알 수 없는 값은 종목으로 본다.
+    item_type = str(normalized.get("type") or "").strip().lower()
+    normalized["type"] = "index" if item_type == "index" else "stock"
+
     # 태그: 문자열 리스트만 허용 (Phase 2 에서 사용자 추가 태그/색상과 연결)
     tags = normalized.get("tags")
     normalized["tags"] = [str(t) for t in tags] if isinstance(tags, list) else []

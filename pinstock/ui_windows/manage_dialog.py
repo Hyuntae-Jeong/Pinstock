@@ -10,7 +10,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QModelIndex
 from PyQt6.QtGui import QColor, QStandardItemModel, QStandardItem
 
-from ..core.api import fetch_stock, fetch_us_stock, search_us_stocks, search_korean_stocks
+from ..core.api import (
+    fetch_stock, fetch_us_stock, fetch_index,
+    search_us_stocks, search_korean_stocks,
+)
+from ..core.indices import index_by_code, search_indices, index_exact_match
 from ..core.portfolio import is_us_stock, stock_metrics
 from ..core.storage import MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD
 from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE
@@ -31,8 +35,10 @@ class _StockSearchCompleter(QCompleter):
 
 
 def fetch_quote_for_stock(stock: dict) -> dict | None:
-    market = str(stock.get("market") or MARKET_KR).upper()
     code = str(stock.get("code") or "").strip().upper()
+    if str(stock.get("type") or "").strip().lower() == "index":
+        return fetch_index(code, stock.get("market"))
+    market = str(stock.get("market") or MARKET_KR).upper()
     if market == MARKET_US:
         return fetch_us_stock(code)
     return fetch_stock(code)
@@ -268,6 +274,21 @@ class StockDialog(QDialog):
         market = self.market()
         self._set_preview_hint("조회 중...")
         self.preview_lbl.repaint()
+        # 관심종목 모드: 입력이 지수(코드 또는 이름/별칭 정확일치)면 지수로 검증.
+        # 드롭다운에서 고른 경우 code 가 지수 코드(KOSPI/^GSPC)라 index_by_code 로,
+        # 직접 '코스피'/'나스닥' 등을 타이핑한 경우 index_exact_match 로 잡는다.
+        if self.watch_mode:
+            idx = index_by_code(code) or index_exact_match(raw, market)
+            if idx:
+                if fetch_index(idx["code"], idx["market"]):
+                    self.code_edit.blockSignals(True)
+                    self.code_edit.setText(idx["code"])
+                    self.code_edit.blockSignals(False)
+                    self._set_preview_found(idx["name"])
+                    self._preview_result = idx
+                else:
+                    self._set_preview_error("지수 조회 실패")
+                return
         # 1) 입력을 그대로 코드/티커로 보고 시세 API 호출.
         # 2) 실패하면 이름 검색으로 폴백해 첫 매칭의 코드/티커로 자동 채움.
         #    (사용자가 드롭다운에서 안 고르고 그냥 엔터/포커스 아웃 한 경우 안전망)
@@ -334,6 +355,9 @@ class StockDialog(QDialog):
             matches = search_us_stocks(query, limit=10)
         else:
             matches = search_korean_stocks(query, limit=10)
+        # 관심종목 모드: 현재 시장의 지수도 후보 맨 앞에 더한다 (보유엔 지수 없음)
+        if self.watch_mode:
+            matches = search_indices(query, market=market) + matches
         self._search_model.clear()
         for m in matches:
             code = m.get("code") or m.get("symbol")
@@ -460,11 +484,29 @@ class StockDialog(QDialog):
     def get_data(self) -> dict:
         market = self.market()
         if self.watch_mode:
-            # 관심종목: 평단가/수량/손익 없음 — 코드·시장·태그만. 종목명은 매니저가 조회해 채운다.
+            code = self.code_edit.text().strip().upper()
+            # 지수면 카탈로그 메타(코드/이름/시장/통화)를 그대로 저장 — 라디오 시장이
+            # 아니라 카탈로그가 진실값이다. _preview_result 는 이름 정확일치로 잡힌 경우.
+            idx = index_by_code(code)
+            if idx is None and isinstance(self._preview_result, dict) \
+                    and self._preview_result.get("type") == "index":
+                idx = self._preview_result
+            if idx:
+                return {
+                    "code":     idx["code"],
+                    "name":     idx["name"],
+                    "market":   idx["market"],
+                    "currency": idx["currency"],
+                    "type":     "index",
+                    "tags":     [],
+                }
+            # 관심종목(개별 종목): 평단가/수량/손익 없음 — 코드·시장·태그만.
+            # 종목명은 매니저가 조회해 채운다.
             return {
-                "code":     self.code_edit.text().strip().upper(),
+                "code":     code,
                 "market":   market,
                 "currency": CURRENCY_USD if market == MARKET_US else CURRENCY_KRW,
+                "type":     "stock",
                 "tags":     [],
             }
         avg_price = self.avg_spin.value()

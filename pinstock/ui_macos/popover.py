@@ -15,7 +15,7 @@ from PyQt6.QtGui import QFont, QFontMetrics, QScreen
 
 from ..ui_windows.theme import C, TRAY_MENU_STYLE
 from ..ui_windows.chart_widget import SparklineWidget
-from ..core.portfolio import is_us_stock, stock_metrics
+from ..core.portfolio import is_us_stock, is_index, stock_metrics
 
 
 # macOS 시스템 한글 폰트 (Malgun Gothic 의 Mac 대체)
@@ -553,6 +553,17 @@ class PortfolioSummary(QWidget):
         self.prate_val.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold;")
 
 
+# ─── 관심종목 가격 표시 포맷 ──────────────────────────────────────────────────
+def _format_watch_price(item: dict, price: float) -> str:
+    """관심종목 현재가 표시 포맷. 지수는 소수 2자리, 해외 종목은 4자리,
+    국내 종목은 정수."""
+    if is_index(item):
+        return f"{price:,.2f}"
+    if is_us_stock(item):
+        return f"{price:,.4f}"
+    return f"{price:,.0f}"
+
+
 # ─── 관심종목 행 ─────────────────────────────────────────────────────────────
 class WatchRow(QWidget):
     """관심종목 한 행 — 일봉 기준 간소 표시 (손익/평단가/수량 없음).
@@ -614,9 +625,7 @@ class WatchRow(QWidget):
         self._prev_close = float(result["price"] - result["change_price"])
         price = result["price"]
         rate = result["change_rate"]
-        self.price_lbl.setText(
-            f"{price:,.4f}" if is_us_stock(self.data) else f"{price:,.0f}"
-        )
+        self.price_lbl.setText(_format_watch_price(self.data, price))
         if rate > 0:
             color, sign = C["red"], "▲"
         elif rate < 0:

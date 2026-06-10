@@ -21,7 +21,7 @@ from ..core import updater
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
-    fetch_usd_krw_rate,
+    fetch_usd_krw_rate, fetch_watch_quote, fetch_watch_daily,
 )
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.portfolio import is_us_stock, portfolio_totals
@@ -143,11 +143,11 @@ class WatchFetcher(QObject):
         self._fetch()
 
     def _fetch(self):
-        us = is_us_stock(self.item)
-        result = fetch_us_stock(self.code) if us else fetch_stock(self.code)
+        # 지수/국내/해외를 타입·시장에 맞게 라우팅 (fetch_watch_* 가 분기)
+        result = fetch_watch_quote(self.item)
         if result:
             self.price_updated.emit(self.code, result)
-        daily = fetch_us_daily_chart(self.code) if us else fetch_daily_chart(self.code)
+        daily = fetch_watch_daily(self.item)
         if daily and daily.get("candles"):
             self.daily_updated.emit(self.code, daily["candles"])
 
