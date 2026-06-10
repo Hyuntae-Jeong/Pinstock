@@ -52,7 +52,7 @@ from ..core.storage import (
     normalize_watchlist_schema, normalize_tags, prune_watch_tags,
 )
 from .theme import C, TRAY_MENU_STYLE
-from .floating_widget import StockWidget, TagGroupWidget, CompactWatchRow
+from .floating_widget import StockWidget, TagGroupWidget
 from .master_widget import MasterWidget
 from .manage_dialog import (
     StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
@@ -81,7 +81,7 @@ class WidgetManager:
         # 그룹별 위치/고정 상태 {key: {"pos":[x,y], "pinned":bool}}
         self.watch_group_state: dict[str, dict] = {}
         self.uniform_w: int = StockWidget.MIN_W
-        self.uniform_watch_w: int = TagGroupWidget.MIN_W   # 관심 그룹 통일 너비 (보유와 별개)
+        self.uniform_watch_w: int = TagGroupWidget.WIDTH   # 관심 그룹 고정 너비 (보유와 별개)
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
         # 마스터 위젯 (포트폴리오 요약)
         self.master_widget: MasterWidget | None = None
@@ -323,16 +323,11 @@ class WidgetManager:
             return False
         return not stock.get("hidden", False) and self._matches_market_filter(stock)
 
-    # ── 관심 그룹 통일 너비 / 표시 여부 ───────────────────────────────────
+    # ── 관심 그룹 고정 너비 / 표시 여부 ───────────────────────────────────
     def _calc_uniform_watch_width(self) -> int:
-        """모든 멤버 종목명과 모든 태그명이 안 잘리는 통일 너비."""
-        w = TagGroupWidget.MIN_W
-        for item in self.watchlist:
-            w = max(w, CompactWatchRow.width_for_name(item.get("name", item["code"])))
-        for t in self.watch_tags:
-            w = max(w, TagGroupWidget.width_for_title(t.get("name", "")))
-        w = max(w, TagGroupWidget.width_for_title(_UNTAGGED_TITLE))
-        return w
+        """고정 너비. 가장 긴 이름에 맞춰 늘리지 않는다 — 폭을 넘는 이름은 그룹
+        행에서 …로 줄이고 hover 시 전체를 보여준다."""
+        return TagGroupWidget.WIDTH
 
     def _is_watch_visible(self, item: dict) -> bool:
         # 관심도 보유와 동일하게 시장 필터를 적용 (macOS 팝오버 관심 뷰와 일관)

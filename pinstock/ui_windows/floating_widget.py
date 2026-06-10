@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QMenu, QApplication,
     QPushButton,
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPoint, QSize, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QCursor
 from datetime import datetime
 
@@ -575,6 +575,45 @@ class StockWidget(QWidget):
             self.edited.emit(self.data["code"])
 
 
+# ─── 폭이 모자라면 …로 줄이고, 줄였을 때만 hover 툴팁으로 전체 표시하는 라벨 ──
+class ElidedLabel(QLabel):
+    """할당된 폭을 넘는 텍스트는 끝을 …로 줄여 표시하고, 줄여진 경우에만 마우스를
+    올렸을 때(hover) 전체 텍스트를 툴팁으로 보여준다. 위젯 폭을 고정해도 긴 이름이
+    레이아웃을 밀지 않도록 minimumSizeHint 를 0 으로 둬 폭이 줄어들 수 있게 한다."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setMinimumWidth(0)
+        self.setTextFull(text)
+
+    def setTextFull(self, text: str):
+        self._full = text or ""
+        self._apply_elide()
+
+    def fullText(self) -> str:
+        return self._full
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, super().minimumSizeHint().height())
+
+    def sizeHint(self) -> QSize:
+        # 원하는 폭은 '전체 텍스트' 기준 (현재 줄여진 텍스트가 아니라) — 레이아웃이
+        # 공간이 있으면 전부 보여주고, 모자라면 stretch/max 로 줄여 …로 만든다.
+        h = super().sizeHint().height()
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 2, h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        fm = self.fontMetrics()
+        elided = fm.elidedText(self._full, Qt.TextElideMode.ElideRight, max(0, self.width()))
+        super().setText(elided)
+        self.setToolTip(self._full if elided != self._full else "")
+
+
 # ─── 관심종목 압축 행 (태그 그룹 안에 들어감) ─────────────────────────────────
 class CompactWatchRow(QWidget):
     """태그 그룹 위젯이 펼쳐질 때 아래로 나오는 초압축 관심종목 한 행.
@@ -583,14 +622,11 @@ class CompactWatchRow(QWidget):
     StockWidget 보다 훨씬 작다. 자체적으로 일봉 기준 시세를 60초마다 폴링한다.
     """
 
-    ROW_H   = 30
-    SPARK_W = 66
-    SPARK_H = 22
+    ROW_H   = 38
+    SPARK_W = 80
+    SPARK_H = 30
     POLL_MS = 60_000
     STAGGER_MS = 500
-
-    # 종목명 폭 + (가격/등락률/스파크라인/여백) 오버헤드
-    _OVERHEAD = 210
 
     def __init__(self, item: dict, stagger_idx: int = 0, parent=None):
         super().__init__(parent)
@@ -601,11 +637,6 @@ class CompactWatchRow(QWidget):
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self._fetch)
         QTimer.singleShot(stagger_idx * self.STAGGER_MS, self._start)
-
-    @staticmethod
-    def width_for_name(name: str) -> int:
-        fm = QFontMetrics(QFont("Malgun Gothic", 8))
-        return fm.horizontalAdvance(name) + CompactWatchRow._OVERHEAD
 
     def _start(self):
         self.poll_timer.start(self.POLL_MS)
@@ -619,19 +650,24 @@ class CompactWatchRow(QWidget):
         hl.setContentsMargins(10, 1, 8, 1)
         hl.setSpacing(6)
 
-        self.name_lbl = QLabel(self.data.get("name", self.data["code"]))
-        self.name_lbl.setFont(QFont("Malgun Gothic", 8))
+        # 이름은 왼쪽에 두고, 남는 폭(아래 addStretch)을 이름과 가격 사이로 보내
+        # 가격·등락률·일봉 차트를 오른쪽에 뭉쳐 붙인다. 폭이 모자라면(긴 이름)
+        # 이름이 …로 줄고 hover 시 전체 표시.
+        self.name_lbl = ElidedLabel(self.data.get("name", self.data["code"]))
+        self.name_lbl.setFont(QFont("Malgun Gothic", 9))
         self.name_lbl.setStyleSheet(f"color: {C['subtext']};")
         hl.addWidget(self.name_lbl)
+
+        # 남는 폭은 여기로 — 가격/등락률/차트가 오른쪽에 붙는다
         hl.addStretch()
 
         self.price_lbl = QLabel("─")
-        self.price_lbl.setFont(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
+        self.price_lbl.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
         self.price_lbl.setStyleSheet(f"color: {C['text']};")
         hl.addWidget(self.price_lbl)
 
         self.rate_lbl = QLabel("")
-        self.rate_lbl.setFont(QFont("Malgun Gothic", 8))
+        self.rate_lbl.setFont(QFont("Malgun Gothic", 9))
         self.rate_lbl.setStyleSheet(f"color: {C['subtext']};")
         hl.addWidget(self.rate_lbl)
 
@@ -649,7 +685,7 @@ class CompactWatchRow(QWidget):
 
     def _apply_price(self, result: dict):
         self.data["name"] = result["name"]
-        self.name_lbl.setText(result["name"])
+        self.name_lbl.setTextFull(result["name"])
         self.current_price = result["price"]
         price = result["price"]
         rate  = result["change_rate"]
@@ -665,9 +701,9 @@ class CompactWatchRow(QWidget):
             color, sign = C["blue"], "▼"
         else:
             color, sign = C["subtext"], "  "
-        self.price_lbl.setStyleSheet(f"color: {color}; font-size: 9px; font-weight: bold;")
+        self.price_lbl.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: bold;")
         self.rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
-        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 8px;")
+        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 10px;")
 
 
 # ─── 태그 그룹 헤더 (드래그 이동 + 클릭 펼침/접힘 + 고정 버튼) ────────────────
@@ -699,13 +735,15 @@ class _GroupHeader(QWidget):
         self.dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
         hl.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self.title_lbl = QLabel(title)
-        self.title_lbl.setFont(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
+        # 태그명도 길면 …로 줄이고 hover 시 전체 표시 (고정 폭에서 넘침 방지)
+        self.title_lbl = ElidedLabel(title)
+        self.title_lbl.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
         self.title_lbl.setStyleSheet(f"color: {C['text']};")
+        self.title_lbl.setMaximumWidth(max(40, group.W - 115))
         hl.addWidget(self.title_lbl)
 
         self.count_lbl = QLabel("")
-        self.count_lbl.setFont(QFont("Malgun Gothic", 8))
+        self.count_lbl.setFont(QFont("Malgun Gothic", 9))
         self.count_lbl.setStyleSheet(f"color: {C['subtext']};")
         hl.addWidget(self.count_lbl)
         hl.addStretch()
@@ -777,16 +815,17 @@ class TagGroupWidget(QWidget):
     pin_toggled      = pyqtSignal(str, bool)   # group_key, pinned
     manage_requested = pyqtSignal()
 
-    MIN_W    = 240
-    HEADER_H = 34
+    # 고정 폭 — 가장 긴 이름에 맞춰 늘리지 않고 모두 같은 폭. 짧은 이름(지수·국내
+    # 종목)은 그대로 보이고, 폭을 넘는 긴 이름만 …로 줄여 hover 시 전체 표시.
+    # 값: 지수명(다우존스 등) + 긴 지수값(50,571.96) + 등락률 + 미니차트가 간격
+    # 없이 들어가는 선.
+    WIDTH    = 324
+    HEADER_H = 38
     RADIUS   = 13
     PANEL_TOP = 4
     PANEL_BOTTOM = 8
     COLLAPSE_POLL_MS = 250
     SCREEN_MARGIN = 10
-
-    # 태그명 폭 + (색 점/개수/펼침표시/고정버튼/여백) 오버헤드
-    _TITLE_OVERHEAD = 130
 
     def __init__(self, group_key: str, title: str, color: str, items: list[dict],
                  width: int | None = None, pinned: bool = False, stagger_base: int = 0):
@@ -796,7 +835,7 @@ class TagGroupWidget(QWidget):
         self.items = items
         self.pinned = bool(pinned)
         self.is_expanded = self.pinned
-        self.W = width or self.MIN_W
+        self.W = width or self.WIDTH
         self.rows: list[CompactWatchRow] = []
         self._pre_expand_y = None
 
@@ -809,11 +848,6 @@ class TagGroupWidget(QWidget):
         self._relayout()
         if self.pinned:
             self.header.set_pinned(True)
-
-    @staticmethod
-    def width_for_title(title: str) -> int:
-        fm = QFontMetrics(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
-        return fm.horizontalAdvance(title) + TagGroupWidget._TITLE_OVERHEAD
 
     def _panel_h(self) -> int:
         return self.PANEL_TOP + len(self.rows) * CompactWatchRow.ROW_H + self.PANEL_BOTTOM
