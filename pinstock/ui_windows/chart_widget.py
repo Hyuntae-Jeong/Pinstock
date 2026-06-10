@@ -13,11 +13,17 @@ class SparklineWidget(QWidget):
     - line  : 당일 1분봉 라인 + area, 시초가 대비 색상 결정, 전일 종가 점선
     - candle: 최근 N일 일봉 캔들 (양봉=빨강, 음봉=파랑)"""
 
-    W = 100   # 차트 너비
+    W = 100   # 차트 너비 (기본값 — 인스턴스에서 재정의 가능)
     H = 40    # 차트 높이
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, width: int | None = None, height: int | None = None):
         super().__init__(parent)
+        # 인스턴스 크기를 주면 클래스 기본값을 덮어쓴다(작은 압축 행용).
+        # paint 메서드가 self.W/self.H 를 참조하므로 좌표도 함께 맞춰진다.
+        if width is not None:
+            self.W = width
+        if height is not None:
+            self.H = height
         self.setFixedSize(self.W, self.H)
         self.mode: str = "line"
         self.prices: list[float] = []

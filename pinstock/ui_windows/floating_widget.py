@@ -2,9 +2,10 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QMenu, QApplication,
+    QPushButton,
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
-from PyQt6.QtGui import QFont, QFontMetrics
+from PyQt6.QtGui import QFont, QFontMetrics, QCursor
 from datetime import datetime
 
 from ..core.api import (
@@ -574,121 +575,69 @@ class StockWidget(QWidget):
             self.edited.emit(self.data["code"])
 
 
-# ─── 관심종목 위젯 (간소 — 일봉 기준) ─────────────────────────────────────────
-class WatchWidget(QWidget):
-    """화면에 떠있는 관심종목 위젯 (간소 버전).
+# ─── 관심종목 압축 행 (태그 그룹 안에 들어감) ─────────────────────────────────
+class CompactWatchRow(QWidget):
+    """태그 그룹 위젯이 펼쳐질 때 아래로 나오는 초압축 관심종목 한 행.
 
-    보유 StockWidget 과 달리 손익/평단가/수량/확장 패널이 없다. 종목명 +
-    현재가 + 전일대비% + 미니 일봉 스파크라인만 보여주고, 자체적으로 일봉
-    기준 시세를 60초마다 폴링한다 (macOS WatchFetcher 와 동일 주기·필드).
-    클릭 확장은 없고 드래그 이동 / 우클릭 삭제만 지원한다.
+    한 줄에 종목명 + 현재가 + 등락률 + 미니 일봉 스파크라인만 담는다. 보유
+    StockWidget 보다 훨씬 작다. 자체적으로 일봉 기준 시세를 60초마다 폴링한다.
     """
 
-    deleted = pyqtSignal(str)   # code 전달 (우클릭 삭제)
+    ROW_H   = 30
+    SPARK_W = 66
+    SPARK_H = 22
+    POLL_MS = 60_000
+    STAGGER_MS = 500
 
-    MIN_W     = 240    # 보유 위젯과 동일한 최소 가로폭 (같은 compact 레이아웃)
-    COMPACT_H = 58
-    RADIUS    = 13
+    # 종목명 폭 + (가격/등락률/스파크라인/여백) 오버헤드
+    _OVERHEAD = 210
 
-    POLL_MS    = 60_000   # 일봉 기준이라 느리게 (분봉은 쓰지 않음)
-    STAGGER_MS = 600      # 동시 호출 분산
-
-    def __init__(self, watch_data: dict, width: int | None = None, stagger_idx: int = 0):
-        super().__init__()
-        self.data = watch_data          # code, name, market, currency, tag, hidden, pos
-        self.current_price: float = 0
-        self._drag_pos = None
-        self._press_pos = None
-        self._moved: bool = False
-        self._stagger_idx = stagger_idx
-
-        name = self.data.get("name", self.data["code"])
-        self.W = width if width else self.calc_width_for_name(name)
-
-        self.poll_timer = QTimer()
-        self.poll_timer.timeout.connect(self._fetch)
-
+    def __init__(self, item: dict, stagger_idx: int = 0, parent=None):
+        super().__init__(parent)
+        self.data = item
+        self.current_price: float = 0.0
+        self.setFixedHeight(self.ROW_H)
         self._build_ui()
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self._fetch)
+        QTimer.singleShot(stagger_idx * self.STAGGER_MS, self._start)
 
-        # 첫 fetch/타이머를 stagger 만큼 지연 — 여러 위젯의 동시 HTTP 호출 분산
-        QTimer.singleShot(self._stagger_idx * self.STAGGER_MS, self._start_fetching)
+    @staticmethod
+    def width_for_name(name: str) -> int:
+        fm = QFontMetrics(QFont("Malgun Gothic", 8))
+        return fm.horizontalAdvance(name) + CompactWatchRow._OVERHEAD
 
-    def _start_fetching(self):
+    def _start(self):
         self.poll_timer.start(self.POLL_MS)
         self._fetch()
 
-    # ── 종목명에 맞춰 가로폭 계산 (StockWidget 과 동일 레이아웃) ──────────
-    @staticmethod
-    def calc_width_for_name(name: str) -> int:
-        font = QFont("Malgun Gothic", 8, QFont.Weight.Bold)
-        fm = QFontMetrics(font)
-        name_w = fm.horizontalAdvance(name)
-        OVERHEAD = 138   # 좌마진 + 정보~sparkline spacing + sparkline(100) + 우마진 + 여유
-        return max(WatchWidget.MIN_W, name_w + OVERHEAD)
+    def stop(self):
+        self.poll_timer.stop()
 
-    # ── UI 구성 ────────────────────────────────────────────────────────────
     def _build_ui(self):
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(self.W, self.COMPACT_H)
-
-        self.card = QFrame(self)
-        self.card.setObjectName("card")
-        self.card.setGeometry(0, 0, self.W, self.COMPACT_H)
-        self.card.setStyleSheet(f"""
-            QFrame#card {{
-                background: {C['bg']};
-                border: 1px solid {C['border']};
-                border-radius: {self.RADIUS}px;
-            }}
-        """)
-
-        hl = QHBoxLayout(self.card)
-        hl.setContentsMargins(14, 5, 10, 5)
-        hl.setSpacing(8)
-
-        # 좌측: 종목명 + 가격/등락률
-        info = QVBoxLayout()
-        info.setContentsMargins(0, 0, 0, 0)
-        info.setSpacing(1)
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(10, 1, 8, 1)
+        hl.setSpacing(6)
 
         self.name_lbl = QLabel(self.data.get("name", self.data["code"]))
-        self.name_lbl.setFont(QFont("Malgun Gothic", 8, QFont.Weight.Bold))
+        self.name_lbl.setFont(QFont("Malgun Gothic", 8))
         self.name_lbl.setStyleSheet(f"color: {C['subtext']};")
-        info.addWidget(self.name_lbl)
+        hl.addWidget(self.name_lbl)
+        hl.addStretch()
 
-        price_row = QHBoxLayout()
-        price_row.setContentsMargins(0, 0, 0, 0)
-        price_row.setSpacing(8)
         self.price_lbl = QLabel("─")
-        self.price_lbl.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
+        self.price_lbl.setFont(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
         self.price_lbl.setStyleSheet(f"color: {C['text']};")
-        price_row.addWidget(self.price_lbl)
-        self.rate_lbl = QLabel("")
-        self.rate_lbl.setFont(QFont("Malgun Gothic", 9))
-        self.rate_lbl.setStyleSheet(f"color: {C['subtext']};")
-        price_row.addWidget(self.rate_lbl)
-        price_row.addStretch()
-        info.addLayout(price_row)
-        hl.addLayout(info, 1)
+        hl.addWidget(self.price_lbl)
 
-        # 우측: 미니 일봉 캔들 스파크라인
-        self.sparkline = SparklineWidget(self.card)
+        self.rate_lbl = QLabel("")
+        self.rate_lbl.setFont(QFont("Malgun Gothic", 8))
+        self.rate_lbl.setStyleSheet(f"color: {C['subtext']};")
+        hl.addWidget(self.rate_lbl)
+
+        self.sparkline = SparklineWidget(self, width=self.SPARK_W, height=self.SPARK_H)
         hl.addWidget(self.sparkline, 0, Qt.AlignmentFlag.AlignVCenter)
 
-    # ── 외부에서 통일 너비 적용 ───────────────────────────────────────────
-    def set_width(self, new_w: int):
-        if new_w == self.W:
-            return
-        self.W = new_w
-        self.setFixedWidth(new_w)
-        self.card.setGeometry(0, 0, new_w, self.COMPACT_H)
-
-    # ── 데이터 갱신 (일봉 기준, 60초) ─────────────────────────────────────
     def _fetch(self):
         # 지수/국내/해외를 타입·시장에 맞게 라우팅 (fetch_watch_* 가 분기)
         result = fetch_watch_quote(self.data)
@@ -716,32 +665,289 @@ class WatchWidget(QWidget):
             color, sign = C["blue"], "▼"
         else:
             color, sign = C["subtext"], "  "
-        self.price_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        self.price_lbl.setStyleSheet(f"color: {color}; font-size: 9px; font-weight: bold;")
         self.rate_lbl.setText(f"{sign}{abs(rate):.2f}%")
-        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 9px;")
+        self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 8px;")
 
-    # ── 드래그 이동 (클릭 확장은 없음) ────────────────────────────────────
+
+# ─── 태그 그룹 헤더 (드래그 이동 + 클릭 펼침/접힘 + 고정 버튼) ────────────────
+class _GroupHeader(QWidget):
+    """태그 그룹 위젯의 헤더. 색 점 + 태그명 + 개수 + 펼침 표시(▸/▾) + 고정(📌).
+
+    헤더를 드래그하면 그룹 창이 이동하고, 클릭(이동 없음)하면 펼침/접힘 토글.
+    고정 버튼은 자식 QPushButton 이라 클릭이 헤더로 전파되지 않는다(펼침 토글과
+    분리). 고정 버튼은 펼쳐진 상태에서만 보인다.
+    """
+
     DRAG_THRESHOLD = 4
 
+    def __init__(self, group, title: str, color: str, parent=None):
+        super().__init__(parent)
+        self._group = group
+        self._drag_off = None
+        self._press = None
+        self._moved = False
+        self.setFixedHeight(group.HEADER_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(12, 0, 6, 0)
+        hl.setSpacing(7)
+
+        self.dot = QLabel()
+        self.dot.setFixedSize(9, 9)
+        self.dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
+        hl.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.title_lbl = QLabel(title)
+        self.title_lbl.setFont(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
+        self.title_lbl.setStyleSheet(f"color: {C['text']};")
+        hl.addWidget(self.title_lbl)
+
+        self.count_lbl = QLabel("")
+        self.count_lbl.setFont(QFont("Malgun Gothic", 8))
+        self.count_lbl.setStyleSheet(f"color: {C['subtext']};")
+        hl.addWidget(self.count_lbl)
+        hl.addStretch()
+
+        self.chev = QLabel("▸")
+        self.chev.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
+        hl.addWidget(self.chev, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.pin_btn = QPushButton("📌")
+        self.pin_btn.setFixedSize(22, 22)
+        self.pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pin_btn.setToolTip("고정 — 마우스가 벗어나도 계속 펼침")
+        self.pin_btn.clicked.connect(group.toggle_pin)
+        hl.addWidget(self.pin_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.pin_btn.hide()
+        self.set_pinned(False)
+
+    def set_count(self, n: int):
+        self.count_lbl.setText(f"({n})")
+
+    def set_expanded(self, expanded: bool):
+        self.chev.setText("▾" if expanded else "▸")
+        self.pin_btn.setVisible(expanded)
+
+    def set_pinned(self, pinned: bool):
+        if pinned:
+            self.pin_btn.setStyleSheet(
+                f"QPushButton {{ background: {C['blue']}; border: none; border-radius: 6px; }}"
+            )
+        else:
+            self.pin_btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; border: none; border-radius: 6px; }}"
+                f"QPushButton:hover {{ background: {C['surface']}; }}"
+            )
+
+    # ── 드래그 이동 + 클릭 토글 ──────────────────────────────────────────
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos  = event.globalPosition().toPoint() - self.pos()
-            self._press_pos = event.globalPosition().toPoint()
-            self._moved     = False
+            self._drag_off = event.globalPosition().toPoint() - self._group.pos()
+            self._press = event.globalPosition().toPoint()
+            self._moved = False
 
     def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
-            if not self._moved and self._press_pos:
-                delta = event.globalPosition().toPoint() - self._press_pos
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_off is not None:
+            if not self._moved and self._press is not None:
+                delta = event.globalPosition().toPoint() - self._press
                 if abs(delta.x()) > self.DRAG_THRESHOLD or abs(delta.y()) > self.DRAG_THRESHOLD:
                     self._moved = True
             if self._moved:
-                self.move(event.globalPosition().toPoint() - self._drag_pos)
+                self._group.move(event.globalPosition().toPoint() - self._drag_off)
 
     def mouseReleaseEvent(self, event):
-        self._drag_pos  = None
-        self._press_pos = None
-        self._moved     = False
+        if event.button() == Qt.MouseButton.LeftButton and not self._moved:
+            self._group.toggle_expand()
+        self._drag_off = None
+        self._press = None
+        self._moved = False
+
+
+# ─── 태그 그룹 위젯 (관심종목을 태그별로 묶는 떠있는 위젯) ─────────────────────
+class TagGroupWidget(QWidget):
+    """태그(또는 '태그 없음') 하나에 대응하는 떠있는 그룹 위젯.
+
+    접힘 상태에서는 헤더(색 점 + 태그명 + 개수)만 보이고, 헤더를 클릭하면 해당
+    태그의 관심종목들이 아래로 펼쳐진다. 고정(📌)하면 마우스가 벗어나도 계속
+    펼쳐져 있고, 고정하지 않으면 마우스가 위젯을 벗어날 때 자동으로 접힌다.
+    """
+
+    pin_toggled      = pyqtSignal(str, bool)   # group_key, pinned
+    manage_requested = pyqtSignal()
+
+    MIN_W    = 240
+    HEADER_H = 34
+    RADIUS   = 13
+    PANEL_TOP = 4
+    PANEL_BOTTOM = 8
+    COLLAPSE_POLL_MS = 250
+    SCREEN_MARGIN = 10
+
+    # 태그명 폭 + (색 점/개수/펼침표시/고정버튼/여백) 오버헤드
+    _TITLE_OVERHEAD = 130
+
+    def __init__(self, group_key: str, title: str, color: str, items: list[dict],
+                 width: int | None = None, pinned: bool = False, stagger_base: int = 0):
+        super().__init__()
+        self.group_key = group_key
+        self.color = color
+        self.items = items
+        self.pinned = bool(pinned)
+        self.is_expanded = self.pinned
+        self.W = width or self.MIN_W
+        self.rows: list[CompactWatchRow] = []
+        self._pre_expand_y = None
+
+        # 고정 안 한 상태에서 마우스가 벗어나면 접도록 주기적으로 커서 위치를 확인.
+        # (자식 위젯 위로 이동할 때의 leaveEvent 오작동을 피하려 폴링 방식 사용)
+        self._hover_timer = QTimer(self)
+        self._hover_timer.timeout.connect(self._check_hover)
+
+        self._build_ui(title, stagger_base)
+        self._relayout()
+        if self.pinned:
+            self.header.set_pinned(True)
+
+    @staticmethod
+    def width_for_title(title: str) -> int:
+        fm = QFontMetrics(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
+        return fm.horizontalAdvance(title) + TagGroupWidget._TITLE_OVERHEAD
+
+    def _panel_h(self) -> int:
+        return self.PANEL_TOP + len(self.rows) * CompactWatchRow.ROW_H + self.PANEL_BOTTOM
+
+    # ── UI 구성 ────────────────────────────────────────────────────────────
+    def _build_ui(self, title: str, stagger_base: int):
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("card")
+        self.card.setStyleSheet(f"""
+            QFrame#card {{
+                background: {C['bg']};
+                border: 1px solid {C['border']};
+                border-radius: {self.RADIUS}px;
+            }}
+        """)
+
+        # 헤더
+        self.header = _GroupHeader(self, title, self.color, parent=self.card)
+        self.header.set_count(len(self.items))
+
+        # 펼침 패널
+        self.panel = QWidget(self.card)
+        self.panel.setStyleSheet("background: transparent;")
+        pv = QVBoxLayout(self.panel)
+        pv.setContentsMargins(0, 0, 0, self.PANEL_BOTTOM - 2)
+        pv.setSpacing(0)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background: {C['border']}; max-height: 1px; border: none;")
+        pv.addWidget(sep)
+        pv.addSpacing(self.PANEL_TOP - 1)
+        for i, item in enumerate(self.items):
+            row = CompactWatchRow(item, stagger_idx=stagger_base + i, parent=self.panel)
+            self.rows.append(row)
+            pv.addWidget(row)
+        self.panel.hide()
+
+    # ── 레이아웃(현재 펼침 상태에 맞춰 크기·자식 배치) ────────────────────
+    def _relayout(self):
+        total_h = self.HEADER_H + (self._panel_h() if self.is_expanded else 0)
+        self.setFixedSize(self.W, total_h)
+        self.card.setGeometry(0, 0, self.W, total_h)
+        self.header.setGeometry(0, 0, self.W, self.HEADER_H)
+        self.panel.setGeometry(0, self.HEADER_H, self.W, self._panel_h())
+        self.panel.setVisible(self.is_expanded)
+        self.header.set_expanded(self.is_expanded)
+
+    def set_width(self, new_w: int):
+        if new_w == self.W:
+            return
+        self.W = new_w
+        self._relayout()
+
+    # ── 펼침 / 접힘 / 고정 ────────────────────────────────────────────────
+    def toggle_expand(self):
+        if self.is_expanded:
+            self.collapse()
+            if self.pinned:
+                # 펼친 그룹을 직접 접으면 고정도 해제
+                self.pinned = False
+                self.header.set_pinned(False)
+                self.pin_toggled.emit(self.group_key, False)
+        else:
+            self.expand()
+
+    def expand(self):
+        if self.is_expanded:
+            return
+        self.is_expanded = True
+        self._relayout()
+        self._ensure_on_screen()
+        self.raise_()
+        if not self.pinned:
+            self._hover_timer.start(self.COLLAPSE_POLL_MS)
+
+    def collapse(self):
+        if not self.is_expanded:
+            return
+        self.is_expanded = False
+        self._hover_timer.stop()
+        self._relayout()
+        self._restore_pre_expand_pos()
+
+    def toggle_pin(self):
+        self.pinned = not self.pinned
+        self.header.set_pinned(self.pinned)
+        if self.pinned:
+            if not self.is_expanded:
+                self.expand()
+            self._hover_timer.stop()
+        else:
+            if self.is_expanded:
+                self._hover_timer.start(self.COLLAPSE_POLL_MS)
+        self.pin_toggled.emit(self.group_key, self.pinned)
+
+    def _check_hover(self):
+        if self.pinned or not self.is_expanded:
+            self._hover_timer.stop()
+            return
+        if not self.frameGeometry().contains(QCursor.pos()):
+            self.collapse()
+
+    # ── 펼침 시 화면 밖이면 위로 이동, 접힐 때 원위치 ─────────────────────
+    def _ensure_on_screen(self):
+        x, y, h = self.x(), self.y(), self.height()
+        screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        max_y = geo.y() + geo.height() - self.SCREEN_MARGIN
+        if y + h <= max_y:
+            return
+        new_y = max(geo.y() + self.SCREEN_MARGIN, max_y - h)
+        self._pre_expand_y = y
+        self.move(x, new_y)
+
+    def _restore_pre_expand_pos(self):
+        if self._pre_expand_y is not None:
+            self.move(self.x(), self._pre_expand_y)
+            self._pre_expand_y = None
+
+    # ── 우클릭: 관심종목 관리 ─────────────────────────────────────────────
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet(TRAY_MENU_STYLE)
+        manage_act = menu.addAction("⭐   관심종목 관리")
+        action = menu.exec(event.globalPos())
+        if action == manage_act:
+            self.manage_requested.emit()
 
     # ── 우클릭 메뉴 (삭제만) ──────────────────────────────────────────────
     def contextMenuEvent(self, event):

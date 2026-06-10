@@ -52,7 +52,7 @@ from ..core.storage import (
     normalize_watchlist_schema, normalize_tags, prune_watch_tags,
 )
 from .theme import C, TRAY_MENU_STYLE
-from .floating_widget import StockWidget, WatchWidget
+from .floating_widget import StockWidget, TagGroupWidget, CompactWatchRow
 from .master_widget import MasterWidget
 from .manage_dialog import (
     StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
@@ -63,6 +63,11 @@ from ..ui_common.help_dialog import HelpDialog
 from ..ui_common.about_dialog import AboutDialog
 
 
+# 태그 미지정 관심종목을 묶는 그룹의 키/제목/색
+_UNTAGGED_KEY = "__untagged__"
+_UNTAGGED_TITLE = "태그 없음"
+
+
 # ─── 전체 위젯 관리자 ─────────────────────────────────────────────────────────
 class WidgetManager:
     def __init__(self, app: QApplication):
@@ -71,9 +76,12 @@ class WidgetManager:
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
         self.widgets: dict[str, StockWidget] = {}
-        self.watch_widgets: dict[str, WatchWidget] = {}   # 관심종목 플로팅 위젯
+        # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
+        self.watch_groups: dict[str, TagGroupWidget] = {}
+        # 그룹별 위치/고정 상태 {key: {"pos":[x,y], "pinned":bool}}
+        self.watch_group_state: dict[str, dict] = {}
         self.uniform_w: int = StockWidget.MIN_W
-        self.uniform_watch_w: int = WatchWidget.MIN_W   # 관심 위젯 통일 너비 (보유와 별개)
+        self.uniform_watch_w: int = TagGroupWidget.MIN_W   # 관심 그룹 통일 너비 (보유와 별개)
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
         # 마스터 위젯 (포트폴리오 요약)
         self.master_widget: MasterWidget | None = None
@@ -108,7 +116,7 @@ class WidgetManager:
         self._load_config()
         self._setup_tray()
         self._spawn_all()
-        self._spawn_all_watch()
+        self._rebuild_watch_groups()
         self._sync_fx_timer()
 
         # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
@@ -128,15 +136,12 @@ class WidgetManager:
                 w.show()
             else:
                 w.hide()
-        # 관심 위젯도 전체 토글에 함께 따름 (개별 hidden/시장 필터 상태 보존)
-        watch_by_code = {it["code"]: it for it in self.watchlist}
-        for code, w in self.watch_widgets.items():
+        # 관심 그룹 위젯도 전체 토글에 함께 따름 (그룹은 보이는 멤버가 있을 때만 존재)
+        for w in self.watch_groups.values():
             if self.is_hidden:
                 w.hide()
-            elif self._is_watch_visible(watch_by_code.get(code, {})):
-                w.show()
             else:
-                w.hide()
+                w.show()
         # 마스터 위젯도 전체 토글에 함께 따름. master_visible 은 위젯 표시 여부가
         # 아니라 데이터 마스킹 여부라 여기서는 신경 쓰지 않는다 (마스킹 상태는 별개).
         if self.master_widget:
@@ -200,38 +205,36 @@ class WidgetManager:
         if self.is_hidden:
             self.toggle_visibility()
 
-    # ── 관심 위젯 위치 초기화 (좌상단) ─────────────────────────────────────
+    # ── 관심 그룹 위젯 위치 초기화 (좌상단) ─────────────────────────────────
     def reset_watch_positions(self):
-        """관심 위젯을 현재 모니터의 좌상단부터 column-wrap(오른쪽으로 확장) 정렬.
-        보유 reset_positions() 는 우상단→왼쪽이라 방향이 반대 — 관심은 별도 동작.
-        숨김(hidden)·시장 필터로 안 보이는 항목은 자리를 차지하지 않게 제외."""
-        MARGIN_X      = 20   # 화면 좌측 여백
-        MARGIN_Y      = 60   # 화면 상단 여백
-        MARGIN_BOTTOM = 20   # 화면 하단 여백
-        GAP           = 4    # 같은 column 내 세로 간격
-        COL_GAP       = 8    # column 사이 가로 간격
+        """관심 그룹 위젯을 현재 모니터의 좌상단부터 column-wrap(오른쪽으로 확장)
+        정렬. 펼침 높이가 아니라 헤더(접힘) 높이를 기준으로 타일링한다."""
+        MARGIN_X      = 20
+        MARGIN_Y      = 60
+        MARGIN_BOTTOM = 20
+        GAP           = 6
+        COL_GAP       = 8
 
-        # 관심 위젯을 현재 속한 모니터별로 그룹화 (watchlist 순서 보존)
-        groups: dict = {}
-        for item in self.watchlist:
-            if not self._is_watch_visible(item):
-                continue
-            w = self.watch_widgets.get(item["code"])
-            if not w:
-                continue
+        # 그룹 위젯을 현재 속한 모니터별로 그룹화 (생성 순서 보존)
+        by_screen: dict = {}
+        for key, w in self.watch_groups.items():
             center = w.frameGeometry().center()
             screen = QApplication.screenAt(center) or QApplication.primaryScreen()
-            groups.setdefault(screen, []).append((item, w))
+            by_screen.setdefault(screen, []).append((key, w))
 
-        for screen, items in groups.items():
+        slot_h = TagGroupWidget.HEADER_H
+        for screen, groups in by_screen.items():
             geo = screen.availableGeometry()
-            col_top_y   = geo.y() + MARGIN_Y
-            first_col_x = geo.x() + MARGIN_X
-            bottom_y    = geo.y() + geo.height() - MARGIN_BOTTOM
-            # direction=+1 → 좌→우로 새 column 진행 (보유는 기본값 -1 로 우→좌)
-            self._place_widgets_in_columns(
-                items, first_col_x, col_top_y, bottom_y, GAP, COL_GAP, direction=1
-            )
+            x = geo.x() + MARGIN_X
+            y = geo.y() + MARGIN_Y
+            bottom_y = geo.y() + geo.height() - MARGIN_BOTTOM
+            for key, w in groups:
+                if y > geo.y() + MARGIN_Y and y + slot_h > bottom_y:
+                    x += w.width() + COL_GAP
+                    y = geo.y() + MARGIN_Y
+                w.move(x, y)
+                self.watch_group_state.setdefault(key, {})["pos"] = [x, y]
+                y += slot_h + GAP
 
         self._save_config()
         # 숨김 상태라면 자동으로 다시 표시
@@ -320,21 +323,16 @@ class WidgetManager:
             return False
         return not stock.get("hidden", False) and self._matches_market_filter(stock)
 
-    # ── 관심 위젯 통일 너비 / 표시 여부 (보유와 동일 패턴, 별개 상태) ──────
+    # ── 관심 그룹 통일 너비 / 표시 여부 ───────────────────────────────────
     def _calc_uniform_watch_width(self) -> int:
-        w = WatchWidget.MIN_W
+        """모든 멤버 종목명과 모든 태그명이 안 잘리는 통일 너비."""
+        w = TagGroupWidget.MIN_W
         for item in self.watchlist:
-            name = item.get("name", item["code"])
-            w = max(w, WatchWidget.calc_width_for_name(name))
+            w = max(w, CompactWatchRow.width_for_name(item.get("name", item["code"])))
+        for t in self.watch_tags:
+            w = max(w, TagGroupWidget.width_for_title(t.get("name", "")))
+        w = max(w, TagGroupWidget.width_for_title(_UNTAGGED_TITLE))
         return w
-
-    def _apply_uniform_watch_width(self):
-        new_w = self._calc_uniform_watch_width()
-        if new_w == self.uniform_watch_w:
-            return
-        self.uniform_watch_w = new_w
-        for w in self.watch_widgets.values():
-            w.set_width(new_w)
 
     def _is_watch_visible(self, item: dict) -> bool:
         # 관심도 보유와 동일하게 시장 필터를 적용 (macOS 팝오버 관심 뷰와 일관)
@@ -342,11 +340,11 @@ class WidgetManager:
             return False
         return not item.get("hidden", False) and self._matches_market_filter(item)
 
-    def _default_watch_pos(self, idx: int) -> tuple[int, int]:
-        """저장된 pos 가 없을 때의 기본 관심 위젯 위치 — 주 모니터 좌상단 아래로 stack."""
+    def _default_watch_group_pos(self, idx: int) -> tuple[int, int]:
+        """저장된 pos 가 없을 때의 기본 그룹 위치 — 주 모니터 좌상단 아래로 stack."""
         geo = QApplication.primaryScreen().availableGeometry()
         x = geo.x() + 20
-        y = geo.y() + 60 + idx * (WatchWidget.COMPACT_H + 12)
+        y = geo.y() + 60 + idx * (TagGroupWidget.HEADER_H + 10)
         return x, y
 
     @staticmethod
@@ -386,16 +384,8 @@ class WidgetManager:
                 w.hide()
             else:
                 w.show()
-        # 관심 위젯도 같은 시장 필터를 적용 (제자리 표시/숨김 — 재정렬은 '관심 위치
-        # 초기화' 로. 보유처럼 compact 재정렬은 하지 않아 단순함을 유지한다)
-        for item in self.watchlist:
-            w = self.watch_widgets.get(item["code"])
-            if not w:
-                continue
-            if self.is_hidden or not self._is_watch_visible(item):
-                w.hide()
-            else:
-                w.show()
+        # 관심 그룹도 같은 시장 필터를 적용 — 멤버 구성이 바뀌므로 그룹을 다시 구성
+        self._rebuild_watch_groups()
         self._compact_visible_widgets()
         if self.master_widget:
             self.master_widget.set_market_filter(self.market_filter)
@@ -524,6 +514,7 @@ class WidgetManager:
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
             prune_watch_tags(self.watchlist, self.watch_tags)
+            self.watch_group_state = self._parse_watch_group_state(data.get("watch_group_state"))
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -552,10 +543,12 @@ class WidgetManager:
         self.stocks = normalize_stocks_schema(self.stocks)
         self.watchlist = normalize_watchlist_schema(self.watchlist)
         self.watch_tags = normalize_tags(self.watch_tags)
+        self._snapshot_watch_group_state()   # 현재 그룹 위치/고정 상태 반영
         data = {
             "stocks": self.stocks,
             "watchlist": self.watchlist,
             "watch_tags": self.watch_tags,
+            "watch_group_state": self.watch_group_state,
             "master": {
                 "visible": self.master_visible,
                 "pos": self.master_pos,
@@ -579,11 +572,7 @@ class WidgetManager:
             if w:
                 pos = w.pos()
                 s["pos"] = [pos.x(), pos.y()]
-        for item in self.watchlist:
-            w = self.watch_widgets.get(item["code"])
-            if w:
-                pos = w.pos()
-                item["pos"] = [pos.x(), pos.y()]
+        self._snapshot_watch_group_state()   # 관심 그룹 위치/고정 상태
         if self.master_widget:
             mpos = self.master_widget.pos()
             self.master_pos = [mpos.x(), mpos.y()]
@@ -602,38 +591,95 @@ class WidgetManager:
         self._sync_fx_timer()
         self._spawn_master()
 
-    # ── 관심 위젯 생성 ─────────────────────────────────────────────────────
-    def _spawn_all_watch(self):
-        """저장된 관심종목으로 위젯 생성. 저장된 pos 사용, 없으면 좌상단 기본 배치.
-        stagger 는 0부터 — 보유와 독립적으로 분산(macOS 와 동일)."""
+    # ── 관심 그룹 위젯 ─────────────────────────────────────────────────────
+    @staticmethod
+    def _parse_watch_group_state(raw) -> dict:
+        """저장된 watch_group_state 를 검증해 {key: {pos, pinned}} 로 정규화."""
+        out: dict = {}
+        if not isinstance(raw, dict):
+            return out
+        for key, val in raw.items():
+            if not isinstance(val, dict):
+                continue
+            entry: dict = {}
+            pos = val.get("pos")
+            if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                try:
+                    entry["pos"] = [int(pos[0]), int(pos[1])]
+                except (TypeError, ValueError):
+                    pass
+            entry["pinned"] = bool(val.get("pinned", False))
+            out[str(key)] = entry
+        return out
+
+    def _snapshot_watch_group_state(self):
+        """현재 떠 있는 그룹 위젯의 위치/고정 상태를 watch_group_state 에 반영."""
+        for key, w in self.watch_groups.items():
+            pos = w.pos()
+            entry = self.watch_group_state.setdefault(key, {})
+            entry["pos"] = [pos.x(), pos.y()]
+            entry["pinned"] = bool(w.pinned)
+
+    def _compute_watch_groups(self) -> list[dict]:
+        """watchlist + 태그 레지스트리로 표시할 그룹 목록을 만든다.
+        태그 등록 순서대로, 보이는 멤버가 있는 태그만. 마지막에 '태그 없음' 그룹."""
+        tag_ids = {t["id"] for t in self.watch_tags}
+        members: dict[str, list] = {t["id"]: [] for t in self.watch_tags}
+        members[_UNTAGGED_KEY] = []
+        for item in self.watchlist:
+            if not self._is_watch_visible(item):
+                continue
+            tag = item.get("tag") or ""
+            key = tag if tag in tag_ids else _UNTAGGED_KEY
+            members[key].append(item)
+
+        groups: list[dict] = []
+        for t in self.watch_tags:
+            if members[t["id"]]:
+                groups.append({"key": t["id"], "title": t["name"],
+                               "color": t["color"], "members": members[t["id"]]})
+        if members[_UNTAGGED_KEY]:
+            groups.append({"key": _UNTAGGED_KEY, "title": _UNTAGGED_TITLE,
+                           "color": C["surface2"], "members": members[_UNTAGGED_KEY]})
+        return groups
+
+    def _rebuild_watch_groups(self):
+        """관심 그룹 위젯을 전부 다시 만든다 (추가/관리/필터/로드 시 호출).
+        파괴 전 현재 위치/고정 상태를 보존하고, 재생성 시 그대로 복원한다."""
+        self._snapshot_watch_group_state()
+        for w in self.watch_groups.values():
+            w.close()
+            w.deleteLater()
+        self.watch_groups.clear()
+
         self.uniform_watch_w = self._calc_uniform_watch_width()
-        visible_idx = 0
-        for i, item in enumerate(self.watchlist):
-            nx, ny = self._default_watch_pos(visible_idx)
-            self._spawn_watch_widget(item, nx, ny, stagger_idx=i)
-            if not item.get("hidden", False):
-                visible_idx += 1
+        stagger = 0
+        for idx, g in enumerate(self._compute_watch_groups()):
+            key = g["key"]
+            st = self.watch_group_state.get(key, {})
+            w = TagGroupWidget(
+                key, g["title"], g["color"], g["members"],
+                width=self.uniform_watch_w,
+                pinned=bool(st.get("pinned", False)),
+                stagger_base=stagger,
+            )
+            stagger += len(g["members"])
+            w.pin_toggled.connect(self._on_watch_group_pin_toggled)
+            w.manage_requested.connect(self.open_manage_watch_dialog)
+            pos = st.get("pos")
+            if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                w.move(int(pos[0]), int(pos[1]))
+            else:
+                nx, ny = self._default_watch_group_pos(idx)
+                w.move(nx, ny)
+            w.setWindowOpacity(self.popover_opacity)
+            if not self.is_hidden:
+                w.show()
+            self.watch_groups[key] = w
 
-    def _spawn_watch_widget(self, item: dict, def_x=20, def_y=60, stagger_idx: int = 0):
-        code = item["code"]
-        w = WatchWidget(item, width=self.uniform_watch_w, stagger_idx=stagger_idx)
-        w.deleted.connect(self._on_watch_delete)
-        pos = item.get("pos", [def_x, def_y])
-        w.move(pos[0], pos[1])
-        # 보유 위젯과 동일한 투명도 / 클릭 통과 정책 적용
-        w.setWindowOpacity(self.popover_opacity)
-        if self._is_click_through_opacity(self.popover_opacity):
-            w.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-        if not self.is_hidden and self._is_watch_visible(item):
-            w.show()
-        self.watch_widgets[code] = w
-
-    def _on_watch_delete(self, code: str):
-        """관심 위젯 우클릭 삭제 — watchlist 에서 제거 + 저장 + 너비 재계산."""
-        self.watchlist = [w for w in self.watchlist if w["code"] != code]
-        self.watch_widgets.pop(code, None)
+    def _on_watch_group_pin_toggled(self, key: str, pinned: bool):
+        self.watch_group_state.setdefault(key, {})["pinned"] = bool(pinned)
         self._save_config()
-        self._apply_uniform_watch_width()
 
     def _compact_visible_widgets(self):
         if not self.widgets:
@@ -804,22 +850,23 @@ class WidgetManager:
         return opacity <= self.CLICK_THROUGH_OPACITY
 
     def _apply_opacity_to_all(self, opacity: float):
-        """마스터 + 모든 종목/관심 위젯에 동일 투명도 적용."""
+        """마스터 + 모든 종목/관심 그룹 위젯에 동일 투명도 적용."""
         if self.master_widget:
             self.master_widget.setWindowOpacity(opacity)
         for w in self.widgets.values():
             w.setWindowOpacity(opacity)
-        for w in self.watch_widgets.values():
+        for w in self.watch_groups.values():
             w.setWindowOpacity(opacity)
 
     def _apply_click_through(self, opacity: float):
         """종목 위젯 + 마스터 카드에 OS-레벨 click-through 토글.
         슬라이더는 별도 top-level 윈도우라 마스터가 통과 상태여도 그대로 조작 가능,
-        자물쇠 오버레이는 항상 WindowTransparentForInput 라 변동 없음."""
+        자물쇠 오버레이는 항상 WindowTransparentForInput 라 변동 없음.
+        관심 그룹 위젯은 클릭으로 펼쳐야 하므로 클릭 통과 대상에서 제외한다."""
         enabled = self._is_click_through_opacity(opacity)
         flag = Qt.WindowType.WindowTransparentForInput
 
-        targets = list(self.widgets.values()) + list(self.watch_widgets.values())
+        targets = list(self.widgets.values())
         if self.master_widget:
             targets.append(self.master_widget)
 
@@ -972,16 +1019,8 @@ class WidgetManager:
         d["name"] = result["name"]
         self.watchlist.append(d)
         self._save_config()
-        # 새 관심종목명이 더 길면 관심 위젯 너비 재조정 (새 위젯도 이 값으로 생성됨)
-        self._apply_uniform_watch_width()
-
-        # 새 위젯 위치: 현재 보이는 관심 위젯들 아래(좌상단 stack)
-        visible_count = sum(
-            1 for w in self.watchlist
-            if w["code"] != code and self._is_watch_visible(w)
-        )
-        nx, ny = self._default_watch_pos(visible_count)
-        self._spawn_watch_widget(d, nx, ny, stagger_idx=0)
+        # 태그 그룹 위젯 다시 구성 (새 종목이 속한 그룹에 반영)
+        self._rebuild_watch_groups()
 
         # 숨김 상태에서 추가한 경우 자동으로 표시 상태로 전환
         if self.is_hidden:
@@ -989,55 +1028,21 @@ class WidgetManager:
 
     # ── 관심종목 일괄 관리 ──────────────────────────────────────────────────
     def open_manage_watch_dialog(self):
-        """관심종목 일괄 관리 — 추가/삭제/표시 토글. old/new diff 로 위젯 추가·삭제."""
+        """관심종목 일괄 관리 — 추가/삭제/표시/태그. 변경 후 태그 그룹을 재구성."""
         dlg = ManageWatchlistDialog(
             watchlist=copy.deepcopy(self.watchlist),
             tags=copy.deepcopy(self.watch_tags),
         )
         if not dlg.exec():
             return
-        new_items = normalize_watchlist_schema(dlg.get_watchlist())
+        self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
         self.watch_tags = normalize_tags(dlg.get_tags())
-        prune_watch_tags(new_items, self.watch_tags)
-        old_map = {w["code"]: w for w in self.watchlist}
-        new_map = {w["code"]: w for w in new_items}
-
-        # 삭제된 관심종목: 위젯 닫고 제거
-        for code in list(old_map):
-            if code not in new_map:
-                w = self.watch_widgets.pop(code, None)
-                if w:
-                    w.close()
-
-        # 추가된 관심종목: 위젯 생성 (좌상단 stack)
-        base = sum(
-            1 for it in new_items
-            if it["code"] in old_map and self._is_watch_visible(it)
-        )
-        added_idx = 0
-        for item in new_items:
-            if item["code"] not in old_map:
-                nx, ny = self._default_watch_pos(base + added_idx)
-                self._spawn_watch_widget(item, nx, ny, stagger_idx=added_idx)
-                added_idx += 1
-
-        # 기존 관심종목: hidden(표시) 변경 반영
-        for item in new_items:
-            code = item["code"]
-            if code in old_map and code in self.watch_widgets:
-                w = self.watch_widgets[code]
-                w.data.update(item)
-                if self.is_hidden or not self._is_watch_visible(item):
-                    w.hide()
-                else:
-                    w.show()
-
-        self.watchlist = new_items
-        self._apply_uniform_watch_width()
+        prune_watch_tags(self.watchlist, self.watch_tags)
         self._save_config()
+        self._rebuild_watch_groups()
 
         # 숨김 상태에서 변경한 경우 자동으로 표시 상태로 전환
-        if self.is_hidden and self.watch_widgets:
+        if self.is_hidden and self.watch_groups:
             self.toggle_visibility()
 
     # ── 도움말 / 앱 정보 ──────────────────────────────────────────────────
