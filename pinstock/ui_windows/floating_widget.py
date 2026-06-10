@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QMenu, QApplication,
     QPushButton,
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPoint, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QCursor
 from datetime import datetime
 
@@ -614,6 +614,63 @@ class ElidedLabel(QLabel):
         self.setToolTip(self._full if elided != self._full else "")
 
 
+# ─── 일봉 차트 확대 팝업 (hover 시 표시, 네트워크 X) ──────────────────────────
+class ChartPopup(QWidget):
+    """압축 행의 일봉 차트에 마우스를 올리면 뜨는 확대 미리보기.
+
+    이미 읽어둔 캔들을 그대로 크게 다시 그릴 뿐 새 네트워크 호출은 하지 않는다.
+    입력 통과(WindowTransparentForInput) 윈도우라 hover 가 끊기지 않는다.
+    """
+
+    PAD = 6   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
+
+    def __init__(self, chart_w: int, chart_h: int, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        w = chart_w + 2 * self.PAD
+        h = chart_h + 2 * self.PAD
+        self.setFixedSize(w, h)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("popcard")
+        self.card.setGeometry(0, 0, w, h)
+        self.card.setStyleSheet(f"""
+            QFrame#popcard {{
+                background: {C['bg']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        self.chart = SparklineWidget(self.card, width=chart_w, height=chart_h)
+        self.chart.move(self.PAD, self.PAD)
+
+    def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize):
+        """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
+        self.chart.set_candles(candles)
+        self._position(anchor_tl, anchor_size)
+        self.show()
+        self.raise_()
+
+    def _position(self, anchor_tl: QPoint, anchor_size: QSize):
+        ax, ay = anchor_tl.x(), anchor_tl.y()
+        aw, ah = anchor_size.width(), anchor_size.height()
+        x = ax + aw // 2 - self.width() // 2          # 소스 차트 가로 중앙
+        y = ay - self.height() - 6                     # 기본: 차트 위쪽
+        screen = QApplication.screenAt(QPoint(ax, ay)) or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        if y < geo.y() + 4:                            # 위 공간이 없으면 아래로
+            y = ay + ah + 6
+        x = max(geo.x() + 4, min(x, geo.x() + geo.width() - self.width() - 4))
+        self.move(x, y)
+
+
 # ─── 관심종목 압축 행 (태그 그룹 안에 들어감) ─────────────────────────────────
 class CompactWatchRow(QWidget):
     """태그 그룹 위젯이 펼쳐질 때 아래로 나오는 초압축 관심종목 한 행.
@@ -627,13 +684,17 @@ class CompactWatchRow(QWidget):
     SPARK_H = 30
     POLL_MS = 60_000
     STAGGER_MS = 500
+    POPUP_SCALE = 2.5   # hover 시 확대 팝업 배율
 
     def __init__(self, item: dict, stagger_idx: int = 0, parent=None):
         super().__init__(parent)
         self.data = item
         self.current_price: float = 0.0
+        self._chart_popup: ChartPopup | None = None
         self.setFixedHeight(self.ROW_H)
         self._build_ui()
+        # 일봉 차트 위 hover → 확대 팝업 (이벤트 필터로 Enter/Leave 감지)
+        self.sparkline.installEventFilter(self)
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self._fetch)
         QTimer.singleShot(stagger_idx * self.STAGGER_MS, self._start)
@@ -644,6 +705,35 @@ class CompactWatchRow(QWidget):
 
     def stop(self):
         self.poll_timer.stop()
+        self._hide_chart_popup()
+
+    # ── 일봉 차트 hover 확대 팝업 (기존 캔들 재사용, 네트워크 X) ──────────────
+    def eventFilter(self, obj, event):
+        if obj is self.sparkline:
+            if event.type() == QEvent.Type.Enter:
+                self._show_chart_popup()
+            elif event.type() == QEvent.Type.Leave:
+                self._hide_chart_popup()
+        return super().eventFilter(obj, event)
+
+    def _show_chart_popup(self):
+        candles = getattr(self.sparkline, "candles", None)
+        # 일봉(캔들) 데이터가 이미 있을 때만 — 새 네트워크 호출은 하지 않는다
+        if not candles or self.sparkline.mode != "candle":
+            return
+        if self._chart_popup is None:
+            self._chart_popup = ChartPopup(
+                round(self.SPARK_W * self.POPUP_SCALE),
+                round(self.SPARK_H * self.POPUP_SCALE),
+                parent=self,
+            )
+        self._chart_popup.show_with(
+            candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size()
+        )
+
+    def _hide_chart_popup(self):
+        if self._chart_popup is not None:
+            self._chart_popup.hide()
 
     def _build_ui(self):
         hl = QHBoxLayout(self)
