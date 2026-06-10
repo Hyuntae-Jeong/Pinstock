@@ -117,7 +117,7 @@ class WidgetManager:
         self._load_config()
         self._setup_tray()
         self._spawn_all()
-        self._rebuild_watch_groups()
+        self._sync_watch_groups()
         self._sync_fx_timer()
 
         # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
@@ -396,7 +396,7 @@ class WidgetManager:
             else:
                 w.show()
         # 관심 그룹도 같은 시장 필터를 적용 — 멤버 구성이 바뀌므로 그룹을 다시 구성
-        self._rebuild_watch_groups()
+        self._sync_watch_groups()
         self._compact_visible_widgets()
         if self.master_widget:
             self.master_widget.set_market_filter(self.market_filter)
@@ -659,42 +659,72 @@ class WidgetManager:
                            "color": C["surface2"], "members": members[_UNTAGGED_KEY]})
         return groups
 
-    def _rebuild_watch_groups(self):
-        """관심 그룹 위젯을 전부 다시 만든다 (추가/관리/필터/로드 시 호출).
-        파괴 전 현재 위치/고정 상태를 보존하고, 재생성 시 그대로 복원한다."""
-        self._snapshot_watch_group_state()
-        for w in self.watch_groups.values():
-            w.close()
-            w.deleteLater()
-        self.watch_groups.clear()
+    def _spawn_watch_group(self, g: dict, idx: int, stagger_base: int) -> TagGroupWidget:
+        """그룹 위젯 하나를 생성·배치·표시한다 (저장된 위치/고정 복원)."""
+        key = g["key"]
+        st = self.watch_group_state.get(key, {})
+        w = TagGroupWidget(
+            key, g["title"], g["color"], g["members"],
+            width=self.uniform_watch_w,
+            pinned=bool(st.get("pinned", False)),
+            stagger_base=stagger_base,
+        )
+        w.pin_toggled.connect(self._on_watch_group_pin_toggled)
+        w.manage_requested.connect(self.open_manage_watch_dialog)
+        pos = st.get("pos")
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            w.move(int(pos[0]), int(pos[1]))
+        else:
+            nx, ny = self._default_watch_group_pos(idx)
+            w.move(nx, ny)
+        w.setWindowOpacity(self.popover_opacity)
+        # 보유 위젯과 동일 — 투명도 낮으면 생성 시점부터 클릭 통과로
+        if self._is_click_through_opacity(self.popover_opacity):
+            w.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        if not self.is_hidden and self.watch_visible:
+            w.show()
+        return w
 
+    @staticmethod
+    def _watch_group_members_match(widget: TagGroupWidget, g: dict) -> bool:
+        """그룹 위젯의 멤버 구성(코드/순서)이 목표와 동일한지. 색/이름은 보지 않는다."""
+        cur = [str(it.get("code")) for it in widget.items]
+        new = [str(it.get("code")) for it in g["members"]]
+        return cur == new
+
+    def _sync_watch_groups(self):
+        """변경된 태그 그룹만 손대고 나머지는 유지한다 (불필요한 재조회·깜빡임 방지).
+        - 멤버 구성이 바뀐 그룹: 재생성(재시작·재조회)
+        - 멤버는 그대로고 태그 색/이름만 바뀐 그룹: 헤더만 제자리 갱신(재조회 X)
+        - 완전히 동일한 그룹: 그대로 둠
+        추가/태그변경/필터/로드 모두 이 경로를 쓴다."""
+        self._snapshot_watch_group_state()
         self.uniform_watch_w = self._calc_uniform_watch_width()
+        desired = self._compute_watch_groups()
+        desired_keys = {g["key"] for g in desired}
+
+        # 더 이상 없는 그룹은 닫는다
+        for key in list(self.watch_groups):
+            if key not in desired_keys:
+                w = self.watch_groups.pop(key)
+                w.close()
+                w.deleteLater()
+
         stagger = 0
-        for idx, g in enumerate(self._compute_watch_groups()):
+        for idx, g in enumerate(desired):
             key = g["key"]
-            st = self.watch_group_state.get(key, {})
-            w = TagGroupWidget(
-                key, g["title"], g["color"], g["members"],
-                width=self.uniform_watch_w,
-                pinned=bool(st.get("pinned", False)),
-                stagger_base=stagger,
-            )
+            existing = self.watch_groups.get(key)
+            if existing is not None and self._watch_group_members_match(existing, g):
+                # 멤버 동일 → 색/이름만 달라졌으면 헤더만 갱신(재조회 없음)
+                if existing.title != g["title"] or existing.color != g["color"]:
+                    existing.set_appearance(g["title"], g["color"])
+                continue
+            # 멤버가 바뀜(또는 신규) → 그 그룹만 재생성
+            if existing is not None:
+                existing.close()
+                existing.deleteLater()
+            self.watch_groups[key] = self._spawn_watch_group(g, idx, stagger)
             stagger += len(g["members"])
-            w.pin_toggled.connect(self._on_watch_group_pin_toggled)
-            w.manage_requested.connect(self.open_manage_watch_dialog)
-            pos = st.get("pos")
-            if isinstance(pos, (list, tuple)) and len(pos) == 2:
-                w.move(int(pos[0]), int(pos[1]))
-            else:
-                nx, ny = self._default_watch_group_pos(idx)
-                w.move(nx, ny)
-            w.setWindowOpacity(self.popover_opacity)
-            # 보유 위젯과 동일 — 투명도 낮으면 생성 시점부터 클릭 통과로
-            if self._is_click_through_opacity(self.popover_opacity):
-                w.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-            if not self.is_hidden and self.watch_visible:
-                w.show()
-            self.watch_groups[key] = w
 
     def _on_watch_group_pin_toggled(self, key: str, pinned: bool):
         self.watch_group_state.setdefault(key, {})["pinned"] = bool(pinned)
@@ -1040,7 +1070,7 @@ class WidgetManager:
         self.watchlist.append(d)
         self._save_config()
         # 태그 그룹 위젯 다시 구성 (새 종목이 속한 그룹에 반영)
-        self._rebuild_watch_groups()
+        self._sync_watch_groups()
 
         # 관심종목이 꺼져 있었으면 새로 추가한 항목이 보이도록 자동으로 켠다
         if not self.watch_visible:
@@ -1062,7 +1092,7 @@ class WidgetManager:
         self.watch_tags = normalize_tags(dlg.get_tags())
         prune_watch_tags(self.watchlist, self.watch_tags)
         self._save_config()
-        self._rebuild_watch_groups()
+        self._sync_watch_groups()
 
         # 숨김 상태에서 변경한 경우 자동으로 표시 상태로 전환
         if self.is_hidden and self.watch_groups:

@@ -854,6 +854,11 @@ class _GroupHeader(QWidget):
     def set_count(self, n: int):
         self.count_lbl.setText(f"({n})")
 
+    def set_appearance(self, title: str, color: str):
+        """태그 이름/색만 제자리 갱신 (멤버 재조회 없이)."""
+        self.title_lbl.setTextFull(title)
+        self.dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
+
     def set_expanded(self, expanded: bool):
         self.chev.setText("▾" if expanded else "▸")
         self.pin_btn.setVisible(expanded)
@@ -921,6 +926,7 @@ class TagGroupWidget(QWidget):
                  width: int | None = None, pinned: bool = False, stagger_base: int = 0):
         super().__init__()
         self.group_key = group_key
+        self.title = title
         self.color = color
         self.items = items
         self.pinned = bool(pinned)
@@ -997,6 +1003,12 @@ class TagGroupWidget(QWidget):
             return
         self.W = new_w
         self._relayout()
+
+    def set_appearance(self, title: str, color: str):
+        """멤버는 그대로 둔 채 태그 이름/색만 갱신 — 재생성·재조회 없음."""
+        self.title = title
+        self.color = color
+        self.header.set_appearance(title, color)
 
     # ── 펼침 / 접힘 / 고정 ────────────────────────────────────────────────
     def toggle_expand(self):
