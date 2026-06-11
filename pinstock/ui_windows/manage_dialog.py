@@ -1400,10 +1400,12 @@ class ManageWatchlistDialog(QDialog):
     COLS = ["종목명", "종목코드", "시장", "태그", "표시"]
 
     def __init__(self, watchlist: list[dict], tags: list[dict] | None = None,
-                 ma_settings: dict | None = None, parent=None):
+                 ma_settings: dict | None = None, holdings: list[dict] | None = None,
+                 parent=None):
         super().__init__(parent)
         self._items: list[dict] = watchlist          # 호출측에서 deepcopy 해서 전달
         self._tags: list[dict] = tags or []          # 태그 레지스트리 (deepcopy)
+        self._holdings: list[dict] = holdings or []   # 보유 종목 (보유중 태그 동기화용, 읽기 전용)
         # 확대 일봉 팝업 이동평균선 표시 설정 (기본: 모두 켜짐)
         self._ma_settings = {"ma5": True, "ma20": True, "ma60": True}
         if isinstance(ma_settings, dict):
@@ -1474,6 +1476,13 @@ class ManageWatchlistDialog(QDialog):
         del_btn.clicked.connect(self._delete_selected)
         action_row.addWidget(del_btn)
         action_row.addStretch()
+        # 보유 종목을 '보유중' 태그로 한 번에 동기화 (보유 목록을 받은 경우에만 노출)
+        if self._holdings:
+            sync_btn = QPushButton("📥  보유종목 동기화")
+            sync_btn.setProperty("flat", "true")
+            sync_btn.setToolTip("현재 보유 중인 종목을 '보유중' 태그로 관심종목에 추가/정리합니다.")
+            sync_btn.clicked.connect(self._sync_holdings)
+            action_row.addWidget(sync_btn)
         tag_btn = QPushButton("🏷  태그 관리")
         tag_btn.setProperty("flat", "true")
         tag_btn.clicked.connect(self._open_tag_manager)
@@ -1591,6 +1600,75 @@ class ManageWatchlistDialog(QDialog):
         # 삭제된 태그를 참조하던 항목은 태그 해제 후 표를 다시 그려 콤보를 갱신
         prune_watch_tags(self._items, self._tags)
         self._rebuild_table()
+
+    # ── 보유 종목 → '보유중' 태그 동기화 ──────────────────────────────────
+    HOLDING_TAG_NAME = "보유중"
+    HOLDING_TAG_COLOR = "#a6e3a1"   # 초록 — 보유 종목 묶음 표시용
+
+    def _ensure_holding_tag(self) -> str:
+        """'보유중' 태그를 확보해 id 를 돌려준다 — 같은 이름 있으면 재사용, 없으면 생성.
+        실제로 붙일 종목이 생긴 시점에만 호출해 빈 태그가 만들어지지 않게 한다."""
+        tag = next((t for t in self._tags if t.get("name") == self.HOLDING_TAG_NAME), None)
+        if tag is None:
+            tag = {"id": new_tag_id(), "name": self.HOLDING_TAG_NAME, "color": self.HOLDING_TAG_COLOR}
+            self._tags.append(tag)
+        return tag["id"]
+
+    def _sync_holdings(self):
+        """보유 종목 중 '태그가 없는 것'만 '보유중' 태그로 채운다(비파괴, 옮기지 않음).
+        - 관심종목에 없는 보유 종목: '보유중' 태그로 추가
+        - 이미 있지만 태그가 없는 보유 종목: '보유중' 태그 지정
+        - 이미 다른 태그가 있는 종목: 그대로 둠(옮기지 않음)
+        보유에서 빠진 종목을 관심에서 지우진 않는다(수동 정리)."""
+        if not self._holdings:
+            QMessageBox.information(self, "보유종목 동기화", "보유 중인 종목이 없습니다.")
+            return
+
+        ret = QMessageBox.question(
+            self, "보유종목 동기화",
+            f"보유 종목 중 태그가 없는 종목을 '{self.HOLDING_TAG_NAME}' 태그로 추가합니다.\n\n"
+            f"· 관심종목에 없으면 추가\n"
+            f"· 이미 있고 태그가 없으면 '{self.HOLDING_TAG_NAME}' 지정\n"
+            f"· 이미 다른 태그가 있으면 그대로 둠\n\n진행할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        by_code = {str(w.get("code") or "").upper(): w for w in self._items}
+        tag_id = ""
+        added = tagged = 0
+        for s in self._holdings:
+            code = str(s.get("code") or "").strip().upper()
+            if not code:
+                continue
+            existing = by_code.get(code)
+            # 이미 있고 태그가 붙어 있으면 옮기지 않는다
+            if existing is not None and existing.get("tag"):
+                continue
+            if not tag_id:                       # 붙일 게 생긴 순간에만 태그 확보
+                tag_id = self._ensure_holding_tag()
+            if existing is None:
+                market = str(s.get("market") or MARKET_KR).upper()
+                self._items.append({
+                    "code":     code,
+                    "name":     s.get("name", code),
+                    "market":   market,
+                    "currency": CURRENCY_USD if is_us_stock(s) else CURRENCY_KRW,
+                    "type":     "stock",
+                    "tag":      tag_id,
+                })
+                added += 1
+            else:                                # 있지만 태그가 비어 있던 경우
+                existing["tag"] = tag_id
+                tagged += 1
+
+        self._rebuild_table()
+        QMessageBox.information(
+            self, "보유종목 동기화",
+            f"'{self.HOLDING_TAG_NAME}' 태그로 추가했습니다.\n신규 추가 {added}개 · 태그 지정 {tagged}개",
+        )
 
     def _add(self):
         dlg = StockDialog(watch_mode=True, parent=self, tags=self._tags)

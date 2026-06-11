@@ -1096,6 +1096,7 @@ class WidgetManager:
             watchlist=copy.deepcopy(self.watchlist),
             tags=copy.deepcopy(self.watch_tags),
             ma_settings=dict(self.watch_ma),
+            holdings=copy.deepcopy(self.stocks),
         )
         if not dlg.exec():
             return
