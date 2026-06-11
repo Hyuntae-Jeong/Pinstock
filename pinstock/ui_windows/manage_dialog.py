@@ -1507,10 +1507,15 @@ class ManageWatchlistDialog(QDialog):
 
         # '선택' 헤더 칸에 올려두는 전체 선택 체크박스 (밑의 버튼 대신 헤더에서 토글).
         # 헤더는 위젯 배치를 직접 지원하지 않아 오버레이로 얹고 위치를 따라 맞춘다.
-        self._header_check = QCheckBox(hdr)
+        self._header_check = QCheckBox()
         self._header_check.setToolTip("전체 선택 / 해제")
         self._header_check.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
         self._header_check.toggled.connect(self._toggle_all_checks)
+        # 행 체크박스(_centered)와 똑같은 stretch-가운데 레이아웃으로 감싸 셀 체크박스와
+        # 좌우 정렬을 정확히 맞춘다. (move+sizeHint 픽셀 계산은 macOS 네이티브 체크박스
+        # 메트릭과 어긋나 헤더 체크박스만 살짝 삐뚤어 보였다.)
+        self._header_check_holder = self._centered(self._header_check)
+        self._header_check_holder.setParent(hdr)
         hdr.sectionResized.connect(lambda *a: self._reposition_header_check())
         hdr.geometriesChanged.connect(self._reposition_header_check)
 
@@ -1629,16 +1634,17 @@ class ManageWatchlistDialog(QDialog):
             self.table.selectRow(self._row_item_indexes.index(select_row))
 
     def _reposition_header_check(self):
-        """헤더 0번 칸 중앙에 전체 선택 체크박스를 맞춰 놓는다."""
-        cb = getattr(self, "_header_check", None)
-        if cb is None:
+        """전체 선택 체크박스 오버레이를 헤더 0번 칸과 같은 영역에 맞춘다.
+        오버레이 내부 _centered 레이아웃이 체크박스를 가운데로 둬 행 체크박스와
+        좌우가 정확히 정렬된다 (sizeHint 의존 픽셀 계산을 쓰지 않는다)."""
+        holder = getattr(self, "_header_check_holder", None)
+        if holder is None:
             return
         hdr = self.table.horizontalHeader()
         x = hdr.sectionViewportPosition(0)
         w = hdr.sectionSize(0)
-        sz = cb.sizeHint()
-        cb.move(x + max(0, (w - sz.width()) // 2), max(0, (hdr.height() - sz.height()) // 2))
-        cb.show()
+        holder.setGeometry(x, 0, w, hdr.height())
+        holder.show()
 
     def showEvent(self, event):
         super().showEvent(event)
