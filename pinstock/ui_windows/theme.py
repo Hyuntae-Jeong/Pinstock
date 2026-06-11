@@ -111,8 +111,7 @@ QComboBox::drop-down {{
 QComboBox QAbstractItemView {{
     background: {C['bg']};
     color: {C['text']};
-    border: 1px solid {C['surface2']};
-    border-radius: 6px;
+    border: none;
     padding: 4px;
     outline: 0;
     selection-background-color: {C['surface']};
