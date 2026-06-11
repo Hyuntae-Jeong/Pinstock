@@ -1436,6 +1436,7 @@ class ManageWatchlistDialog(QDialog):
     """
 
     COLS = ["선택", "종목명", "종목코드", "시장", "태그", "표시"]
+    FILTER_ALL = "__ALL__"   # 태그 필터 '전체' 센티넬 (빈 문자열 ''은 '태그 없음'을 뜻함)
 
     def __init__(self, watchlist: list[dict], tags: list[dict] | None = None,
                  ma_settings: dict | None = None, holdings: list[dict] | None = None,
@@ -1445,6 +1446,8 @@ class ManageWatchlistDialog(QDialog):
         self._tags: list[dict] = tags or []          # 태그 레지스트리 (deepcopy)
         self._holdings: list[dict] = holdings or []   # 보유 종목 (보유중 태그 동기화용, 읽기 전용)
         self._check_boxes: list = []                  # 행별 선택 체크박스 (여러 개 한 번에 삭제용)
+        self._tag_filter: str = self.FILTER_ALL       # 태그 필터 ("__ALL__"=전체, ""=태그없음, 그 외=tag id)
+        self._row_item_indexes: list[int] = []        # 표의 행 → self._items 인덱스 매핑(필터 때문에 불일치)
         # 확대 일봉 팝업 이동평균선 표시 설정 (기본: 모두 켜짐)
         self._ma_settings = {"ma5": True, "ma20": True, "ma60": True}
         if isinstance(ma_settings, dict):
@@ -1461,6 +1464,20 @@ class ManageWatchlistDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
+
+        # ── 태그 필터 (전체 / 태그 없음 / 각 태그) ─────────────────────────
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        filter_lbl = QLabel("태그 필터")
+        filter_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        filter_row.addWidget(filter_lbl)
+        self.filter_combo = _NoScrollComboBox()
+        self.filter_combo.setMinimumWidth(170)
+        self.filter_combo.setIconSize(QSize(12, 12))
+        self.filter_combo.activated.connect(self._on_filter_changed)
+        filter_row.addWidget(self.filter_combo)
+        filter_row.addStretch()
+        root.addLayout(filter_row)
 
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
@@ -1552,21 +1569,62 @@ class ManageWatchlistDialog(QDialog):
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
 
+        self._populate_filter_combo()
         self._rebuild_table()
 
+    # ── 태그 필터 ─────────────────────────────────────────────────────────
+    def _populate_filter_combo(self):
+        """필터 콤보를 (전체 / 태그 없음 / 각 태그)로 다시 채운다.
+        현재 필터가 삭제된 태그를 가리키면 '전체'로 되돌린다."""
+        combo = self.filter_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("전체", self.FILTER_ALL)
+        combo.addItem("— 태그 없음 —", "")
+        for tag in self._tags:
+            combo.addItem(
+                _color_icon(tag.get("color", DEFAULT_TAG_COLOR)), tag.get("name", ""), tag["id"]
+            )
+        valid = {self.FILTER_ALL, ""} | {t["id"] for t in self._tags}
+        if self._tag_filter not in valid:
+            self._tag_filter = self.FILTER_ALL
+        idx = combo.findData(self._tag_filter)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _on_filter_changed(self, _idx: int):
+        self._tag_filter = self.filter_combo.currentData()
+        self._rebuild_table()
+
+    def _matches_tag_filter(self, item: dict) -> bool:
+        if self._tag_filter == self.FILTER_ALL:
+            return True
+        return str(item.get("tag") or "") == self._tag_filter
+
+    def _item_index_for_row(self, row: int) -> int | None:
+        if 0 <= row < len(self._row_item_indexes):
+            return self._row_item_indexes[row]
+        return None
+
     def _rebuild_table(self, select_row: int | None = None):
+        """select_row 는 self._items 인덱스. 현재 필터에 보이면 그 행을 선택한다."""
         self._check_boxes = []
+        self._row_item_indexes = []
         self.table.setRowCount(0)
-        for i, item in enumerate(self._items):
-            self.table.insertRow(i)
-            self._fill_row(i, item)
+        for item_idx, item in enumerate(self._items):
+            if not self._matches_tag_filter(item):
+                continue
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self._row_item_indexes.append(item_idx)
+            self._fill_row(row, item, item_idx)
         # 표를 다시 그리면 모든 체크가 풀리므로 '전체 선택'도 초기화(신호 차단)
         if getattr(self, "_select_all", None) is not None:
             self._select_all.blockSignals(True)
             self._select_all.setChecked(False)
             self._select_all.blockSignals(False)
-        if select_row is not None and 0 <= select_row < self.table.rowCount():
-            self.table.selectRow(select_row)
+        if select_row is not None and select_row in self._row_item_indexes:
+            self.table.selectRow(self._row_item_indexes.index(select_row))
 
     @staticmethod
     def _centered(widget: QWidget) -> QWidget:
@@ -1579,7 +1637,7 @@ class ManageWatchlistDialog(QDialog):
         hl.addStretch()
         return box
 
-    def _fill_row(self, row: int, item: dict):
+    def _fill_row(self, row: int, item: dict, item_idx: int):
         # 0번: 선택 체크박스 (여러 개 골라 한 번에 삭제)
         check = QCheckBox()
         check.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
@@ -1603,17 +1661,18 @@ class ManageWatchlistDialog(QDialog):
             self.table.setItem(row, col, cell)
 
         # 태그 콤보박스 (col 4) — — 없음 — + 등록된 태그들, 종목당 1개.
+        # 필터 때문에 행 인덱스 != 항목 인덱스 → 콜백엔 항목 인덱스(item_idx)를 넘긴다.
         combo = self._make_tag_combo(item.get("tag", ""))
-        combo.activated.connect(lambda _, idx=row, c=combo: self._on_tag_changed(idx, c))
+        combo.activated.connect(lambda _, idx=item_idx, c=combo: self._on_tag_changed(idx, c))
         placeholder_tag = QTableWidgetItem("")
         placeholder_tag.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self.table.setItem(row, 4, placeholder_tag)
         self.table.setCellWidget(row, 4, combo)
 
-        # 표시 토글 스위치 (col 5, ON=표시 OFF=숨김) — 행 인덱스 == 항목 인덱스(필터 없음)
+        # 표시 토글 스위치 (col 5, ON=표시 OFF=숨김)
         hidden = bool(item.get("hidden", False))
         toggle = ToggleSwitch(checked=not hidden)
-        toggle.toggled.connect(lambda checked, idx=row: self._on_visibility_toggled(idx, checked))
+        toggle.toggled.connect(lambda checked, idx=item_idx: self._on_visibility_toggled(idx, checked))
         placeholder = QTableWidgetItem("")
         placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self.table.setItem(row, 5, placeholder)
@@ -1658,13 +1717,16 @@ class ManageWatchlistDialog(QDialog):
         """)
         return combo
 
-    def _on_tag_changed(self, row: int, combo: QComboBox):
-        if 0 <= row < len(self._items):
-            self._items[row]["tag"] = combo.currentData() or ""
+    def _on_tag_changed(self, item_idx: int, combo: QComboBox):
+        if 0 <= item_idx < len(self._items):
+            self._items[item_idx]["tag"] = combo.currentData() or ""
+            # 특정 태그로 필터 중인데 더 이상 그 태그가 아니면 목록에서 빠지도록 다시 그림
+            if self._tag_filter != self.FILTER_ALL and not self._matches_tag_filter(self._items[item_idx]):
+                self._rebuild_table()
 
-    def _on_visibility_toggled(self, row: int, checked: bool):
-        if 0 <= row < len(self._items):
-            self._items[row]["hidden"] = not checked
+    def _on_visibility_toggled(self, item_idx: int, checked: bool):
+        if 0 <= item_idx < len(self._items):
+            self._items[item_idx]["hidden"] = not checked
 
     def _open_tag_manager(self):
         dlg = TagManagerDialog(
@@ -1679,6 +1741,8 @@ class ManageWatchlistDialog(QDialog):
         self._items = dlg.get_watchlist()
         # 혹시 남은 dangling 태그 참조는 비워 표시(콤보)를 안전하게 갱신 (안전망)
         prune_watch_tags(self._items, self._tags)
+        # 태그가 추가/삭제됐을 수 있으니 필터 콤보도 다시 채운다(없어진 태그면 전체로)
+        self._populate_filter_combo()
         self._rebuild_table()
 
     # ── 보유 종목 → '보유중' 태그 동기화 ──────────────────────────────────
@@ -1744,6 +1808,9 @@ class ManageWatchlistDialog(QDialog):
                 existing["tag"] = tag_id
                 tagged += 1
 
+        # 동기화 결과(신규/지정)가 가려지지 않도록 '전체'로 보여주고 필터 콤보 갱신
+        self._tag_filter = self.FILTER_ALL
+        self._populate_filter_combo()
         self._rebuild_table()
         QMessageBox.information(
             self, "보유종목 동기화",
@@ -1770,6 +1837,9 @@ class ManageWatchlistDialog(QDialog):
             return
         d["name"] = result["name"]
         self._items.append(d)
+        # 새 항목이 현재 태그 필터에 가려지지 않도록 '전체'로 보여준다
+        self._tag_filter = self.FILTER_ALL
+        self._populate_filter_combo()
         self._rebuild_table(select_row=len(self._items) - 1)
 
     def _toggle_all_checks(self, checked: bool):
@@ -1777,12 +1847,18 @@ class ManageWatchlistDialog(QDialog):
             cb.setChecked(checked)
 
     def _delete_selected(self):
-        # 체크된 항목들을 우선 대상으로, 없으면 현재 선택된 행 1개를 대상으로 한다.
-        targets = [i for i, cb in enumerate(self._check_boxes) if cb.isChecked()]
+        # 체크된 행 → 항목 인덱스. 없으면 현재 선택된 행 1개를 대상으로 한다(필터로 행≠항목).
+        targets = []
+        for row, cb in enumerate(self._check_boxes):
+            if cb.isChecked():
+                idx = self._item_index_for_row(row)
+                if idx is not None:
+                    targets.append(idx)
         if not targets:
-            row = self.table.currentRow()
-            if 0 <= row < len(self._items):
-                targets = [row]
+            idx = self._item_index_for_row(self.table.currentRow())
+            if idx is not None:
+                targets = [idx]
+        targets = sorted(set(targets))
         if not targets:
             QMessageBox.information(self, "삭제", "삭제할 항목을 체크하거나 선택하세요.")
             return
@@ -1803,8 +1879,7 @@ class ManageWatchlistDialog(QDialog):
         for i in sorted(targets, reverse=True):   # 뒤에서부터 지워 인덱스 밀림 방지
             if 0 <= i < len(self._items):
                 self._items.pop(i)
-        next_sel = min(targets[0], len(self._items) - 1) if self._items else None
-        self._rebuild_table(select_row=next_sel)
+        self._rebuild_table()
 
     def get_watchlist(self) -> list[dict]:
         return self._items
