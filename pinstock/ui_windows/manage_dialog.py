@@ -1258,9 +1258,11 @@ class TagManagerDialog(QDialog):
 
     COLS = ["색상", "태그명"]
 
-    def __init__(self, tags: list[dict], parent=None):
+    def __init__(self, tags: list[dict], watchlist: list[dict] | None = None, parent=None):
         super().__init__(parent)
         self._tags: list[dict] = tags   # 호출측에서 deepcopy 해서 전달
+        # 태그 삭제 시 '종목도 삭제' vs '태그만 해제'를 적용할 대상(딥카피 — 취소 시 원복).
+        self._watchlist: list[dict] = watchlist if watchlist is not None else []
 
         self.setWindowTitle("태그 관리")
         self.setMinimumSize(360, 380)
@@ -1371,21 +1373,57 @@ class TagManagerDialog(QDialog):
         row = self.table.currentRow()
         if not (0 <= row < len(self._tags)):
             return
-        name = self._tags[row].get("name", "")
-        ret = QMessageBox.question(
-            self, "삭제 확인",
-            f"태그 '{name}' 을(를) 삭제할까요?\n이 태그가 부여된 관심종목에서도 해제됩니다.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
-            return
+        tag = self._tags[row]
+        tag_id = str(tag.get("id") or "")
+        name = tag.get("name", "")
+        members = [w for w in self._watchlist if str(w.get("tag") or "") == tag_id]
+        cnt = len(members)
+
+        if cnt == 0:
+            # 부여된 관심종목이 없으면 단순 확인만
+            ret = QMessageBox.question(
+                self, "태그 삭제",
+                f"태그 '{name}' 을(를) 삭제할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            # 부여된 관심종목 처리 방식을 묻는다: 종목도 삭제 / 태그만 해제 / 취소
+            box = QMessageBox(self)
+            box.setWindowTitle("태그 삭제")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(f"태그 '{name}' 을(를) 삭제합니다.")
+            box.setInformativeText(f"이 태그가 부여된 관심종목 {cnt}개를 어떻게 할까요?")
+            del_btn = box.addButton("관심종목도 삭제", QMessageBox.ButtonRole.DestructiveRole)
+            untag_btn = box.addButton("태그만 해제 (종목 유지)", QMessageBox.ButtonRole.AcceptRole)
+            cancel_btn = box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(untag_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn or clicked is None:
+                return
+            if clicked is del_btn:
+                # 태그가 부여된 관심종목까지 함께 삭제
+                self._watchlist[:] = [
+                    w for w in self._watchlist if str(w.get("tag") or "") != tag_id
+                ]
+            else:
+                # 종목은 유지하고 태그만 해제 ('태그 없음')
+                for w in members:
+                    w["tag"] = ""
+
         self._tags.pop(row)
         next_sel = min(row, len(self._tags) - 1) if self._tags else None
         self._rebuild_table(select_row=next_sel)
 
     def get_tags(self) -> list[dict]:
         return normalize_tags(self._tags)
+
+    def get_watchlist(self) -> list[dict]:
+        """태그 삭제 시 선택(종목 삭제/태그 해제)이 반영된 관심종목 목록."""
+        return self._watchlist
 
 
 # ─── 관심종목 관리 다이얼로그 ─────────────────────────────────────────────────
@@ -1593,11 +1631,17 @@ class ManageWatchlistDialog(QDialog):
             self._items[row]["hidden"] = not checked
 
     def _open_tag_manager(self):
-        dlg = TagManagerDialog(tags=copy.deepcopy(self._tags), parent=self)
+        dlg = TagManagerDialog(
+            tags=copy.deepcopy(self._tags),
+            watchlist=copy.deepcopy(self._items),
+            parent=self,
+        )
         if not dlg.exec():
             return
         self._tags = dlg.get_tags()
-        # 삭제된 태그를 참조하던 항목은 태그 해제 후 표를 다시 그려 콤보를 갱신
+        # 태그 삭제 시 고른 처리(종목 삭제 / 태그만 해제)가 반영된 목록을 받는다
+        self._items = dlg.get_watchlist()
+        # 혹시 남은 dangling 태그 참조는 비워 표시(콤보)를 안전하게 갱신 (안전망)
         prune_watch_tags(self._items, self._tags)
         self._rebuild_table()
 
