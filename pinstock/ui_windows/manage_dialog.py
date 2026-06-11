@@ -1435,7 +1435,8 @@ class ManageWatchlistDialog(QDialog):
     '태그 관리' 버튼으로 태그 자체(이름·색상)를 추가/수정/삭제한다.
     """
 
-    COLS = ["선택", "종목명", "종목코드", "시장", "태그", "표시"]
+    # 0번 칸 헤더는 비워두고(라벨 ""), 그 자리에 '전체 선택' 체크박스를 올린다.
+    COLS = ["", "종목명", "종목코드", "시장", "태그", "표시"]
     FILTER_ALL = "__ALL__"   # 태그 필터 '전체' 센티넬 (빈 문자열 ''은 '태그 없음'을 뜻함)
 
     def __init__(self, watchlist: list[dict], tags: list[dict] | None = None,
@@ -1504,6 +1505,15 @@ class ManageWatchlistDialog(QDialog):
         hdr.setSectionsClickable(False)
         root.addWidget(self.table, 1)
 
+        # '선택' 헤더 칸에 올려두는 전체 선택 체크박스 (밑의 버튼 대신 헤더에서 토글).
+        # 헤더는 위젯 배치를 직접 지원하지 않아 오버레이로 얹고 위치를 따라 맞춘다.
+        self._header_check = QCheckBox(hdr)
+        self._header_check.setToolTip("전체 선택 / 해제")
+        self._header_check.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
+        self._header_check.toggled.connect(self._toggle_all_checks)
+        hdr.sectionResized.connect(lambda *a: self._reposition_header_check())
+        hdr.geometriesChanged.connect(self._reposition_header_check)
+
         # ── 확대 일봉 팝업 이동평균선 표시 토글 (5·20·60일) ─────────────────
         # 관심종목 위에 마우스를 올리면 뜨는 확대 차트에 그릴 이동평균선을 고른다.
         ma_row = QHBoxLayout()
@@ -1525,17 +1535,9 @@ class ManageWatchlistDialog(QDialog):
         ma_row.addStretch()
         root.addLayout(ma_row)
 
-        # ── 행 액션 (전체선택 / 추가 / 삭제 / 태그 관리) ──────────────────────
+        # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
-        self._select_all = QCheckBox("전체 선택")
-        self._select_all.setStyleSheet(
-            f"QCheckBox {{ color: {C['subtext']}; font-size: 12px; spacing: 6px; }}"
-            f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
-        )
-        self._select_all.toggled.connect(self._toggle_all_checks)
-        action_row.addWidget(self._select_all)
-        action_row.addSpacing(8)
         add_btn = QPushButton("➕  추가")
         add_btn.clicked.connect(self._add)
         action_row.addWidget(add_btn)
@@ -1618,13 +1620,29 @@ class ManageWatchlistDialog(QDialog):
             self.table.insertRow(row)
             self._row_item_indexes.append(item_idx)
             self._fill_row(row, item, item_idx)
-        # 표를 다시 그리면 모든 체크가 풀리므로 '전체 선택'도 초기화(신호 차단)
-        if getattr(self, "_select_all", None) is not None:
-            self._select_all.blockSignals(True)
-            self._select_all.setChecked(False)
-            self._select_all.blockSignals(False)
+        # 표를 다시 그리면 모든 체크가 풀리므로 헤더 '전체 선택'도 초기화(신호 차단)
+        if getattr(self, "_header_check", None) is not None:
+            self._header_check.blockSignals(True)
+            self._header_check.setChecked(False)
+            self._header_check.blockSignals(False)
         if select_row is not None and select_row in self._row_item_indexes:
             self.table.selectRow(self._row_item_indexes.index(select_row))
+
+    def _reposition_header_check(self):
+        """헤더 0번 칸 중앙에 전체 선택 체크박스를 맞춰 놓는다."""
+        cb = getattr(self, "_header_check", None)
+        if cb is None:
+            return
+        hdr = self.table.horizontalHeader()
+        x = hdr.sectionViewportPosition(0)
+        w = hdr.sectionSize(0)
+        sz = cb.sizeHint()
+        cb.move(x + max(0, (w - sz.width()) // 2), max(0, (hdr.height() - sz.height()) // 2))
+        cb.show()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reposition_header_check()
 
     @staticmethod
     def _centered(widget: QWidget) -> QWidget:
