@@ -276,7 +276,7 @@ class StockDialog(QDialog):
         # 관심종목 모드: 태그 선택 — 추가/수정 시 바로 태그를 지정한다.
         if self.watch_mode:
             self.tag_combo = _NoScrollComboBox()
-            self.tag_combo.addItem("— 없음 —", "")
+            self.tag_combo.addItem("없음", "")
             cur_tag = str((data or {}).get("tag") or "")
             sel = 0
             for i, t in enumerate(self._tags, start=1):
@@ -1706,7 +1706,7 @@ class ManageWatchlistDialog(QDialog):
         """태그 선택 콤보. 첫 항목은 '없음'(빈 id), 이어서 색 아이콘+이름.
         닫힌 상태에서 휠로 값이 안 바뀌도록 _NoScrollComboBox 사용."""
         combo = _NoScrollComboBox()
-        combo.addItem("— 없음 —", "")
+        combo.addItem("없음", "")
         select_idx = 0
         for i, tag in enumerate(self._tags, start=1):
             combo.addItem(_color_icon(tag.get("color", DEFAULT_TAG_COLOR)), tag.get("name", ""), tag["id"])
