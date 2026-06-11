@@ -10,11 +10,11 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QMenu, QSlider, QApplication,
 )
-from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QTimer, QEvent, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QScreen
 
 from ..ui_windows.theme import C, TRAY_MENU_STYLE
-from ..ui_windows.chart_widget import SparklineWidget
+from ..ui_windows.chart_widget import SparklineWidget, ChartPopup
 from ..core.portfolio import is_us_stock, is_index, stock_metrics
 
 
@@ -573,14 +573,59 @@ class WatchRow(QWidget):
     """
 
     COMPACT_H = 52
+    POPUP_SCALE = 6.0            # hover 확대 팝업 배율 (sparkline 크기 기준)
+    POPUP_DISPLAY_CANDLES = 63   # 확대 팝업에 표시할 일봉 수 (약 3개월)
+    MINI_CANDLES = 30            # 행에 박힌 미니 차트에 표시할 일봉 수
 
-    def __init__(self, watch_data: dict, parent=None):
+    def __init__(self, watch_data: dict, parent=None, ma_settings: dict | None = None):
         super().__init__(parent)
         self.data = watch_data
         self.current_price: float = 0
         self._prev_close: float = 0.0
+        self._chart_popup: ChartPopup | None = None
+        # 확대 팝업 이동평균선 표시 설정 — 매니저가 넘긴 공유 dict 참조(제자리 갱신).
+        self._ma_settings = ma_settings if ma_settings is not None else {
+            "ma5": True, "ma20": True, "ma60": True,
+        }
         self.setFixedHeight(self.COMPACT_H)
         self._build_ui()
+        # 일봉 차트 위 hover → 확대 팝업 (이벤트 필터로 Enter/Leave 감지)
+        self.sparkline.installEventFilter(self)
+
+    # ── 일봉 차트 hover 확대 팝업 (기존 캔들 재사용, 네트워크 X) ──────────────
+    def eventFilter(self, obj, event):
+        if obj is self.sparkline:
+            if event.type() == QEvent.Type.Enter:
+                self._show_chart_popup()
+            elif event.type() == QEvent.Type.Leave:
+                self._hide_chart_popup()
+        return super().eventFilter(obj, event)
+
+    def _active_ma_periods(self) -> tuple:
+        """관리창 체크 상태에 따라 표시할 이동평균 기간들 (예: (5, 20, 60))."""
+        s = self._ma_settings or {}
+        return tuple(p for p, key in ((5, "ma5"), (20, "ma20"), (60, "ma60")) if s.get(key, True))
+
+    def _show_chart_popup(self):
+        # 미니 차트가 보유한 전체 일봉 이력을 재사용 — 새 네트워크 호출은 하지 않는다
+        candles = getattr(self.sparkline, "candles", None)
+        if not candles or self.sparkline.mode != "candle":
+            return
+        if self._chart_popup is None:
+            self._chart_popup = ChartPopup(
+                round(self.sparkline.width() * self.POPUP_SCALE),
+                round(self.sparkline.height() * self.POPUP_SCALE),
+                parent=self,
+            )
+        self._chart_popup.show_with(
+            candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size(),
+            ma_periods=self._active_ma_periods(),
+            display_count=self.POPUP_DISPLAY_CANDLES,
+        )
+
+    def _hide_chart_popup(self):
+        if self._chart_popup is not None:
+            self._chart_popup.hide()
 
     def _build_ui(self):
         self.setStyleSheet(f"""
@@ -637,7 +682,56 @@ class WatchRow(QWidget):
         self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
 
     def apply_daily(self, candles: list):
-        self.sparkline.set_candles(candles)
+        self.sparkline.set_candles(candles, display_count=self.MINI_CANDLES)
+
+
+# ─── 관심 뷰 태그 그룹 헤더 (클릭하면 펼침/접힘) ──────────────────────────────
+_WATCH_UNTAGGED_KEY = "__untagged__"
+
+
+class _WatchTagHeader(QWidget):
+    """관심 뷰의 태그 그룹 헤더 — 색 점 + 태그명 + 개수 + 펼침 표시(▸/▾).
+    행 전체를 클릭하면 해당 그룹의 관심종목이 아래로 펼쳐지거나 접힌다."""
+
+    HEIGHT = 30
+    clicked = pyqtSignal()
+
+    def __init__(self, title: str, color: str, count: int, expanded: bool, parent=None):
+        super().__init__(parent)
+        self.setObjectName("watchTagHeader")
+        self.setFixedHeight(self.HEIGHT)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(f"""
+            QWidget#watchTagHeader {{ background: {C['surface']}; }}
+            QWidget#watchTagHeader:hover {{ background: {C['surface2']}; }}
+        """)
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(14, 0, 12, 0)
+        hl.setSpacing(8)
+
+        dot = QLabel()
+        dot.setFixedSize(9, 9)
+        dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
+        hl.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        name_lbl = QLabel(title)
+        name_lbl.setFont(QFont(_FONT_FAMILY, 11, QFont.Weight.Bold))
+        name_lbl.setStyleSheet(f"color: {C['text']};")
+        hl.addWidget(name_lbl)
+
+        count_lbl = QLabel(f"({count})")
+        count_lbl.setFont(QFont(_NUMBER_FONT_FAMILY, 10))
+        count_lbl.setStyleSheet(f"color: {C['subtext']};")
+        hl.addWidget(count_lbl)
+        hl.addStretch()
+
+        self.chev = QLabel("▾" if expanded else "▸")
+        self.chev.setStyleSheet(f"color: {C['subtext']}; font-size: 11px;")
+        hl.addWidget(self.chev, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
 
 
 # ─── 팝오버 메인 ─────────────────────────────────────────────────────────────
@@ -687,8 +781,13 @@ class Popover(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.rows: dict[str, StockRow] = {}
         self.watch_rows: dict[str, WatchRow] = {}
+        self.watch_headers: dict[str, _WatchTagHeader] = {}   # 태그 그룹 헤더
         self._stocks: list[dict] = []        # 보유 캐시 (뷰 전환 시 재구성용)
         self._watchlist: list[dict] = []     # 관심 캐시
+        self._watch_tags: list[dict] = []    # 관심 태그 레지스트리 (그룹 헤더용)
+        # 확대 팝업 이동평균선 설정 — 매니저 watch_ma 공유 dict 참조 (set_watch_ma 로 주입)
+        self._watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
+        self._watch_expanded: dict[str, bool] = {}   # 태그 그룹 key → 펼침 여부
         self._view: str = "holdings"         # "holdings" | "watch"
         self._price_cache: dict[str, dict] = {}    # code → 마지막 apply_price 결과
         self._minute_cache: dict[str, tuple] = {}  # code → (prices, open_price)
@@ -987,12 +1086,53 @@ class Popover(QWidget):
         if self._view == "watch":
             self._render()
 
+    def set_watch_tags(self, tags: list[dict]):
+        """관심 태그 레지스트리 갱신 (그룹 헤더 구성용). 관심 뷰일 때 즉시 재구성."""
+        self._watch_tags = tags
+        if self._view == "watch":
+            self._render()
+
+    def set_watch_ma(self, ma: dict):
+        """확대 일봉 팝업 이동평균선 표시 설정 — 매니저의 공유 dict 참조를 보관.
+        (dict 를 제자리 갱신하면 다음 hover 부터 새 설정이 반영된다.)"""
+        self._watch_ma = ma
+
+    def _compute_watch_groups(self, visible_items: list[dict]) -> list[dict]:
+        """visible 관심종목을 태그 등록 순서로 그룹화. 멤버가 있는 태그만,
+        마지막에 '태그 없음' 그룹 (Windows manager._compute_watch_groups 와 동일 규칙)."""
+        tag_ids = {t["id"] for t in self._watch_tags}
+        members: dict[str, list] = {t["id"]: [] for t in self._watch_tags}
+        members[_WATCH_UNTAGGED_KEY] = []
+        for item in visible_items:
+            tag = item.get("tag") or ""
+            key = tag if tag in tag_ids else _WATCH_UNTAGGED_KEY
+            members[key].append(item)
+        groups: list[dict] = []
+        for t in self._watch_tags:
+            if members[t["id"]]:
+                groups.append({"key": t["id"], "title": t["name"],
+                               "color": t["color"], "members": members[t["id"]]})
+        if members[_WATCH_UNTAGGED_KEY]:
+            groups.append({"key": _WATCH_UNTAGGED_KEY, "title": "태그 없음",
+                           "color": C["surface2"], "members": members[_WATCH_UNTAGGED_KEY]})
+        return groups
+
+    def _toggle_watch_group(self, key: str):
+        """태그 그룹 헤더 클릭 — 펼침/접힘 토글 후 재구성하고 팝오버 높이를 다시 맞춘다."""
+        self._watch_expanded[key] = not self._watch_expanded.get(key, False)
+        self._render()
+        self._apply_content_height()
+
     def _clear_all_rows(self):
         for row in list(self.rows.values()) + list(self.watch_rows.values()):
             self.rows_layout.removeWidget(row)
             row.deleteLater()
+        for h in self.watch_headers.values():
+            self.rows_layout.removeWidget(h)
+            h.deleteLater()
         self.rows.clear()
         self.watch_rows.clear()
+        self.watch_headers.clear()
 
     def _render(self):
         """현재 뷰(_view)에 맞는 행으로 리스트를 재구성."""
@@ -1033,11 +1173,21 @@ class Popover(QWidget):
             self.empty_lbl.show()
             return
         self.empty_lbl.hide()
-        for w in visible_items:
-            row = WatchRow(w)
-            self.watch_rows[w["code"]] = row
-            self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
-            self._apply_cached(w["code"], row)
+        # 태그별 그룹: 헤더(클릭 시 펼침/접힘) + 펼친 그룹의 관심 행들
+        for g in self._compute_watch_groups(visible_items):
+            key = g["key"]
+            expanded = self._watch_expanded.get(key, False)
+            header = _WatchTagHeader(g["title"], g["color"], len(g["members"]), expanded)
+            header.clicked.connect(lambda k=key: self._toggle_watch_group(k))
+            self.watch_headers[key] = header
+            self.rows_layout.insertWidget(self.rows_layout.count() - 1, header)
+            if not expanded:
+                continue
+            for w in g["members"]:
+                row = WatchRow(w, ma_settings=self._watch_ma)
+                self.watch_rows[w["code"]] = row
+                self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
+                self._apply_cached(w["code"], row)
 
     def _apply_cached(self, code: str, row):
         """뷰 전환/재구성 직후 캐시된 마지막 시세를 새 행에 즉시 반영해
@@ -1113,11 +1263,14 @@ class Popover(QWidget):
     def _calc_content_height(self) -> int:
         """현재 종목 수/확장 상태에 맞춘 컨텐츠 영역 높이 계산.
         스크롤이 필요한 경우 현재 모니터 높이 안에서 잘리고 스크롤바가 뜬다."""
-        active_rows = self.rows if self._view == "holdings" else self.watch_rows
-        if active_rows:
-            rows_h = sum(r.height() for r in active_rows.values())
+        if self._view == "holdings":
+            rows_h = sum(r.height() for r in self.rows.values()) if self.rows else 120
         else:
-            rows_h = 120   # empty_lbl 안내 영역
+            # 관심: 태그 그룹 헤더 + 펼친 그룹의 행들
+            rows_h = (sum(h.height() for h in self.watch_headers.values())
+                      + sum(r.height() for r in self.watch_rows.values()))
+            if not self.watch_headers and not self.watch_rows:
+                rows_h = 120   # empty_lbl 안내 영역
         # 관심 뷰에서는 손익 요약 카드를 숨기므로 높이에서 제외
         summary_h = PortfolioSummary.H if self._view == "holdings" else 0
 

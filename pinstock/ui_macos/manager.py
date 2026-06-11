@@ -21,7 +21,7 @@ from ..core import updater
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
-    fetch_usd_krw_rate, fetch_watch_quote, fetch_watch_daily,
+    fetch_usd_krw_rate, fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES,
 )
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.portfolio import is_us_stock, portfolio_totals
@@ -147,7 +147,9 @@ class WatchFetcher(QObject):
         result = fetch_watch_quote(self.item)
         if result:
             self.price_updated.emit(self.code, result)
-        daily = fetch_watch_daily(self.item)
+        # 확대 팝업의 3개월·이동평균선까지 그릴 수 있게 긴 이력을 받는다.
+        # (미니 차트에는 행/팝업이 최근 일부만 표시)
+        daily = fetch_watch_daily(self.item, max_candles=WATCH_POPUP_CANDLES)
         if daily and daily.get("candles"):
             self.daily_updated.emit(self.code, daily["candles"])
 
@@ -177,6 +179,8 @@ class MacAppManager(QObject):
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
+        # 확대 일봉 팝업 이동평균선 표시 설정 — 관심 행/hover 팝업이 공유(제자리 갱신).
+        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
         self.fetchers: dict[str, StockFetcher] = {}
         self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
@@ -233,6 +237,8 @@ class MacAppManager(QObject):
         self.popover.set_position_offset(self.popover_offset)
         self.popover.set_pinned(self.pinned)
         self.popover.set_market_filter(self.market_filter)
+        # 확대 일봉 팝업 이동평균선 설정 — 공유 dict 참조를 주입(이후 제자리 갱신 반영)
+        self.popover.set_watch_ma(self.watch_ma)
 
         # 초기 데이터 푸시
         self._sync_popover_stocks()
@@ -456,6 +462,7 @@ class MacAppManager(QObject):
             self.popover.update_stock_daily(code, candles)
 
     def _sync_popover_watchlist(self):
+        self.popover.set_watch_tags(self.watch_tags)
         self.popover.set_watchlist(self.watchlist)
 
     def _sync_popover_stocks(self):
@@ -524,6 +531,12 @@ class MacAppManager(QObject):
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
             prune_watch_tags(self.watchlist, self.watch_tags)
+            # 이동평균선 표시 설정 — 공유 dict 를 제자리 갱신(참조 유지)
+            ma = data.get("watch_ma")
+            if isinstance(ma, dict):
+                for k in self.watch_ma:
+                    if k in ma:
+                        self.watch_ma[k] = bool(ma[k])
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -571,6 +584,7 @@ class MacAppManager(QObject):
             "stocks": self.stocks,
             "watchlist": self.watchlist,
             "watch_tags": self.watch_tags,
+            "watch_ma": self.watch_ma,
             "master": {
                 "visible": self.master_visible,
                 "pos": self.master_pos,
@@ -660,12 +674,15 @@ class MacAppManager(QObject):
         dlg = ManageWatchlistDialog(
             watchlist=copy.deepcopy(self.watchlist),
             tags=copy.deepcopy(self.watch_tags),
+            ma_settings=dict(self.watch_ma),
+            holdings=copy.deepcopy(self.stocks),
         )
         if not dlg.exec():
             return
         old_codes = {w["code"] for w in self.watchlist}
         self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
         self.watch_tags = normalize_tags(dlg.get_tags())
+        self.watch_ma.update(dlg.get_ma_settings())
         prune_watch_tags(self.watchlist, self.watch_tags)
         new_codes = {w["code"] for w in self.watchlist}
         # 삭제된 관심종목: 폴러 정지 / 추가된 관심종목: 폴러 시작
