@@ -14,6 +14,23 @@ C = {
     "border":   "#313244",
 }
 
+# ─── 이동평균선 색상 (관심종목 확대 일봉 팝업) ───────────────────────────────
+# 캔들 양봉(빨강 #f38ba8)·음봉(파랑 #89b4fa)과 겹치지 않게 노랑/초록/보라로 구분.
+MA_COLORS = {
+    5:  "#f9e2af",   # 노랑 — 5일선
+    20: "#a6e3a1",   # 초록 — 20일선
+    60: "#cba6f7",   # 보라 — 60일선
+}
+
+# ─── 태그 색상 팔레트 (색상 선택 창 프리셋) ──────────────────────────────────
+# 다크 테마와 잘 어울리는 Catppuccin 계열 + 중립색. 마지막은 회색(무채색).
+TAG_PALETTE = [
+    "#f38ba8", "#eba0ac", "#fab387", "#f9e2af",
+    "#a6e3a1", "#94e2d5", "#89dceb", "#74c7ec",
+    "#89b4fa", "#b4befe", "#cba6f7", "#f5c2e7",
+    "#f2cdcd", "#f5e0dc", "#a6adc8", "#6c7086",
+]
+
 TRAY_MENU_STYLE = f"""
 QMenu {{
     background: {C['bg']};
@@ -75,6 +92,30 @@ QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {{
     image: none;
     width: 0;
     height: 0;
+}}
+QComboBox {{
+    background: {C['surface']};
+    color: {C['text']};
+    border: 1px solid {C['surface2']};
+    border-radius: 7px;
+    padding: 5px 10px;
+    font-size: 12px;
+}}
+QComboBox:focus {{
+    border: 1px solid {C['blue']};
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 20px;
+}}
+QComboBox QAbstractItemView {{
+    background: {C['bg']};
+    color: {C['text']};
+    border: none;
+    padding: 4px;
+    outline: 0;
+    selection-background-color: {C['surface']};
+    selection-color: {C['text']};
 }}
 QPushButton {{
     background: {C['blue']};

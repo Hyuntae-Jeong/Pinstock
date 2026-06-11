@@ -1,10 +1,10 @@
 """미니 가격 차트 (sparkline) — 분봉 라인 + 일봉 캔들 두 모드."""
 
-from PyQt6.QtWidgets import QWidget
-from PyQt6.QtCore import Qt, QPointF, QRectF
-from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen
+from PyQt6.QtWidgets import QWidget, QFrame, QApplication
+from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize
+from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont
 
-from .theme import C
+from .theme import C, MA_COLORS
 
 
 # ─── 가격 미니 차트 (sparkline) ───────────────────────────────────────────────
@@ -13,17 +13,25 @@ class SparklineWidget(QWidget):
     - line  : 당일 1분봉 라인 + area, 시초가 대비 색상 결정, 전일 종가 점선
     - candle: 최근 N일 일봉 캔들 (양봉=빨강, 음봉=파랑)"""
 
-    W = 100   # 차트 너비
+    W = 100   # 차트 너비 (기본값 — 인스턴스에서 재정의 가능)
     H = 40    # 차트 높이
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, width: int | None = None, height: int | None = None):
         super().__init__(parent)
+        # 인스턴스 크기를 주면 클래스 기본값을 덮어쓴다(작은 압축 행용).
+        # paint 메서드가 self.W/self.H 를 참조하므로 좌표도 함께 맞춰진다.
+        if width is not None:
+            self.W = width
+        if height is not None:
+            self.H = height
         self.setFixedSize(self.W, self.H)
         self.mode: str = "line"
         self.prices: list[float] = []
         self.open_price: float = 0.0
         self.prev_close: float = 0.0   # 전일 종가 (가로 점선 표시용, line 모드 전용)
         self.candles: list[dict] = []  # OHLC dict 리스트 (candle 모드)
+        self.ma_periods: tuple = ()    # 그릴 이동평균 기간들 (예: (5, 20, 60))
+        self.display_count: int | None = None  # 표시할 최근 캔들 수 (None=전부)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -33,10 +41,33 @@ class SparklineWidget(QWidget):
         self.prev_close = prev_close
         self.update()
 
-    def set_candles(self, candles: list[dict]):
+    def set_candles(self, candles: list[dict], ma_periods=(), display_count: int | None = None):
+        """일봉 캔들 표시.
+        - candles: 전체 OHLC 이력 (이동평균은 표시 구간 밖 데이터까지 평균에 사용)
+        - ma_periods: 그릴 이동평균 기간들 (예: (5, 20, 60)). 빈 값이면 안 그림.
+        - display_count: 최근 N개만 캔들로 표시 (None=전부). 이동평균선은 표시 구간만.
+        """
         self.mode = "candle"
         self.candles = candles
+        self.ma_periods = tuple(ma_periods)
+        self.display_count = display_count
         self.update()
+
+    @staticmethod
+    def _sma(values: list[float], period: int) -> list:
+        """단순이동평균. out[i] = values[i-period+1..i] 평균, 데이터 부족하면 None."""
+        n = len(values)
+        out: list = [None] * n
+        if period <= 0 or period > n:
+            return out
+        s = 0.0
+        for i, v in enumerate(values):
+            s += v
+            if i >= period:
+                s -= values[i - period]
+            if i >= period - 1:
+                out[i] = s / period
+        return out
 
     def paintEvent(self, event):
         if self.mode == "candle":
@@ -127,6 +158,14 @@ class SparklineWidget(QWidget):
         if not candles:
             return
 
+        # 표시 구간(최근 display_count개)과 이동평균 계산용 전체 구간을 분리한다.
+        # 예) 3개월(약 63봉)만 그리되 60일선은 그 이전 데이터까지 평균에 사용.
+        n_all = len(candles)
+        dc = self.display_count or n_all
+        dc = max(1, min(dc, n_all))
+        start = n_all - dc                 # 표시 시작 글로벌 인덱스
+        shown = candles[start:]
+
         painter = QPainter(self)
         # 캔들은 픽셀 정렬이 더 선명 — antialias off
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -135,21 +174,31 @@ class SparklineWidget(QWidget):
         w = self.W - 2 * pad
         h = self.H - 2 * pad
 
-        mn = min(c["low"]  for c in candles)
-        mx = max(c["high"] for c in candles)
+        # 이동평균 시계열은 전체 구간 기준으로 계산 (표시 구간 왼쪽 끝에서도 값 존재)
+        closes = [c["close"] for c in candles]
+        ma_series = {p: self._sma(closes, p) for p in self.ma_periods}
+
+        # y범위: 표시 캔들의 고저 + 표시 구간에 들어오는 이동평균값까지 포함
+        mn = min(c["low"]  for c in shown)
+        mx = max(c["high"] for c in shown)
+        for series in ma_series.values():
+            for gi in range(start, n_all):
+                v = series[gi]
+                if v is not None:
+                    mn = min(mn, v)
+                    mx = max(mx, v)
         rng = (mx - mn) if mx > mn else 1.0
 
         def y_of(price: float) -> float:
             return pad + (1 - (price - mn) / rng) * h
 
-        n = len(candles)
-        slot = w / n
+        slot = w / dc
         body_w = max(1.5, slot * 0.7)
 
         red  = QColor(C['red'])
         blue = QColor(C['blue'])
 
-        for i, c in enumerate(candles):
+        for i, c in enumerate(shown):
             cx = pad + (i + 0.5) * slot
             up = c["close"] >= c["open"]
             color = red if up else blue
@@ -170,4 +219,105 @@ class SparklineWidget(QWidget):
             painter.setBrush(QBrush(color))
             painter.drawRect(QRectF(cx - body_w / 2, body_top, body_w, body_h))
 
+        # ── 이동평균선 (표시 구간만, 부드럽게) ──────────────────────────────
+        if self.ma_periods:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            for p in self.ma_periods:
+                series = ma_series.get(p)
+                if not series:
+                    continue
+                painter.setPen(QPen(QColor(MA_COLORS.get(p, C['subtext'])), 1.2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                path = QPainterPath()
+                started = False
+                for i in range(dc):
+                    v = series[start + i]
+                    if v is None:
+                        started = False
+                        continue
+                    pt = QPointF(pad + (i + 0.5) * slot, y_of(v))
+                    if started:
+                        path.lineTo(pt)
+                    else:
+                        path.moveTo(pt)
+                        started = True
+                painter.drawPath(path)
+            self._draw_ma_legend(painter, pad)
+
         painter.end()
+
+    # ── 이동평균 범례 (좌상단) — 색 숫자 미니멀: 5 · 20 · 60 ──────────────────
+    def _draw_ma_legend(self, painter: QPainter, pad: int):
+        painter.setFont(QFont("Malgun Gothic", 9, QFont.Weight.DemiBold))
+        fm = painter.fontMetrics()
+        x = pad + 4
+        y = pad + 2 + fm.ascent()
+        sep = QColor("#6c7086")            # 기간 사이 점(·) — 흐린 회보라
+        for i, p in enumerate(self.ma_periods):
+            if i > 0:
+                dot = " · "
+                painter.setPen(sep)
+                painter.drawText(int(x), int(y), dot)
+                x += fm.horizontalAdvance(dot)
+            painter.setPen(QColor(MA_COLORS.get(p, C['subtext'])))
+            label = str(p)
+            painter.drawText(int(x), int(y), label)
+            x += fm.horizontalAdvance(label)
+
+
+# ─── 확대 일봉 hover 팝업 (Windows 떠있는 위젯 · macOS 팝오버 공용) ───────────────
+class ChartPopup(QWidget):
+    """미니 일봉 차트에 마우스를 올리면 뜨는 확대 미리보기.
+
+    이미 읽어둔 캔들을 그대로 크게 다시 그릴 뿐 새 네트워크 호출은 하지 않는다.
+    입력 통과(WindowTransparentForInput) 윈도우라 hover 가 끊기지 않는다.
+    """
+
+    PAD = 6   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
+
+    def __init__(self, chart_w: int, chart_h: int, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        w = chart_w + 2 * self.PAD
+        h = chart_h + 2 * self.PAD
+        self.setFixedSize(w, h)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("popcard")
+        self.card.setGeometry(0, 0, w, h)
+        self.card.setStyleSheet(f"""
+            QFrame#popcard {{
+                background: {C['bg']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        self.chart = SparklineWidget(self.card, width=chart_w, height=chart_h)
+        self.chart.move(self.PAD, self.PAD)
+
+    def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
+                  ma_periods=(), display_count: int | None = None):
+        """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
+        self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count)
+        self._position(anchor_tl, anchor_size)
+        self.show()
+        self.raise_()
+
+    def _position(self, anchor_tl: QPoint, anchor_size: QSize):
+        ax, ay = anchor_tl.x(), anchor_tl.y()
+        aw, ah = anchor_size.width(), anchor_size.height()
+        x = ax + aw // 2 - self.width() // 2          # 소스 차트 가로 중앙
+        y = ay - self.height() - 6                     # 기본: 차트 위쪽
+        screen = QApplication.screenAt(QPoint(ax, ay)) or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        if y < geo.y() + 4:                            # 위 공간이 없으면 아래로
+            y = ay + ah + 6
+        x = max(geo.x() + 4, min(x, geo.x() + geo.width() - self.width() - 4))
+        self.move(x, y)

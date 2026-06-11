@@ -7,6 +7,14 @@ def is_us_stock(stock: dict) -> bool:
     return market == "US" or currency == "USD"
 
 
+def is_index(item: dict) -> bool:
+    """관심종목 항목이 지수(코스피/코스닥/해외 지수)인지 여부.
+
+    지수는 관심종목에만 존재하며 가격 표시 포맷·시세 라우팅이 종목과 다르다.
+    """
+    return str(item.get("type") or "").strip().lower() == "index"
+
+
 def _to_float(value, default: float = 0.0) -> float:
     try:
         if value is None:

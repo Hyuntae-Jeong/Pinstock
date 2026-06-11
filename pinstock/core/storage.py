@@ -1,7 +1,9 @@
 """stocks.json 저장 위치, 자동 마이그레이션, Excel import/export."""
 
 import os
+import re
 import sys
+import uuid
 import shutil
 from pathlib import Path
 
@@ -31,6 +33,11 @@ MARKET_US = "US"
 CURRENCY_KRW = "KRW"
 CURRENCY_USD = "USD"
 
+# ─── 관심종목 태그 기본값 ─────────────────────────────────────────────────────
+# 태그는 관심종목 전용이며 종목당 1개만 부여한다. 색상은 필수(#rrggbb).
+DEFAULT_TAG_COLOR = "#89b4fa"
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
 
 def normalize_stock_schema(stock: dict) -> dict:
     """기존 stocks.json 항목에 시장/통화 기본값을 보강한다.
@@ -59,6 +66,90 @@ def normalize_stock_schema(stock: dict) -> dict:
 
 def normalize_stocks_schema(stocks: list[dict]) -> list[dict]:
     return [normalize_stock_schema(s) for s in stocks if isinstance(s, dict)]
+
+
+# ─── 관심종목(워치리스트) 스키마 ──────────────────────────────────────────────
+# 관심종목은 보유와 완전히 독립된 별도 목록이다. 평단가/수량/손익 개념이 없고,
+# 시세는 일봉 기준으로 본다. 같은 종목이 보유와 관심에 동시에 존재할 수 있다.
+def normalize_watch_item(item: dict) -> dict:
+    """관심종목 한 항목에 시장/통화 기본값을 보강하고 관심 전용 필드를 정규화한다.
+
+    보유 종목과 달리 avg_price/quantity 는 없다. tag(태그 레지스트리 id, 종목당
+    1개), hidden(표시 ON/OFF), pos(위젯 위치)는 있으면 보존한다.
+    """
+    normalized = dict(item)
+
+    market = str(normalized.get("market") or MARKET_KR).strip().upper()
+    if market not in {MARKET_KR, MARKET_US}:
+        market = MARKET_KR
+    normalized["market"] = market
+
+    default_currency = CURRENCY_USD if market == MARKET_US else CURRENCY_KRW
+    currency = str(normalized.get("currency") or default_currency).strip().upper()
+    normalized["currency"] = currency or default_currency
+
+    # 타입: 'index'(지수) 또는 'stock'(개별 종목). 지수는 시세 라우팅·표시 포맷이
+    # 다르므로 구분해 보존한다. 알 수 없는 값은 종목으로 본다.
+    item_type = str(normalized.get("type") or "").strip().lower()
+    normalized["type"] = "index" if item_type == "index" else "stock"
+
+    # 태그: 종목당 1개. 태그 레지스트리(watch_tags)의 id 를 참조한다. 없으면 "".
+    tag = normalized.get("tag")
+    normalized["tag"] = tag.strip() if isinstance(tag, str) else ""
+    normalized.pop("tags", None)   # 구버전(리스트형) 필드 정리
+
+    normalized["hidden"] = bool(normalized.get("hidden", False))
+    return normalized
+
+
+def normalize_watchlist_schema(items: list[dict]) -> list[dict]:
+    return [normalize_watch_item(i) for i in items if isinstance(i, dict)]
+
+
+# ─── 관심종목 태그 레지스트리 ─────────────────────────────────────────────────
+# 태그는 {id, name, color} 로 저장하고, 관심종목 항목은 tag(=id)로 참조한다.
+# id 는 이름/색상을 바꿔도 참조가 끊기지 않도록 한 번 만들면 고정한다.
+def new_tag_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def normalize_tag(tag: dict) -> dict | None:
+    """태그 한 개를 정규화. id/name 이 비면 None(무효). 색상이 이상하면 기본색."""
+    if not isinstance(tag, dict):
+        return None
+    tid = str(tag.get("id") or "").strip()
+    name = str(tag.get("name") or "").strip()
+    if not tid or not name:
+        return None
+    color = str(tag.get("color") or "").strip()
+    if not _HEX_COLOR_RE.match(color):
+        color = DEFAULT_TAG_COLOR
+    return {"id": tid, "name": name, "color": color.lower()}
+
+
+def normalize_tags(tags: list) -> list[dict]:
+    """태그 레지스트리 정규화. 무효 항목·중복 id 는 제거한다."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for t in tags or []:
+        nt = normalize_tag(t)
+        if nt and nt["id"] not in seen:
+            seen.add(nt["id"])
+            out.append(nt)
+    return out
+
+
+def tag_color_map(tags: list[dict]) -> dict[str, str]:
+    """{tag_id: color} 빠른 조회용 매핑."""
+    return {t["id"]: t["color"] for t in tags if isinstance(t, dict) and t.get("id")}
+
+
+def prune_watch_tags(watchlist: list[dict], tags: list[dict]) -> None:
+    """레지스트리에 없는 태그 id 를 참조하는 관심종목의 tag 를 비운다(제자리 수정)."""
+    valid = {t["id"] for t in tags if isinstance(t, dict) and t.get("id")}
+    for w in watchlist:
+        if w.get("tag") and w["tag"] not in valid:
+            w["tag"] = ""
 
 
 # ─── 레거시 위치(레포 루트/CWD)에서 새 위치로 1회 자동 이전 ───────────────
