@@ -1,7 +1,7 @@
 """미니 가격 차트 (sparkline) — 분봉 라인 + 일봉 캔들 두 모드."""
 
-from PyQt6.QtWidgets import QWidget
-from PyQt6.QtCore import Qt, QPointF, QRectF
+from PyQt6.QtWidgets import QWidget, QFrame, QApplication
+from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont
 
 from .theme import C, MA_COLORS
@@ -263,3 +263,61 @@ class SparklineWidget(QWidget):
             label = str(p)
             painter.drawText(int(x), int(y), label)
             x += fm.horizontalAdvance(label)
+
+
+# ─── 확대 일봉 hover 팝업 (Windows 떠있는 위젯 · macOS 팝오버 공용) ───────────────
+class ChartPopup(QWidget):
+    """미니 일봉 차트에 마우스를 올리면 뜨는 확대 미리보기.
+
+    이미 읽어둔 캔들을 그대로 크게 다시 그릴 뿐 새 네트워크 호출은 하지 않는다.
+    입력 통과(WindowTransparentForInput) 윈도우라 hover 가 끊기지 않는다.
+    """
+
+    PAD = 6   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
+
+    def __init__(self, chart_w: int, chart_h: int, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        w = chart_w + 2 * self.PAD
+        h = chart_h + 2 * self.PAD
+        self.setFixedSize(w, h)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("popcard")
+        self.card.setGeometry(0, 0, w, h)
+        self.card.setStyleSheet(f"""
+            QFrame#popcard {{
+                background: {C['bg']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        self.chart = SparklineWidget(self.card, width=chart_w, height=chart_h)
+        self.chart.move(self.PAD, self.PAD)
+
+    def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
+                  ma_periods=(), display_count: int | None = None):
+        """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
+        self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count)
+        self._position(anchor_tl, anchor_size)
+        self.show()
+        self.raise_()
+
+    def _position(self, anchor_tl: QPoint, anchor_size: QSize):
+        ax, ay = anchor_tl.x(), anchor_tl.y()
+        aw, ah = anchor_size.width(), anchor_size.height()
+        x = ax + aw // 2 - self.width() // 2          # 소스 차트 가로 중앙
+        y = ay - self.height() - 6                     # 기본: 차트 위쪽
+        screen = QApplication.screenAt(QPoint(ax, ay)) or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        if y < geo.y() + 4:                            # 위 공간이 없으면 아래로
+            y = ay + ah + 6
+        x = max(geo.x() + 4, min(x, geo.x() + geo.width() - self.width() - 4))
+        self.move(x, y)
