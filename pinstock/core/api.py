@@ -518,7 +518,7 @@ def fetch_us_daily_chart(symbol: str, range_: str = "3mo", max_candles: int = 30
     try:
         result = _parse_yahoo_chart(symbol, range_=range_, interval="1d")
         if not result:
-            return _fetch_us_daily_chart_naver(symbol, max_candles=max_candles)
+            return _fetch_us_daily_chart_naver(symbol, days=_days_for_candles(max_candles), max_candles=max_candles)
         quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
         candles = []
         for open_, high, low, close in zip(
@@ -538,13 +538,13 @@ def fetch_us_daily_chart(symbol: str, range_: str = "3mo", max_candles: int = 30
             if candle["open"] > 0 and candle["high"] > 0 and candle["low"] > 0 and candle["close"] > 0:
                 candles.append(candle)
         if not candles:
-            return _fetch_us_daily_chart_naver(symbol, max_candles=max_candles)
+            return _fetch_us_daily_chart_naver(symbol, days=_days_for_candles(max_candles), max_candles=max_candles)
         if max_candles > 0:
             candles = candles[-max_candles:]
         return {"candles": candles}
     except Exception as e:
         print(f"[fetch_us_daily_chart] {symbol} 오류: {e}")
-        return _fetch_us_daily_chart_naver(symbol, max_candles=max_candles)
+        return _fetch_us_daily_chart_naver(symbol, days=_days_for_candles(max_candles), max_candles=max_candles)
 
 
 # ─── 네이버 해외 주식 API 폴백 ─────────────────────────────────────────────
@@ -771,11 +771,37 @@ def fetch_index(code: str, market: str | None = None) -> dict | None:
     return result
 
 
-def fetch_index_daily(code: str, market: str | None = None) -> dict | None:
+# 관심종목 hover 확대 팝업용 일봉 개수 — 3개월(약 63거래일) 표시 + 60일선 lookback 여유
+WATCH_POPUP_CANDLES = 130
+
+
+def _days_for_candles(max_candles: int) -> int:
+    """필요 거래일 수 → 조회 달력일 수(주말·공휴일 고려 약 1.5배), 최소 45일."""
+    return max(45, round(max_candles * 1.5))
+
+
+def _yahoo_range_for_candles(max_candles: int) -> str:
+    """필요 캔들 수 → Yahoo range 버킷."""
+    if max_candles <= 22:
+        return "1mo"
+    if max_candles <= 66:
+        return "3mo"
+    if max_candles <= 126:
+        return "6mo"
+    if max_candles <= 252:
+        return "1y"
+    return "2y"
+
+
+def fetch_index_daily(code: str, market: str | None = None, max_candles: int = 30) -> dict | None:
     """지수 일봉 캔들 — 국내는 네이버, 해외는 Yahoo 경로로 라우팅."""
     if _index_is_us(code, market):
-        return fetch_us_daily_chart(code)
-    return _fetch_kr_index_daily(code)
+        return fetch_us_daily_chart(
+            code, range_=_yahoo_range_for_candles(max_candles), max_candles=max_candles
+        )
+    return _fetch_kr_index_daily(
+        code, days=_days_for_candles(max_candles), max_candles=max_candles
+    )
 
 
 # ─── 관심종목 시세 디스패치 (지수/국내/해외 통합) ─────────────────────────────
@@ -787,9 +813,14 @@ def fetch_watch_quote(item: dict) -> dict | None:
     return fetch_us_stock(code) if is_us_stock(item) else fetch_stock(code)
 
 
-def fetch_watch_daily(item: dict) -> dict | None:
-    """관심종목 한 항목의 일봉 캔들을 타입·시장에 맞게 조회한다 (폴러 공용)."""
+def fetch_watch_daily(item: dict, max_candles: int = 30) -> dict | None:
+    """관심종목 한 항목의 일봉 캔들을 타입·시장에 맞게 조회한다 (폴러 공용).
+    max_candles 를 키우면 더 긴 이력(확대 팝업의 3개월 + 이동평균선용)을 받는다."""
     code = str(item.get("code") or "").strip()
     if str(item.get("type") or "").strip().lower() == "index":
-        return fetch_index_daily(code, item.get("market"))
-    return fetch_us_daily_chart(code) if is_us_stock(item) else fetch_daily_chart(code)
+        return fetch_index_daily(code, item.get("market"), max_candles=max_candles)
+    if is_us_stock(item):
+        return fetch_us_daily_chart(
+            code, range_=_yahoo_range_for_candles(max_candles), max_candles=max_candles
+        )
+    return fetch_daily_chart(code, days=_days_for_candles(max_candles), max_candles=max_candles)

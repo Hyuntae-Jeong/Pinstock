@@ -11,7 +11,7 @@ from datetime import datetime
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
-    fetch_watch_quote, fetch_watch_daily,
+    fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES,
 )
 from ..core.portfolio import is_us_stock, is_index, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
@@ -651,9 +651,10 @@ class ChartPopup(QWidget):
         self.chart = SparklineWidget(self.card, width=chart_w, height=chart_h)
         self.chart.move(self.PAD, self.PAD)
 
-    def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize):
+    def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
+                  ma_periods=(), display_count: int | None = None):
         """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
-        self.chart.set_candles(candles)
+        self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count)
         self._position(anchor_tl, anchor_size)
         self.show()
         self.raise_()
@@ -684,13 +685,19 @@ class CompactWatchRow(QWidget):
     SPARK_H = 30
     POLL_MS = 60_000
     STAGGER_MS = 500
-    POPUP_SCALE = 2.5   # hover 시 확대 팝업 배율
+    POPUP_SCALE = 7.5            # hover 시 확대 팝업 배율 (기존 2.5의 3배)
+    POPUP_DISPLAY_CANDLES = 63   # 확대 팝업에 표시할 일봉 수 (약 3개월)
+    MINI_CANDLES = 30            # 행에 박힌 미니 차트에 표시할 일봉 수
 
-    def __init__(self, item: dict, stagger_idx: int = 0, parent=None):
+    def __init__(self, item: dict, stagger_idx: int = 0, parent=None, ma_settings: dict | None = None):
         super().__init__(parent)
         self.data = item
         self.current_price: float = 0.0
         self._chart_popup: ChartPopup | None = None
+        # 확대 팝업 이동평균선 표시 설정 — 매니저가 넘긴 공유 dict 를 참조(제자리 갱신).
+        self._ma_settings = ma_settings if ma_settings is not None else {
+            "ma5": True, "ma20": True, "ma60": True,
+        }
         self.setFixedHeight(self.ROW_H)
         self._build_ui()
         # 일봉 차트 위 hover → 확대 팝업 (이벤트 필터로 Enter/Leave 감지)
@@ -716,9 +723,14 @@ class CompactWatchRow(QWidget):
                 self._hide_chart_popup()
         return super().eventFilter(obj, event)
 
+    def _active_ma_periods(self) -> tuple:
+        """관리창 체크 상태에 따라 표시할 이동평균 기간들 (예: (5, 20, 60))."""
+        s = self._ma_settings or {}
+        return tuple(p for p, key in ((5, "ma5"), (20, "ma20"), (60, "ma60")) if s.get(key, True))
+
     def _show_chart_popup(self):
+        # 미니 차트가 보유한 전체 일봉 이력을 재사용 — 새 네트워크 호출은 하지 않는다
         candles = getattr(self.sparkline, "candles", None)
-        # 일봉(캔들) 데이터가 이미 있을 때만 — 새 네트워크 호출은 하지 않는다
         if not candles or self.sparkline.mode != "candle":
             return
         if self._chart_popup is None:
@@ -728,7 +740,9 @@ class CompactWatchRow(QWidget):
                 parent=self,
             )
         self._chart_popup.show_with(
-            candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size()
+            candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size(),
+            ma_periods=self._active_ma_periods(),
+            display_count=self.POPUP_DISPLAY_CANDLES,
         )
 
     def _hide_chart_popup(self):
@@ -769,9 +783,11 @@ class CompactWatchRow(QWidget):
         result = fetch_watch_quote(self.data)
         if result:
             self._apply_price(result)
-        daily = fetch_watch_daily(self.data)
+        # 확대 팝업의 3개월·이동평균선까지 그릴 수 있게 긴 이력을 받되,
+        # 미니 차트에는 최근 일부(MINI_CANDLES)만 표시한다.
+        daily = fetch_watch_daily(self.data, max_candles=WATCH_POPUP_CANDLES)
         if daily and daily.get("candles"):
-            self.sparkline.set_candles(daily["candles"])
+            self.sparkline.set_candles(daily["candles"], display_count=self.MINI_CANDLES)
 
     def _apply_price(self, result: dict):
         self.data["name"] = result["name"]
@@ -923,12 +939,14 @@ class TagGroupWidget(QWidget):
     SCREEN_MARGIN = 10
 
     def __init__(self, group_key: str, title: str, color: str, items: list[dict],
-                 width: int | None = None, pinned: bool = False, stagger_base: int = 0):
+                 width: int | None = None, pinned: bool = False, stagger_base: int = 0,
+                 ma_settings: dict | None = None):
         super().__init__()
         self.group_key = group_key
         self.title = title
         self.color = color
         self.items = items
+        self.ma_settings = ma_settings   # 확대 팝업 이동평균선 표시 설정 (공유 dict)
         self.pinned = bool(pinned)
         self.is_expanded = self.pinned
         self.W = width or self.WIDTH
@@ -983,7 +1001,8 @@ class TagGroupWidget(QWidget):
         pv.addWidget(sep)
         pv.addSpacing(self.PANEL_TOP - 1)
         for i, item in enumerate(self.items):
-            row = CompactWatchRow(item, stagger_idx=stagger_base + i, parent=self.panel)
+            row = CompactWatchRow(item, stagger_idx=stagger_base + i, parent=self.panel,
+                                  ma_settings=self.ma_settings)
             self.rows.append(row)
             pv.addWidget(row)
         self.panel.hide()

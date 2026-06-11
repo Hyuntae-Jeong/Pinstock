@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDialogButtonBox, QPushButton, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyledItemDelegate, QRadioButton, QButtonGroup, QWidget,
-    QCompleter, QComboBox, QColorDialog, QFrame,
+    QCompleter, QComboBox, QColorDialog, QFrame, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QModelIndex, QSize
 from PyQt6.QtGui import QColor, QStandardItemModel, QStandardItem, QPixmap, QIcon
@@ -22,7 +22,7 @@ from ..core.storage import (
     MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD,
     DEFAULT_TAG_COLOR, new_tag_id, normalize_tags, prune_watch_tags,
 )
-from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE, TAG_PALETTE
+from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE, TAG_PALETTE, MA_COLORS
 from .form_widgets import (
     AutoSelectDoubleSpinBox, AutoSelectLineEdit, SearchLineEdit,
     QuantitySpinBox, ToggleSwitch,
@@ -1399,10 +1399,17 @@ class ManageWatchlistDialog(QDialog):
 
     COLS = ["종목명", "종목코드", "시장", "태그", "표시"]
 
-    def __init__(self, watchlist: list[dict], tags: list[dict] | None = None, parent=None):
+    def __init__(self, watchlist: list[dict], tags: list[dict] | None = None,
+                 ma_settings: dict | None = None, parent=None):
         super().__init__(parent)
         self._items: list[dict] = watchlist          # 호출측에서 deepcopy 해서 전달
         self._tags: list[dict] = tags or []          # 태그 레지스트리 (deepcopy)
+        # 확대 일봉 팝업 이동평균선 표시 설정 (기본: 모두 켜짐)
+        self._ma_settings = {"ma5": True, "ma20": True, "ma60": True}
+        if isinstance(ma_settings, dict):
+            for k in self._ma_settings:
+                if k in ma_settings:
+                    self._ma_settings[k] = bool(ma_settings[k])
 
         self.setWindowTitle("관심종목 관리")
         self.setMinimumSize(520, 380)
@@ -1434,6 +1441,27 @@ class ManageWatchlistDialog(QDialog):
         hdr.setStretchLastSection(False)
         hdr.setSectionsClickable(False)
         root.addWidget(self.table, 1)
+
+        # ── 확대 일봉 팝업 이동평균선 표시 토글 (5·20·60일) ─────────────────
+        # 관심종목 위에 마우스를 올리면 뜨는 확대 차트에 그릴 이동평균선을 고른다.
+        ma_row = QHBoxLayout()
+        ma_row.setSpacing(14)
+        ma_lbl = QLabel("확대 차트 이동평균선")
+        ma_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        ma_row.addWidget(ma_lbl)
+        self._ma_checks: dict[str, QCheckBox] = {}
+        for period, key in ((5, "ma5"), (20, "ma20"), (60, "ma60")):
+            cb = QCheckBox(f"{period}일선")
+            cb.setChecked(bool(self._ma_settings.get(key, True)))
+            color = MA_COLORS.get(period, C['text'])
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {color}; font-size: 12px; font-weight: bold; spacing: 6px; }}"
+                f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+            )
+            self._ma_checks[key] = cb
+            ma_row.addWidget(cb)
+        ma_row.addStretch()
+        root.addLayout(ma_row)
 
         # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
         action_row = QHBoxLayout()
@@ -1608,3 +1636,7 @@ class ManageWatchlistDialog(QDialog):
 
     def get_tags(self) -> list[dict]:
         return self._tags
+
+    def get_ma_settings(self) -> dict:
+        """확대 일봉 팝업 이동평균선 표시 설정 {'ma5','ma20','ma60': bool}."""
+        return {key: cb.isChecked() for key, cb in self._ma_checks.items()}

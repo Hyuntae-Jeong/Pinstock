@@ -75,6 +75,8 @@ class WidgetManager:
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
+        # 확대 일봉 팝업 이동평균선 표시 설정 — 모든 관심 행이 공유(제자리 갱신)한다.
+        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
         self.widgets: dict[str, StockWidget] = {}
         # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
         self.watch_groups: dict[str, TagGroupWidget] = {}
@@ -528,6 +530,12 @@ class WidgetManager:
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
             prune_watch_tags(self.watchlist, self.watch_tags)
+            # 이동평균선 표시 설정 — 공유 dict 를 제자리 갱신(참조 유지)
+            ma = data.get("watch_ma")
+            if isinstance(ma, dict):
+                for k in self.watch_ma:
+                    if k in ma:
+                        self.watch_ma[k] = bool(ma[k])
             self.watch_group_state = self._parse_watch_group_state(data.get("watch_group_state"))
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
@@ -563,6 +571,7 @@ class WidgetManager:
             "stocks": self.stocks,
             "watchlist": self.watchlist,
             "watch_tags": self.watch_tags,
+            "watch_ma": self.watch_ma,
             "watch_group_state": self.watch_group_state,
             "master": {
                 "visible": self.master_visible,
@@ -668,6 +677,7 @@ class WidgetManager:
             width=self.uniform_watch_w,
             pinned=bool(st.get("pinned", False)),
             stagger_base=stagger_base,
+            ma_settings=self.watch_ma,
         )
         w.pin_toggled.connect(self._on_watch_group_pin_toggled)
         w.manage_requested.connect(self.open_manage_watch_dialog)
@@ -1085,11 +1095,14 @@ class WidgetManager:
         dlg = ManageWatchlistDialog(
             watchlist=copy.deepcopy(self.watchlist),
             tags=copy.deepcopy(self.watch_tags),
+            ma_settings=dict(self.watch_ma),
         )
         if not dlg.exec():
             return
         self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
         self.watch_tags = normalize_tags(dlg.get_tags())
+        # 공유 dict 를 제자리 갱신 → 이미 떠 있는 관심 그룹 팝업도 다음 hover 부터 즉시 반영
+        self.watch_ma.update(dlg.get_ma_settings())
         prune_watch_tags(self.watchlist, self.watch_tags)
         self._save_config()
         self._sync_watch_groups()
