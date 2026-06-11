@@ -1435,7 +1435,7 @@ class ManageWatchlistDialog(QDialog):
     '태그 관리' 버튼으로 태그 자체(이름·색상)를 추가/수정/삭제한다.
     """
 
-    COLS = ["종목명", "종목코드", "시장", "태그", "표시"]
+    COLS = ["선택", "종목명", "종목코드", "시장", "태그", "표시"]
 
     def __init__(self, watchlist: list[dict], tags: list[dict] | None = None,
                  ma_settings: dict | None = None, holdings: list[dict] | None = None,
@@ -1444,6 +1444,7 @@ class ManageWatchlistDialog(QDialog):
         self._items: list[dict] = watchlist          # 호출측에서 deepcopy 해서 전달
         self._tags: list[dict] = tags or []          # 태그 레지스트리 (deepcopy)
         self._holdings: list[dict] = holdings or []   # 보유 종목 (보유중 태그 동기화용, 읽기 전용)
+        self._check_boxes: list = []                  # 행별 선택 체크박스 (여러 개 한 번에 삭제용)
         # 확대 일봉 팝업 이동평균선 표시 설정 (기본: 모두 켜짐)
         self._ma_settings = {"ma5": True, "ma20": True, "ma60": True}
         if isinstance(ma_settings, dict):
@@ -1452,7 +1453,9 @@ class ManageWatchlistDialog(QDialog):
                     self._ma_settings[k] = bool(ma_settings[k])
 
         self.setWindowTitle("관심종목 관리")
-        self.setMinimumSize(520, 380)
+        # 긴 종목명(예: State Street SPDR S&P …)이 잘리지 않게 기본 폭을 넉넉히.
+        self.setMinimumSize(560, 400)
+        self.resize(700, 470)
         self.setStyleSheet(DIALOG_STYLE)
 
         root = QVBoxLayout(self)
@@ -1471,13 +1474,15 @@ class ManageWatchlistDialog(QDialog):
         self.table.verticalHeader().setDefaultSectionSize(38)
 
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)            # 종목명
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)   # 코드
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)   # 시장
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)             # 태그 콤보
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)             # 표시 토글
-        self.table.setColumnWidth(3, 140)
-        self.table.setColumnWidth(4, 64)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)             # 선택 체크박스
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)            # 종목명
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)   # 코드
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)   # 시장
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)             # 태그 콤보
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)             # 표시 토글
+        self.table.setColumnWidth(0, 44)
+        self.table.setColumnWidth(4, 130)
+        self.table.setColumnWidth(5, 64)
         hdr.setStretchLastSection(False)
         hdr.setSectionsClickable(False)
         root.addWidget(self.table, 1)
@@ -1503,14 +1508,23 @@ class ManageWatchlistDialog(QDialog):
         ma_row.addStretch()
         root.addLayout(ma_row)
 
-        # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
+        # ── 행 액션 (전체선택 / 추가 / 삭제 / 태그 관리) ──────────────────────
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
+        self._select_all = QCheckBox("전체 선택")
+        self._select_all.setStyleSheet(
+            f"QCheckBox {{ color: {C['subtext']}; font-size: 12px; spacing: 6px; }}"
+            f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+        )
+        self._select_all.toggled.connect(self._toggle_all_checks)
+        action_row.addWidget(self._select_all)
+        action_row.addSpacing(8)
         add_btn = QPushButton("➕  추가")
         add_btn.clicked.connect(self._add)
         action_row.addWidget(add_btn)
         del_btn = QPushButton("🗑  삭제")
         del_btn.setProperty("flat", "true")
+        del_btn.setToolTip("체크한 항목을 모두 삭제합니다. 체크가 없으면 선택한 행을 삭제합니다.")
         del_btn.clicked.connect(self._delete_selected)
         action_row.addWidget(del_btn)
         action_row.addStretch()
@@ -1541,47 +1555,69 @@ class ManageWatchlistDialog(QDialog):
         self._rebuild_table()
 
     def _rebuild_table(self, select_row: int | None = None):
+        self._check_boxes = []
         self.table.setRowCount(0)
         for i, item in enumerate(self._items):
             self.table.insertRow(i)
             self._fill_row(i, item)
+        # 표를 다시 그리면 모든 체크가 풀리므로 '전체 선택'도 초기화(신호 차단)
+        if getattr(self, "_select_all", None) is not None:
+            self._select_all.blockSignals(True)
+            self._select_all.setChecked(False)
+            self._select_all.blockSignals(False)
         if select_row is not None and 0 <= select_row < self.table.rowCount():
             self.table.selectRow(select_row)
 
+    @staticmethod
+    def _centered(widget: QWidget) -> QWidget:
+        """셀 위젯을 가운데 정렬해 감싸는 컨테이너."""
+        box = QWidget()
+        hl = QHBoxLayout(box)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addStretch()
+        hl.addWidget(widget)
+        hl.addStretch()
+        return box
+
     def _fill_row(self, row: int, item: dict):
+        # 0번: 선택 체크박스 (여러 개 골라 한 번에 삭제)
+        check = QCheckBox()
+        check.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
+        ph_check = QTableWidgetItem("")
+        ph_check.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 0, ph_check)
+        self.table.setCellWidget(row, 0, self._centered(check))
+        self._check_boxes.append(check)
+
         name = item.get("name", item.get("code", ""))
         code = item.get("code", "")
         market = "미국" if str(item.get("market", "")).upper() == MARKET_US else "한국"
-        for col, text in enumerate([name, code, market]):
+        for offset, text in enumerate([name, code, market]):
+            col = offset + 1                    # 0번은 체크박스 칸이라 한 칸 밀림
             cell = QTableWidgetItem(text)
-            align = Qt.AlignmentFlag.AlignLeft if col == 0 else Qt.AlignmentFlag.AlignCenter
+            align = Qt.AlignmentFlag.AlignLeft if col == 1 else Qt.AlignmentFlag.AlignCenter
             cell.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
             cell.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            if col == 1:
+                cell.setToolTip(name)           # 폭이 좁아 잘려도 hover 로 전체 이름 확인
             self.table.setItem(row, col, cell)
 
-        # 태그 콤보박스 (— 없음 — + 등록된 태그들) — 종목당 1개.
-        # 셀 위젯으로 직접 배치 → 글자가 옆 칸들과 같은 높이로 세로 중앙 정렬됨.
+        # 태그 콤보박스 (col 4) — — 없음 — + 등록된 태그들, 종목당 1개.
         combo = self._make_tag_combo(item.get("tag", ""))
         combo.activated.connect(lambda _, idx=row, c=combo: self._on_tag_changed(idx, c))
         placeholder_tag = QTableWidgetItem("")
         placeholder_tag.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.table.setItem(row, 3, placeholder_tag)
-        self.table.setCellWidget(row, 3, combo)
+        self.table.setItem(row, 4, placeholder_tag)
+        self.table.setCellWidget(row, 4, combo)
 
-        # 표시 토글 스위치 (ON=표시, OFF=숨김) — 행 인덱스 == 항목 인덱스(필터 없음)
+        # 표시 토글 스위치 (col 5, ON=표시 OFF=숨김) — 행 인덱스 == 항목 인덱스(필터 없음)
         hidden = bool(item.get("hidden", False))
         toggle = ToggleSwitch(checked=not hidden)
         toggle.toggled.connect(lambda checked, idx=row: self._on_visibility_toggled(idx, checked))
-        container = QWidget()
-        hl = QHBoxLayout(container)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.addStretch()
-        hl.addWidget(toggle)
-        hl.addStretch()
         placeholder = QTableWidgetItem("")
         placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.table.setItem(row, 4, placeholder)
-        self.table.setCellWidget(row, 4, container)
+        self.table.setItem(row, 5, placeholder)
+        self.table.setCellWidget(row, 5, self._centered(toggle))
 
     def _make_tag_combo(self, current_tag_id: str) -> QComboBox:
         """태그 선택 콤보. 첫 항목은 '없음'(빈 id), 이어서 색 아이콘+이름.
@@ -1736,21 +1772,38 @@ class ManageWatchlistDialog(QDialog):
         self._items.append(d)
         self._rebuild_table(select_row=len(self._items) - 1)
 
+    def _toggle_all_checks(self, checked: bool):
+        for cb in self._check_boxes:
+            cb.setChecked(checked)
+
     def _delete_selected(self):
-        row = self.table.currentRow()
-        if not (0 <= row < len(self._items)):
+        # 체크된 항목들을 우선 대상으로, 없으면 현재 선택된 행 1개를 대상으로 한다.
+        targets = [i for i, cb in enumerate(self._check_boxes) if cb.isChecked()]
+        if not targets:
+            row = self.table.currentRow()
+            if 0 <= row < len(self._items):
+                targets = [row]
+        if not targets:
+            QMessageBox.information(self, "삭제", "삭제할 항목을 체크하거나 선택하세요.")
             return
-        name = self._items[row].get("name", self._items[row].get("code", ""))
+
+        if len(targets) == 1:
+            nm = self._items[targets[0]].get("name", self._items[targets[0]].get("code", ""))
+            msg = f"'{nm}' 을(를) 관심종목에서 삭제할까요?"
+        else:
+            msg = f"선택한 관심종목 {len(targets)}개를 삭제할까요?"
         ret = QMessageBox.question(
-            self, "삭제 확인",
-            f"'{name}' 을(를) 관심종목에서 삭제할까요?",
+            self, "삭제 확인", msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if ret != QMessageBox.StandardButton.Yes:
             return
-        self._items.pop(row)
-        next_sel = min(row, len(self._items) - 1) if self._items else None
+
+        for i in sorted(targets, reverse=True):   # 뒤에서부터 지워 인덱스 밀림 방지
+            if 0 <= i < len(self._items):
+                self._items.pop(i)
+        next_sel = min(targets[0], len(self._items) - 1) if self._items else None
         self._rebuild_table(select_row=next_sel)
 
     def get_watchlist(self) -> list[dict]:
