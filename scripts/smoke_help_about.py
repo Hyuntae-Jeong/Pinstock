@@ -29,10 +29,10 @@ def _run(log_fp):
     log("[step] imports ok")
 
     # HelpDialog
-    assert len(HELP_SECTIONS) == 8
+    assert len(HELP_SECTIONS) == 10
     help_dlg = HelpDialog()
     log("[step] HelpDialog() ok")
-    assert help_dlg.category_list.count() == 8
+    assert help_dlg.category_list.count() == len(HELP_SECTIONS)
     for i, (sidebar, body_h2, _body) in enumerate(HELP_SECTIONS):
         help_dlg.category_list.setCurrentRow(i)
         html = help_dlg.content_view.toHtml()
@@ -57,11 +57,10 @@ def _run(log_fp):
     assert called == ["u"], f"콜백 미호출: {called}"
     log("[OK] AboutDialog(콜백 연결) — 클릭 시 콜백 호출")
 
-    # AboutDialog — 새 버전 배지
-    about_pending = AboutDialog(on_check_update=lambda: None, has_update=True)
-    label = about_pending.btn_check_update.text()
-    assert "새 버전" in label
-    log(f"[OK] AboutDialog(새 버전) — 라벨: {label!r}")
+    # AboutDialog — 업데이트 버튼 라벨은 항상 고정 (새 버전 배지 제거됨)
+    about_shot = AboutDialog(on_check_update=lambda: None)
+    assert about_shot.btn_check_update.text() == "🔄  업데이트 확인"
+    log("[OK] AboutDialog — 업데이트 버튼 라벨 고정 (배지 없음)")
 
     # 라이선스 HTML — 다이얼로그 인스턴스를 변수에 잡아둬야 임시 GC 로
     # license_view (QTextBrowser) 가 함께 해제되는 RuntimeError 를 피한다.
@@ -87,10 +86,10 @@ def _run(log_fp):
     help_dlg.grab().save(str(shot_help))
     log(f"[shot] {shot_help}")
 
-    about_pending.show()
+    about_shot.show()
     app.processEvents()
     shot_about = _REPO_ROOT / "smoke_about.png"
-    about_pending.grab().save(str(shot_about))
+    about_shot.grab().save(str(shot_about))
     log(f"[shot] {shot_about}")
 
     log("\n전체 통과 OK")

@@ -7,7 +7,7 @@ import copy
 import shutil
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, date
 
 from PyQt6.QtWidgets import (
     QApplication, QMenu, QSystemTrayIcon, QMessageBox, QFileDialog,
@@ -19,8 +19,8 @@ from PyQt6.QtGui import (
 
 
 # ─── 자동 업데이트 체크 설정 ──────────────────────────────────────────────
-_AUTO_CHECK_INTERVAL = timedelta(hours=24)
-_AUTO_CHECK_STARTUP_DELAY_MS = 10 * 1000      # 앱 시작 후 10초 뒤
+# 하루 1회 — 오늘 이미 확인했으면(last_check_date == 오늘) 껐다 켜도 다시 확인하지 않는다.
+_AUTO_CHECK_STARTUP_DELAY_MS = 5 * 1000        # 앱 시작 후 5초 뒤 (차트 다 뜬 뒤)
 _PREV_ERROR_CHECK_DELAY_MS = 1500              # 시작 직후 1.5초
 
 
@@ -58,7 +58,7 @@ from .manage_dialog import (
     StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
     fetch_quote_for_stock,
 )
-from ..ui_common.update_dialog import UpdateDialog
+from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
 from ..ui_common.about_dialog import AboutDialog
 
@@ -110,9 +110,9 @@ class WidgetManager:
         self.fx_timer = QTimer()
         self.fx_timer.timeout.connect(self._fetch_usd_krw_rate)
         self._layout_reflow_pending: bool = False
-        # 자동 업데이트 체크 상태
-        self.update_last_check_at: datetime | None = None
-        self._cached_release: updater.ReleaseInfo | None = None
+        # 자동 업데이트 체크 상태 — 하루 1회 체크(날짜) + 건너뛴 버전 기억
+        self.update_last_check_date: date | None = None
+        self.update_skipped_version: str | None = None
         self._update_signals = _UpdateCheckSignals()
         self._update_signals.done.connect(self._on_auto_check_done)
 
@@ -122,9 +122,10 @@ class WidgetManager:
         self._sync_watch_groups()
         self._sync_fx_timer()
 
-        # 시작 직후 — 이전 업데이트 실패 로그가 있으면 안내
+        # 시작 직후 — 이전 업데이트 실패 로그 / 직전 업데이트 완료 여부 안내
         QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_previous_update_error)
-        # 시작 10초 뒤 — 자동 업데이트 체크 (throttle/can_self_update 검사 후 실제 호출)
+        QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_update_completed)
+        # 시작 5초 뒤 — 자동 업데이트 체크 (오늘 체크 여부/can_self_update 검사 후 실제 호출)
         QTimer.singleShot(_AUTO_CHECK_STARTUP_DELAY_MS, self._maybe_run_auto_update_check)
 
     # ── 전체 위젯 표시/숨김 토글 ─────────────────────────────────────────
@@ -475,9 +476,6 @@ class WidgetManager:
         self.context_menu = menu   # 마스터 위젯 우클릭에서도 같은 메뉴 재사용
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
-        # 업데이트 토스트 클릭 → 업데이트 다이얼로그
-        # (현재 showMessage 는 업데이트 알림 한 종류뿐이라 단일 핸들러로 충분)
-        self.tray.messageClicked.connect(self.open_update_dialog)
         self.tray.show()
 
     def _on_tray_activated(self, reason):
@@ -553,14 +551,17 @@ class WidgetManager:
                 self.popover_opacity = max(0.1, min(1.0, opacity))
             except (TypeError, ValueError):
                 self.popover_opacity = 1.0
-            # 자동 업데이트 메타 — last_check_at 만 (24h throttle 용)
+            # 자동 업데이트 메타 — 오늘 체크했는지(날짜) + 건너뛴 버전
             upd = data.get("update") or {}
-            last_at = upd.get("last_check_at")
-            if isinstance(last_at, str):
+            last_date = upd.get("last_check_date")
+            if isinstance(last_date, str):
                 try:
-                    self.update_last_check_at = datetime.fromisoformat(last_at)
+                    self.update_last_check_date = date.fromisoformat(last_date)
                 except ValueError:
-                    self.update_last_check_at = None
+                    self.update_last_check_date = None
+            skipped = upd.get("skipped_version")
+            if isinstance(skipped, str) and skipped:
+                self.update_skipped_version = skipped
 
     def _save_config(self):
         self.stocks = normalize_stocks_schema(self.stocks)
@@ -581,10 +582,13 @@ class WidgetManager:
             "watch_visible": self.watch_visible,
             "popover_opacity": self.popover_opacity,
         }
-        if self.update_last_check_at is not None:
-            data["update"] = {
-                "last_check_at": self.update_last_check_at.isoformat(timespec="seconds"),
-            }
+        upd: dict = {}
+        if self.update_last_check_date is not None:
+            upd["last_check_date"] = self.update_last_check_date.isoformat()
+        if self.update_skipped_version is not None:
+            upd["skipped_version"] = self.update_skipped_version
+        if upd:
+            data["update"] = upd
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1117,39 +1121,43 @@ class WidgetManager:
         HelpDialog().exec()
 
     def open_about_dialog(self):
-        # 업데이트 확인은 About 다이얼로그 내부 버튼에서 트리거 — manager 의
-        # 캐시/throttle 흐름을 그대로 재사용하도록 콜백을 그쪽으로 전달한다.
-        # 개발 빌드(0.0.0+dev)에서도 콜백을 넘긴다 — UpdateDialog 가 내부에서
-        # can_self_update() 를 검사해 다운로드 버튼 대신 '릴리즈 페이지 열기'
-        # 로 폴백하므로, 사용자는 새 버전 확인 자체는 가능하다.
-        AboutDialog(
-            on_check_update=self.open_update_dialog,
-            has_update=self._has_pending_update(),
-        ).exec()
+        # 업데이트 확인은 About 다이얼로그 내부 버튼에서 트리거 — manager 가 오늘자
+        # 체크 기록/건너뛴 버전을 갱신하도록 콜백을 그쪽으로 전달한다.
+        AboutDialog(on_check_update=self.open_update_dialog).exec()
 
     # ── 업데이트 확인 ─────────────────────────────────────────────────────
     def open_update_dialog(self):
-        # 수동 체크 — 다이얼로그가 fetch 한 결과를 manager 캐시에도 반영해서
-        # 트레이 뱃지/throttle 이 즉시 갱신되도록 콜백 전달
-        dlg = UpdateDialog(on_release_seen=self._on_release_seen)
+        # 수동 체크 — 다이얼로그가 직접 조회한다. 결과를 manager 에 반영하도록 콜백 전달.
+        dlg = UpdateDialog(
+            on_release_seen=self._on_release_seen,
+            on_skip_version=self._on_skip_version,
+        )
         dlg.exec()
 
+    def _open_update_prompt(self, release: updater.ReleaseInfo):
+        """자동 체크가 새 버전을 찾았을 때 곧장 띄우는 모달 — 이미 받아둔 릴리즈를
+        넘겨 API 재호출을 막는다."""
+        UpdateDialog(
+            on_release_seen=self._on_release_seen,
+            on_skip_version=self._on_skip_version,
+            prefetched_release=release,
+        ).exec()
+
     def _on_release_seen(self, release: updater.ReleaseInfo):
-        """UpdateDialog 가 API 조회에 성공했을 때 호출."""
-        self.update_last_check_at = datetime.now()
-        self._cached_release = release
+        """UpdateDialog 가 API 조회에 성공했을 때 호출 — 오늘 체크한 것으로 기록."""
+        self.update_last_check_date = date.today()
         self._save_config()
-        self._refresh_update_badge()
+
+    def _on_skip_version(self, version: str):
+        """'이 버전에서는 업데이트를 하지 않음' — 해당 버전은 자동 체크에서 다시 묻지 않음."""
+        self.update_skipped_version = version
+        self._save_config()
 
     def _maybe_run_auto_update_check(self):
-        """시작 시/주기적 체크 진입점. throttle + can_self_update 검사."""
+        """시작 시 1회 진입점. 오늘 이미 확인했으면(껐다 켜도) 건너뛴다."""
         if not updater.can_self_update():
             return
-        now = datetime.now()
-        if (
-            self.update_last_check_at is not None
-            and (now - self.update_last_check_at) < _AUTO_CHECK_INTERVAL
-        ):
+        if self.update_last_check_date == date.today():
             return
         # 백그라운드 fetch
         def worker():
@@ -1160,46 +1168,34 @@ class WidgetManager:
     def _on_auto_check_done(self, release):
         """백그라운드 fetch 완료 — 메인 스레드에서 호출됨."""
         if release is None:
-            # 실패는 silent. last_check_at 갱신 안 함 → 다음 실행 때 재시도.
+            # 실패는 silent. 날짜 기록 안 함 → 다음 실행 때 재시도.
             return
-        self.update_last_check_at = datetime.now()
-        self._cached_release = release
+        # 조회에 성공했으니 오늘 체크한 것으로 기록 (껐다 켜도 오늘은 재확인 안 함).
+        self.update_last_check_date = date.today()
         self._save_config()
-        self._refresh_update_badge()
-        if updater.is_newer(__version__, release.version):
-            self._show_update_toast(release)
+        if (
+            updater.is_newer(__version__, release.version)
+            and release.version != self.update_skipped_version
+        ):
+            self._open_update_prompt(release)
 
-    def _refresh_update_badge(self):
-        """트레이 메뉴의 '앱 정보' 액션 텍스트에 새 버전 표시 점 토글.
-        업데이트 확인 진입점은 About 다이얼로그 내부 버튼이므로, 배지도 그 진입점인
-        '앱 정보' 항목에 표시한다."""
-        if not hasattr(self, "about_act"):
-            return
-        suffix = "  ●" if self._has_pending_update() else ""
-        self.about_act.setText("ℹ️   앱 정보" + suffix)
-
-    def _has_pending_update(self) -> bool:
-        return (
-            self._cached_release is not None
-            and updater.is_newer(__version__, self._cached_release.version)
-        )
-
-    def _show_update_toast(self, release: updater.ReleaseInfo):
-        """Windows 트레이 토스트 — 클릭하면 messageClicked → open_update_dialog."""
-        self.tray.showMessage(
-            "Pinstock 업데이트 가능",
-            f"새 버전 {release.tag} 가 있습니다. 클릭하여 확인하세요.",
-            QSystemTrayIcon.MessageIcon.Information,
-            7000,
-        )
+    def _check_update_completed(self):
+        """직전 실행에서 적용한 업데이트가 실제로 반영됐으면 완료 안내를 한 번 띄운다."""
+        pending = updater.read_and_clear_pending_update()
+        if pending and pending == __version__:
+            show_topmost_message(
+                QMessageBox.Icon.Information,
+                "업데이트 완료",
+                f"버전 v{pending} 으로 업데이트되었습니다.",
+            )
 
     def _check_previous_update_error(self):
         """이전 실행에서 헬퍼가 남긴 에러 로그가 있으면 사용자에게 한 번 보여주고 삭제."""
         log = updater.read_and_clear_last_error()
         if not log:
             return
-        QMessageBox.warning(
-            None,
+        show_topmost_message(
+            QMessageBox.Icon.Warning,
             "이전 업데이트 실패",
             updater.humanize_error(log) + "\n\n오류 원문:\n" + log,
         )

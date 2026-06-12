@@ -45,22 +45,17 @@ class AboutDialog(QDialog):
         self,
         parent=None,
         on_check_update: Optional[Callable[[], None]] = None,
-        has_update: bool = False,
     ):
         """
         on_check_update: '업데이트 확인' 버튼이 호출할 콜백. None 이면
             버튼은 비활성화된다 — 다만 일반 흐름에서는 manager 가 항상
             전달하므로 비활성화 케이스는 사실상 발생하지 않는다.
-            (UpdateDialog 자체는 개발 빌드에서도 '릴리즈 페이지 열기' 로
-            폴백하므로, 다운로드가 막혀도 새 버전 확인은 가능하다.)
-        has_update: 캐시된 새 버전 정보가 있으면 True — 버튼 라벨에 표시.
         """
         super().__init__(parent)
         self.setWindowTitle("Pinstock 정보")
         self.resize(480, 580)
         self.setStyleSheet(DIALOG_STYLE)
         self._on_check_update = on_check_update
-        self._has_update = has_update
         self._build_ui()
 
     def _build_ui(self):
@@ -107,7 +102,7 @@ class AboutDialog(QDialog):
         gh_btn.clicked.connect(lambda: webbrowser.open(_REPO_URL))
         root.addWidget(gh_btn)
 
-        self.btn_check_update = QPushButton(self._update_btn_text())
+        self.btn_check_update = QPushButton("🔄  업데이트 확인")
         self.btn_check_update.setFixedHeight(36)
         if self._on_check_update is not None:
             self.btn_check_update.clicked.connect(self._handle_check_update)
@@ -143,11 +138,6 @@ class AboutDialog(QDialog):
         root.addLayout(btn_row)
 
     # ── 업데이트 버튼 ───────────────────────────────────────────────────────
-    def _update_btn_text(self) -> str:
-        if self._has_update:
-            return "🔄  업데이트 확인  ● 새 버전 있음"
-        return "🔄  업데이트 확인"
-
     def _handle_check_update(self):
         # About 다이얼로그를 닫고 업데이트 흐름을 위임 — UpdateDialog 가
         # 모달로 떠 있을 때 About 다이얼로그가 뒤에 남으면 시각적으로 산만함.

@@ -216,6 +216,12 @@ def _error_log_path() -> Path:
     return _temp_dir() / "update-error.log"
 
 
+def _pending_update_path() -> Path:
+    """업데이트 적용 직전에 목표 버전을 남기는 마커. 교체된 새 버전이 다음 실행 때
+    읽어 '업데이트 완료' 안내를 띄운다."""
+    return _temp_dir() / "update-pending.txt"
+
+
 def download_path_for(release: ReleaseInfo) -> Path:
     return _temp_dir() / release.asset_name
 
@@ -548,6 +554,36 @@ def launch_updater(install_dir: Path, new_zip: Path) -> None:
         launch_updater_macos(install_dir, new_zip)
     else:
         raise RuntimeError(f"지원되지 않는 플랫폼: {sys.platform}")
+
+
+# ─── 업데이트 완료 마커 (성공 안내용) ────────────────────────────────────
+def mark_update_pending(version: str) -> None:
+    """헬퍼 실행 직전에 호출. 교체된 새 버전이 다음 실행 때 read_and_clear_pending_update()
+    로 읽어 '버전 X 로 업데이트되었습니다' 안내를 띄운다. 실패해도 업데이트 자체는
+    진행되어야 하므로 예외는 삼킨다."""
+    try:
+        _pending_update_path().write_text(version, encoding="utf-8")
+    except OSError as e:
+        print(f"[updater] pending 마커 기록 실패: {e}")
+
+
+def read_and_clear_pending_update() -> Optional[str]:
+    """직전에 적용 시도한 업데이트의 목표 버전을 읽고 삭제. 없으면 None.
+
+    호출측은 반환값을 현재 __version__ 과 비교해, 실제로 그 버전으로 올라왔을 때만
+    완료 안내를 띄운다 (롤백되어 옛 버전이 다시 떴다면 버전이 달라 안내하지 않음)."""
+    p = _pending_update_path()
+    if not p.is_file():
+        return None
+    try:
+        content = p.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    return content or None
 
 
 # ─── 이전 업데이트 실패 로그 확인 ────────────────────────────────────────
