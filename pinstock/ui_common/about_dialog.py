@@ -1,12 +1,11 @@
 """앱 정보(About) 다이얼로그.
 
-버전 · GitHub 링크 · 업데이트 확인 · 라이선스 정보를 한 화면에서 보여준다.
+버전 · 업데이트 확인 · 라이선스 정보를 한 화면에서 보여준다.
 업데이트 확인 버튼은 콜백(on_check_update)을 받아 호출측의 흐름과 연결된다 —
 다이얼로그 자체는 updater 와 직접 통신하지 않는다.
 """
 
 import sys
-import webbrowser
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -33,8 +32,6 @@ _DEPENDENCIES: list[tuple[str, str, str]] = [
     ("idna",               "BSD",                "https://github.com/kjd/idna"),
 ]
 
-_REPO_URL = "https://github.com/Hyuntae-Jeong/Pinstock"
-_LICENSE_URL = "https://github.com/Hyuntae-Jeong/Pinstock/blob/main/LICENSE"
 _APP_LICENSE_LINE = "MIT License — 자유롭게 사용·수정·재배포할 수 있습니다."
 
 
@@ -95,13 +92,7 @@ class AboutDialog(QDialog):
         header_row.addLayout(title_col, 1)
         root.addLayout(header_row)
 
-        # ── 액션 버튼들 ───────────────────────────────────────────────────
-        gh_btn = QPushButton("GitHub 리포지토리 열기")
-        gh_btn.setProperty("flat", "true")
-        gh_btn.setFixedHeight(34)
-        gh_btn.clicked.connect(lambda: webbrowser.open(_REPO_URL))
-        root.addWidget(gh_btn)
-
+        # ── 업데이트 확인 버튼 ─────────────────────────────────────────────
         self.btn_check_update = QPushButton("🔄  업데이트 확인")
         self.btn_check_update.setFixedHeight(36)
         if self._on_check_update is not None:
@@ -168,8 +159,7 @@ class AboutDialog(QDialog):
             for name, license_name, url in _DEPENDENCIES
         )
         return f"""
-            <p><b>Pinstock</b> — {_APP_LICENSE_LINE}<br>
-            <a href="{_LICENSE_URL}">LICENSE 전문 보기</a></p>
+            <p><b>Pinstock</b> — {_APP_LICENSE_LINE}</p>
             <p><b>사용 중인 오픈소스 라이브러리</b></p>
             <ul>
                 {deps_html}
