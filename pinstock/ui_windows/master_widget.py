@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QApplication,
     QPushButton, QSlider, QStyle, QStyleOptionSlider,
 )
-from PyQt6.QtCore import Qt, QPoint, QRectF, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QRectF, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor
 
 from .theme import C
@@ -223,6 +223,7 @@ class MasterWidget(QWidget):
     RADIUS   = 13
     DRAG_THRESHOLD = 4
     MASK     = "•••••"   # 자산 숨김 시 4지표/종목 손익에 표시
+    PEEK_HOLD_MS = 500   # 자산 숨김 모드에서 이 시간 이상 꾹 누르면 임시로 자산 표시
 
     # 투명도 슬라이더 범위 (퍼센트). Windows 는 macOS(60–100) 보다 넓게 10–100.
     OPACITY_MIN = 10
@@ -254,6 +255,13 @@ class MasterWidget(QWidget):
         self._total_invest: int = 0
         self._total_eval: int = 0
         self._has_data: bool = False
+        # 자산 숨김 모드에서 본체를 꾹 누르고 있는 동안만 임시로 자산을 보여주는 상태.
+        # _assets_hidden(영구 상태) 은 건드리지 않고 마스킹만 잠깐 해제한다.
+        self._peek_reveal: bool = False
+        self._peek_timer = QTimer(self)
+        self._peek_timer.setSingleShot(True)
+        self._peek_timer.setInterval(self.PEEK_HOLD_MS)
+        self._peek_timer.timeout.connect(self._start_peek)
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -471,6 +479,9 @@ class MasterWidget(QWidget):
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        # 숨겨지는 동안 release 이벤트를 못 받을 수 있으니 진행 중인 임시 노출은 정리.
+        if hasattr(self, "_peek_timer"):
+            self._end_peek()
         if hasattr(self, "slider_window"):
             self.slider_window.hide()
         if hasattr(self, "lock_overlay"):
@@ -536,10 +547,14 @@ class MasterWidget(QWidget):
         if self.is_expanded:
             self.collapse()
 
+    def _is_masked(self) -> bool:
+        """현재 자산 값을 가려야 하는지. 숨김 모드라도 꾹 누르기로 임시 노출 중이면 안 가림."""
+        return self._assets_hidden and not self._peek_reveal
+
     def _render_metrics(self):
         muted = f"color: {C['subtext']}; font-size: 13px; font-weight: bold;"
 
-        if self._assets_hidden:
+        if self._is_masked():
             mask = self.MASK
             self.invest_val.setText(mask)
             self.eval_val.setText(mask)
@@ -591,9 +606,33 @@ class MasterWidget(QWidget):
         if self._assets_hidden == hidden:
             return
         self._assets_hidden = hidden
+        # 숨김 상태가 외부에서 바뀌면 진행 중이던 임시 노출(peek) 은 정리.
+        self._peek_timer.stop()
+        self._peek_reveal = False
         self._render_metrics()
         if self.is_expanded:
             self._render_holdings()
+
+    # ── 꾹 누르기(long-press) 임시 노출 ──────────────────────────────────
+    def _rerender_assets(self):
+        """현재 마스킹 상태로 4지표(+펼침 시 종목 행)를 다시 그린다."""
+        self._render_metrics()
+        if self.is_expanded:
+            self._render_holdings()
+
+    def _start_peek(self):
+        """꾹 누르기 PEEK_HOLD_MS 경과 → 누르고 있는 동안만 자산 표시."""
+        if not self._assets_hidden or self._peek_reveal:
+            return
+        self._peek_reveal = True
+        self._rerender_assets()
+
+    def _end_peek(self):
+        """누르기 해제(또는 위젯 숨김) → 다시 마스킹."""
+        self._peek_timer.stop()
+        if self._peek_reveal:
+            self._peek_reveal = False
+            self._rerender_assets()
 
     # ── 보유 종목 목록 표시 ──────────────────────────────────────────────
     ROW_H        = 20    # 종목 1행 높이 (폰트 11 + 약간의 여유)
@@ -655,7 +694,7 @@ class MasterWidget(QWidget):
 
             profit = int(h["profit"])
             rate   = float(h["profit_rate"])
-            if self._assets_hidden:
+            if self._is_masked():
                 color, sign = C['subtext'], ""
                 profit_text = self.MASK
                 rate_text   = self.MASK
@@ -749,6 +788,9 @@ class MasterWidget(QWidget):
             self._drag_pos  = event.globalPosition().toPoint() - self.pos()
             self._press_pos = event.globalPosition().toPoint()
             self._moved     = False
+            # 자산 숨김 모드에서 가만히 꾹 누르고 있으면 PEEK_HOLD_MS 뒤 임시 노출.
+            if self._assets_hidden and not self._drag_locked:
+                self._peek_timer.start()
 
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
@@ -756,17 +798,20 @@ class MasterWidget(QWidget):
                 delta = event.globalPosition().toPoint() - self._press_pos
                 if abs(delta.x()) > self.DRAG_THRESHOLD or abs(delta.y()) > self.DRAG_THRESHOLD:
                     self._moved = True
+                    # 드래그로 판정되면 아직 발화 안 한 꾹 누르기 타이머는 취소.
+                    self._peek_timer.stop()
             # 잠금 모드면 _moved 만 표시(릴리즈 시 토글 발화 차단)하고 실제 이동은 건너뜀
             if self._moved and not self._drag_locked:
                 self.move(event.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, event):
-        # 드래그가 아니고 잠금 모드도 아닐 때만 클릭 → 종목 목록 토글.
+        # 드래그가 아니고 잠금 모드도 아니며 꾹 누르기 노출도 없었을 때만 클릭 → 목록 토글.
         # 잠금 모드면 마스터 본체는 어떤 클릭에도 반응하지 않음 (슬라이더는 별개 위젯이라 영향 없음).
-        if (event.button() == Qt.MouseButton.LeftButton
-                and not self._moved
-                and not self._drag_locked):
-            self.toggle_expand()
+        if event.button() == Qt.MouseButton.LeftButton:
+            was_peeking = self._peek_reveal
+            self._end_peek()   # 누르기 해제 → 다시 마스킹
+            if not self._moved and not self._drag_locked and not was_peeking:
+                self.toggle_expand()
         self._drag_pos  = None
         self._press_pos = None
         self._moved     = False
