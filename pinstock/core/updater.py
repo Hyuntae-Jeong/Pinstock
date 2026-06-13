@@ -34,8 +34,6 @@ USER_AGENT = f"Pinstock/{__version__}"
 class ReleaseInfo:
     tag: str            # e.g. "v0.1.4"
     version: str        # e.g. "0.1.4"
-    body: str           # 릴리즈 노트 (마크다운)
-    html_url: str       # 릴리즈 페이지 URL
     asset_url: str      # 현재 OS 용 ZIP 직접 다운로드 URL
     asset_name: str     # e.g. "Pinstock-win-v0.1.4.zip"
     asset_size: int     # bytes
@@ -187,8 +185,6 @@ def fetch_latest_release_with_error(
     release = ReleaseInfo(
         tag=tag,
         version=version,
-        body=data.get("body", "") or "",
-        html_url=data.get("html_url", ""),
         asset_url=asset["browser_download_url"],
         asset_name=asset["name"],
         asset_size=int(asset.get("size", 0)),
