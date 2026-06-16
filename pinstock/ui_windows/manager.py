@@ -464,28 +464,40 @@ class WidgetManager:
         self.about_act.triggered.connect(self.open_about_dialog)
         quit_act.triggered.connect(self.app.quit)
 
-        menu.addAction(add_act)
-        menu.addAction(manage_act)
+        # ── 최상위: 자주 쓰는 토글 ──
+        menu.addAction(self.toggle_act)          # 전체 위젯 숨기기/표시
+        menu.addAction(self.master_toggle_act)   # 자산 숨기기/표시
+        menu.addAction(self.watch_toggle_act)    # 관심종목 켜기/끄기
         menu.addSeparator()
-        # 관심종목 — 보유와 구분선으로 분리 (별도 저장·독립 동작)
-        menu.addAction(watch_add_act)
-        menu.addAction(watch_manage_act)
-        menu.addAction(self.watch_toggle_act)
-        menu.addAction(watch_reset_act)   # 관심 위치 초기화 — 관심종목 메뉴 그룹으로
+
+        # ── 보유종목 · 관심종목 — 추가/관리는 하위 메뉴로 묶음 ──
+        stock_menu = menu.addMenu("📈   보유종목")
+        stock_menu.setStyleSheet(TRAY_MENU_STYLE)
+        stock_menu.addAction(add_act)
+        stock_menu.addAction(manage_act)
+        watch_menu = menu.addMenu("⭐   관심종목")
+        watch_menu.setStyleSheet(TRAY_MENU_STYLE)
+        watch_menu.addAction(watch_add_act)
+        watch_menu.addAction(watch_manage_act)
         menu.addSeparator()
-        menu.addAction(export_act)
-        menu.addAction(import_act)
-        menu.addSeparator()
-        menu.addAction(self.toggle_act)
-        menu.addAction(self.master_toggle_act)
-        menu.addAction(self.us_basis_act)
-        menu.addAction(reset_act)
-        menu.addAction(gather_act)
+
+        # ── 화면 정렬 · 설정 ──
+        layout_menu = menu.addMenu("📐   화면 정렬")
+        layout_menu.setStyleSheet(TRAY_MENU_STYLE)
+        layout_menu.addAction(reset_act)
+        layout_menu.addAction(watch_reset_act)
+        layout_menu.addAction(gather_act)
+        settings_menu = menu.addMenu("⚙️   설정")
+        settings_menu.setStyleSheet(TRAY_MENU_STYLE)
+        settings_menu.addAction(self.us_basis_act)
+        settings_menu.addAction(export_act)
+        settings_menu.addAction(import_act)
         if autostart_supported():
-            menu.addSeparator()
             self.autostart_act.setChecked(is_autostart_enabled())
-            menu.addAction(self.autostart_act)
+            settings_menu.addAction(self.autostart_act)
         menu.addSeparator()
+
+        # ── 정보 · 종료 ──
         menu.addAction(help_act)
         menu.addAction(self.about_act)
         menu.addAction(quit_act)
