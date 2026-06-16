@@ -54,6 +54,7 @@ class StockRow(QWidget):
         self.data = stock_data
         self.current_price: float = 0
         self.usd_krw_rate: float | None = None
+        self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
         self.is_expanded: bool = False
         self._prev_close: float = 0.0
         self.assets_hidden: bool = False
@@ -304,6 +305,10 @@ class StockRow(QWidget):
         self.usd_krw_rate = rate
         self._refresh_detail()
 
+    def set_us_return_basis(self, basis: str):
+        self.us_return_basis = "usd" if basis == "usd" else "krw"
+        self._refresh_detail()
+
     def apply_minute(self, prices: list, open_price: float):
         self.sparkline.set_data(prices, open_price, self._prev_close)
 
@@ -343,6 +348,12 @@ class StockRow(QWidget):
             self.fx_profit_val.setStyleSheet(f"color: {fx_color}; font-size: 11px;")
             self.total_profit_val.setText(f"{sign}{profit:,} 원")
             self.total_profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+            if self.us_return_basis == "usd":
+                prate = metrics["profit_rate_stock"]
+                self.prate_key.setText("수익률 (달러)")
+            else:
+                prate = metrics["profit_rate"]
+                self.prate_key.setText("수익률 (원화)")
         else:
             self.EXPAND_H = self.EXPAND_H_KR
             self._set_row_visible(self.fx_row, False)
@@ -360,8 +371,10 @@ class StockRow(QWidget):
         self.qty_val.setText(f"{format_quantity(qty)} 주")
         self.invest_val.setText(f"{invest:,} 원")
         self.eval_val.setText(f"{eval_:,} 원")
-        self.prate_val.setText(f"{sign}{prate:.2f}%")
-        self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        prate_sign = "+" if prate >= 0 else ""
+        prate_color = C["red"] if prate >= 0 else C["blue"]
+        self.prate_val.setText(f"{prate_sign}{prate:.2f}%")
+        self.prate_val.setStyleSheet(f"color: {prate_color}; font-size: 11px; font-weight: bold;")
         if self.is_expanded:
             self.setFixedHeight(self._expanded_height())
 
@@ -794,6 +807,7 @@ class Popover(QWidget):
         self._daily_cache: dict[str, list] = {}    # code → 일봉 candles
         self._assets_hidden: bool = False
         self._usd_krw_rate: float | None = None
+        self._us_return_basis: str = "krw"
         self._market_filter: str = "ALL"
         self._preferred_height: int | None = None
         self._pinned: bool = False
@@ -1155,6 +1169,7 @@ class Popover(QWidget):
         for s in visible_stocks:
             row = StockRow(s)
             row.assets_hidden = self._assets_hidden
+            row.us_return_basis = self._us_return_basis
             row.set_usd_krw_rate(self._usd_krw_rate)
             row.edit_requested.connect(self.edit_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
@@ -1217,6 +1232,11 @@ class Popover(QWidget):
         self._usd_krw_rate = rate
         for row in self.rows.values():
             row.set_usd_krw_rate(rate)
+
+    def set_us_return_basis(self, basis: str):
+        self._us_return_basis = "usd" if basis == "usd" else "krw"
+        for row in self.rows.values():
+            row.set_us_return_basis(self._us_return_basis)
 
     def update_stock_minute(self, code: str, prices: list, open_price: float):
         self._minute_cache[code] = (prices, open_price)

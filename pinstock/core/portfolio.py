@@ -58,6 +58,7 @@ def stock_metrics(
             "eval": round(eval_),
             "profit": round(profit),
             "profit_rate": profit_rate,
+            "profit_rate_stock": profit_rate,
             "stock_profit": round(profit),
             "fx_profit": 0,
             "current_rate": 1.0,
@@ -81,12 +82,14 @@ def stock_metrics(
     stock_profit = (price - avg_price) * quantity * buy_rate
     fx_profit = price * quantity * (current_rate - buy_rate)
     profit_rate = (profit / invest * 100.0) if invest else 0.0
+    profit_rate_stock = ((price - avg_price) / avg_price * 100.0) if avg_price else 0.0
 
     return {
         "invest": round(invest),
         "eval": round(eval_),
         "profit": round(profit),
         "profit_rate": profit_rate,
+        "profit_rate_stock": profit_rate_stock,
         "stock_profit": round(stock_profit),
         "fx_profit": round(fx_profit),
         "current_rate": current_rate,

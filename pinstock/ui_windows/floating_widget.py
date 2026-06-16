@@ -50,6 +50,7 @@ class StockWidget(QWidget):
         self.data = stock_data          # code, name, avg_price, quantity, pos
         self.current_price: float = 0
         self.usd_krw_rate: float | None = None
+        self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
         self.is_expanded: bool = False
         self._drag_pos = None
         self._press_pos = None    # 좌클릭 시작 위치 (드래그/클릭 구분용)
@@ -306,6 +307,11 @@ class StockWidget(QWidget):
         if self.current_price:
             self._update_detail(self.current_price)
 
+    def set_us_return_basis(self, basis: str):
+        self.us_return_basis = "usd" if basis == "usd" else "krw"
+        if self.current_price:
+            self._update_detail(self.current_price)
+
     def _fetch_chart(self):
         """sparkline 갱신 (60초 주기) — 당일 분봉 우선, 비어있으면 최근 일봉 폴백."""
         if is_us_stock(self.data):
@@ -437,6 +443,12 @@ class StockWidget(QWidget):
             self.fx_profit_val.setStyleSheet(f"color: {fx_color}; font-size: 11px;")
             self.total_profit_val.setText(f"{sign}{profit:,} 원")
             self.total_profit_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+            if self.us_return_basis == "usd":
+                prate = metrics["profit_rate_stock"]
+                self.prate_key.setText("수익률 (달러)")
+            else:
+                prate = metrics["profit_rate"]
+                self.prate_key.setText("수익률 (원화)")
         else:
             self.EXPAND_H = self.EXPAND_H_KR
             self._set_row_visible(self.fx_row, False)
@@ -454,8 +466,10 @@ class StockWidget(QWidget):
         self.qty_val.setText(f"{format_quantity(qty)} 주")
         self.invest_val.setText(f"{invest:,} 원")
         self.eval_val.setText(f"{eval_:,} 원")
-        self.prate_val.setText(f"{sign}{prate:.2f}%")
-        self.prate_val.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+        prate_sign = "+" if prate >= 0 else ""
+        prate_color = C["red"] if prate >= 0 else C["blue"]
+        self.prate_val.setText(f"{prate_sign}{prate:.2f}%")
+        self.prate_val.setStyleSheet(f"color: {prate_color}; font-size: 11px; font-weight: bold;")
         # 패널 높이를 종목 타입(EXPAND_H)에 맞춰 동기화 — 패널 바닥이 카드 바닥과 일치해야 마지막 행이 안 잘림
         self.expand_panel.setGeometry(0, self._compact_height, self.W, self.EXPAND_H - self.COMPACT_H)
         if self.is_expanded:

@@ -195,6 +195,7 @@ class MacAppManager(QObject):
         self.master_visible: bool = True
         self.master_pos: list | None = None
         self.assets_hidden: bool = False
+        self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
         self.popover_opacity: float = 1.0
         self.popover_height: int | None = None
         self.popover_offset: list[int] | None = None
@@ -230,6 +231,7 @@ class MacAppManager(QObject):
 
         # 로드한 자산 숨김 / 팝오버 투명도 상태를 팝오버에 한 번 주입
         self.popover.set_assets_hidden(self.assets_hidden)
+        self.popover.set_us_return_basis(self.us_return_basis)
         self.tray_assets_action.setText(_checkmark_text(_LABEL_ASSETS_HIDDEN, self.assets_hidden))
         self.popover.set_opacity(self.popover_opacity)
         self.popover.set_preferred_height(self.popover_height)
@@ -281,6 +283,9 @@ class MacAppManager(QObject):
         menu.addSeparator()
         self.tray_assets_action = menu.addAction(
             _LABEL_ASSETS_HIDDEN, self._toggle_assets_hidden
+        )
+        self.tray_us_basis_action = menu.addAction(
+            self._us_basis_text(), self.toggle_us_return_basis
         )
         if autostart_supported():
             self.autostart_action = menu.addAction(
@@ -427,6 +432,17 @@ class MacAppManager(QObject):
         self.tray_assets_action.setText(_checkmark_text(_LABEL_ASSETS_HIDDEN, self.assets_hidden))
         self._save_config()
 
+    def _us_basis_text(self) -> str:
+        label = "달러" if self.us_return_basis == "usd" else "원화"
+        return f"미국 수익률 기준: {label}"
+
+    def toggle_us_return_basis(self):
+        """미국 주식 상세의 수익률(%)을 원화 기준(환율 포함) ↔ 달러 기준(주가만) 전환."""
+        self.us_return_basis = "usd" if self.us_return_basis == "krw" else "krw"
+        self.popover.set_us_return_basis(self.us_return_basis)
+        self.tray_us_basis_action.setText(self._us_basis_text())
+        self._save_config()
+
     def toggle_autostart(self):
         """로그인 시 자동 실행 등록/해제 (LaunchAgent). 실제 반영된 상태로
         라벨의 ✓ 체크를 동기화한다 (plist 쓰기 실패 시 원복)."""
@@ -546,6 +562,7 @@ class MacAppManager(QObject):
                 except (TypeError, ValueError):
                     self.master_pos = None
             self.assets_hidden = bool(data.get("assets_hidden", False))
+            self.us_return_basis = "usd" if data.get("us_return_basis") == "usd" else "krw"
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
                 self.popover_opacity = max(0.1, min(1.0, opacity))
@@ -593,6 +610,7 @@ class MacAppManager(QObject):
                 "pos": self.master_pos,
             },
             "assets_hidden": self.assets_hidden,
+            "us_return_basis": self.us_return_basis,
             "popover_opacity": self.popover_opacity,
             "popover_height": self.popover_height,
             "popover_offset": self.popover_offset,

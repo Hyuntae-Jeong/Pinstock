@@ -99,6 +99,7 @@ class WidgetManager:
         self.assets_hidden: bool = False
         self.popover_opacity: float = 1.0
         self.usd_krw_rate: float | None = None
+        self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
         self.market_filter: str = "ALL"
 
         # 투명도 슬라이더가 멈춘 뒤에만 click-through 토글 + 설정 저장 — 50% 경계를
@@ -168,6 +169,19 @@ class WidgetManager:
             else:
                 w.hide()
         self.watch_toggle_act.setText(self._watch_toggle_text())
+        self._save_config()
+
+    # ── 미국 주식 수익률 표시 기준 (원화 / 달러) ──────────────────────────────
+    def _us_basis_text(self) -> str:
+        label = "달러" if self.us_return_basis == "usd" else "원화"
+        return f"💱   미국 수익률 기준: {label}"
+
+    def toggle_us_return_basis(self):
+        """미국 주식 상세의 수익률(%)을 원화 기준(환율 포함) ↔ 달러 기준(주가만) 전환."""
+        self.us_return_basis = "usd" if self.us_return_basis == "krw" else "krw"
+        self.us_basis_act.setText(self._us_basis_text())
+        for w in self.widgets.values():
+            w.set_us_return_basis(self.us_return_basis)
         self._save_config()
 
     # ── 위치 초기화 ───────────────────────────────────────────────────────
@@ -423,6 +437,7 @@ class WidgetManager:
         import_act = QAction("📥   Excel에서 가져오기", menu)
         self.toggle_act = QAction("🙈   숨기기", menu)
         self.master_toggle_act = QAction(self._master_toggle_text(), menu)
+        self.us_basis_act = QAction(self._us_basis_text(), menu)
         reset_act  = QAction("📐   위치 초기화", menu)
         watch_reset_act = QAction("📐   관심 위치 초기화", menu)
         gather_act = QAction("🎯   마스터 화면에 정렬", menu)
@@ -440,6 +455,7 @@ class WidgetManager:
         import_act.triggered.connect(self.open_import_dialog)
         self.toggle_act.triggered.connect(self.toggle_visibility)
         self.master_toggle_act.triggered.connect(self.toggle_master_visibility)
+        self.us_basis_act.triggered.connect(self.toggle_us_return_basis)
         reset_act.triggered.connect(self.reset_positions)
         watch_reset_act.triggered.connect(self.reset_watch_positions)
         gather_act.triggered.connect(self.gather_to_master_screen)
@@ -462,6 +478,7 @@ class WidgetManager:
         menu.addSeparator()
         menu.addAction(self.toggle_act)
         menu.addAction(self.master_toggle_act)
+        menu.addAction(self.us_basis_act)
         menu.addAction(reset_act)
         menu.addAction(gather_act)
         if autostart_supported():
@@ -545,6 +562,7 @@ class WidgetManager:
                     self.master_pos = None
             self.assets_hidden = bool(data.get("assets_hidden", False))
             self.watch_visible = bool(data.get("watch_visible", True))
+            self.us_return_basis = "usd" if data.get("us_return_basis") == "usd" else "krw"
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
                 # Windows 는 10–100% 까지 허용 (macOS 는 자체적으로 60% 미만은 60% 로 clamp).
@@ -580,6 +598,7 @@ class WidgetManager:
             },
             "assets_hidden": self.assets_hidden,
             "watch_visible": self.watch_visible,
+            "us_return_basis": self.us_return_basis,
             "popover_opacity": self.popover_opacity,
         }
         upd: dict = {}
@@ -852,6 +871,7 @@ class WidgetManager:
         w.price_updated.connect(lambda _: self._recompute_master())
         w.layout_changed.connect(lambda _: self._schedule_visible_widgets_reflow())
         w.set_usd_krw_rate(self.usd_krw_rate)
+        w.set_us_return_basis(self.us_return_basis)
 
         pos = stock.get("pos", [def_x, def_y])
         w.move(pos[0], pos[1])
