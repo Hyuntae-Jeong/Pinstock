@@ -50,6 +50,9 @@ class SearchLineEdit(AutoSelectLineEdit):
     확정 텍스트든 조합 중 텍스트든 바뀔 때마다 textComposed 시그널을 쏜다."""
 
     textComposed = pyqtSignal()
+    # 검색창에서 Enter 를 눌렀을 때(자동완성 팝업이 닫힌 상태) 방출.
+    # 다이얼로그 기본 버튼(확인) 대신 '즉시 검색'으로 연결하는 용도.
+    searchRequested = pyqtSignal()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -97,6 +100,23 @@ class SearchLineEdit(AutoSelectLineEdit):
             except (TypeError, RuntimeError):
                 # 연결이 아직(혹은 이미) 없으면 disconnect 가 예외를 던진다 — 무시
                 pass
+
+    def keyPressEvent(self, event):
+        # Enter 처리는 자동완성 팝업이 떠 있는지로 갈린다:
+        #   · 팝업이 떠 있으면 → 기본 동작(QLineEdit+QCompleter)에 맡겨, 방향키로
+        #     고른 항목이 그대로 선택되게 한다.
+        #   · 팝업이 닫혀 있으면 → 다이얼로그 기본 버튼(확인)으로 흘려보내 곧장
+        #     추가되는 걸 막고, 검색 요청 신호만 쏜 뒤 이벤트를 소비한다.
+        # 읽기전용(편집 모드)일 땐 손대지 않아 Enter 로 그대로 확정되게 둔다.
+        if (not self.isReadOnly()
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            completer = self.completer()
+            popup = completer.popup() if completer is not None else None
+            if popup is None or not popup.isVisible():
+                self.searchRequested.emit()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
 
 class AutoSelectSpinBox(_SelectAllOnFocus, QSpinBox):

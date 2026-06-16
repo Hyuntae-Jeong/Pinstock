@@ -219,6 +219,8 @@ class StockDialog(QDialog):
         self.code_edit.editingFinished.connect(self._preview_name)
         # textComposed: 확정 텍스트뿐 아니라 IME 조합 중인 글자 변화까지 알린다
         self.code_edit.textComposed.connect(self._on_code_text_edited)
+        # 종목명/코드 칸에서 Enter: 종목을 바로 추가하지 않고 검색 결과만 띄운다
+        self.code_edit.searchRequested.connect(self._search_now)
         layout.addRow(self._row_label("종목 코드"), self.code_edit)
 
         # 종목 이름/티커 검색용 드롭다운 자동완성 (KR·US 공용, 항상 부착)
@@ -440,6 +442,14 @@ class StockDialog(QDialog):
         self._search_timer.stop()
         self._search_model.clear()
         self._last_search_query = ""
+
+    def _search_now(self):
+        """Enter 로 요청된 즉시 검색. 디바운스를 건너뛰고 바로 드롭다운을 띄운다.
+        _last_search_query 를 비워, 직전과 같은 검색어여도 중복검색 가드에 막히지
+        않고 결과가 다시 뜨게 한다."""
+        self._search_timer.stop()
+        self._last_search_query = ""
+        self._run_search()
 
     def _run_search(self):
         query = self.code_edit.composedText().strip()
