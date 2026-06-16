@@ -570,6 +570,8 @@ class StockWidget(QWidget):
             self.data["quantity"]  = new["quantity"]
             if "buy_exchange_rate" in new:
                 self.data["buy_exchange_rate"] = new["buy_exchange_rate"]
+            else:
+                self.data.pop("buy_exchange_rate", None)
             if self.current_price:
                 self._update_detail(self.current_price)
             self.edited.emit(self.data["code"])

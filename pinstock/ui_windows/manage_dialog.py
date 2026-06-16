@@ -178,7 +178,7 @@ class StockDialog(QDialog):
             self.setWindowTitle("관심종목 수정" if self.is_edit else "관심종목 추가")
         else:
             self.setWindowTitle("종목 수정" if self.is_edit else "종목 추가")
-        self.setFixedSize(380, 270 if watch_mode else 360)
+        self.setFixedSize(380 if watch_mode else 410, 270 if watch_mode else 360)
         self.setStyleSheet(DIALOG_STYLE)
         self._preview_result: dict | None = None
 
@@ -253,14 +253,36 @@ class StockDialog(QDialog):
         self.avg_spin.setSuffix("  원")
         layout.addRow(self.avg_label, self.avg_spin)
 
-        self.krw_avg_label = self._row_label("원화 매입단가")
-        self.krw_avg_spin = AutoSelectDoubleSpinBox()
-        self.krw_avg_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self.krw_avg_spin.setRange(1, 1_000_000_000)
-        self.krw_avg_spin.setSingleStep(1000)
-        self.krw_avg_spin.setDecimals(0)
-        self.krw_avg_spin.setSuffix("  원/주")
-        layout.addRow(self.krw_avg_label, self.krw_avg_spin)
+        # 미국 주식 매수 기준: 증권사마다 보유 화면에 보여주는 값이 달라(원화 단가가
+        # 아예 안 보이는 곳도 있음), 무엇을 입력하든 매수 환율(buy_exchange_rate)
+        # 하나로 환산해 저장한다. '모름'이면 저장하지 않고 계산 시 현재 환율로 폴백.
+        self.basis_label = self._row_label("매수 기준")
+        self.basis_combo = _NoScrollComboBox()
+        self.basis_combo.addItem("원화 매입단가", "krw_unit")
+        self.basis_combo.addItem("매수 환율", "fx_rate")
+        self.basis_combo.addItem("원화 매입금액", "krw_total")
+        self.basis_combo.addItem("모름", "unknown")
+        self.basis_combo.setFixedWidth(120)
+        self.basis_combo.setToolTip("증권사 보유 화면에 보이는 값에 맞춰 선택하세요")
+
+        self.basis_spin = AutoSelectDoubleSpinBox()
+        self.basis_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.basis_spin.setRange(0, 1_000_000_000_000)
+
+        self.basis_hint = QLabel("현재 환율로 계산")
+        self.basis_hint.setStyleSheet(f"color: {C['subtext']}; font-size: 11px;")
+
+        self.basis_field = QWidget()
+        basis_row = QHBoxLayout(self.basis_field)
+        basis_row.setContentsMargins(0, 0, 0, 0)
+        basis_row.setSpacing(8)
+        basis_row.addWidget(self.basis_combo)
+        basis_row.addWidget(self.basis_spin, 1)
+        basis_row.addWidget(self.basis_hint, 1)
+        layout.addRow(self.basis_label, self.basis_field)
+
+        self.basis_combo.currentIndexChanged.connect(self._on_basis_changed)
+        self._on_basis_changed()
 
         # 수량 (paintEvent로 ▲▼ 화살표 직접 그림)
         # 정수면 '1주', 사용자가 소수점 입력하면 '1.5주'처럼 trailing zero 없이 표시
@@ -300,13 +322,20 @@ class StockDialog(QDialog):
             self.code_edit.setReadOnly(True)
             self.avg_spin.setValue(float(data.get("avg_price", 0)))
             self.qty_spin.setValue(float(data.get("quantity", 1)))
-            if data.get("buy_exchange_rate"):
-                krw_avg = float(data.get("avg_price", 0)) * float(data.get("buy_exchange_rate", 0))
-                self.krw_avg_spin.setValue(krw_avg)
+            # 매수 기준(매수 환율) 프리필은 시장 적용(_on_market_changed) 이후에 한다.
             if data.get("name"):
                 self._set_preview_found(data["name"])
 
         self._on_market_changed()
+
+        # 매수 기준 프리필 (편집 모드·미국 주식): 저장된 매수 환율을 그대로 표시
+        if self.is_edit and self.market() == MARKET_US:
+            saved_rate = float((data or {}).get("buy_exchange_rate") or 0)
+            if saved_rate > 0:
+                self.basis_combo.setCurrentIndex(1)   # 매수 환율
+                self.basis_spin.setValue(saved_rate)
+            else:
+                self.basis_combo.setCurrentIndex(3)   # 모름
 
         # 관심종목 모드: 평단가/원화단가/수량 행을 접어 코드·종목명만 입력받는다
         if self.watch_mode:
@@ -496,23 +525,68 @@ class StockDialog(QDialog):
             self.avg_spin.setSuffix("  USD")
             if not self.is_edit:
                 self.avg_spin.setValue(1.0000)
-            self.krw_avg_spin.setVisible(True)
-            self.krw_avg_label.setVisible(True)
+            self.basis_label.setVisible(True)
+            self.basis_field.setVisible(True)
+            self._on_basis_changed()
         else:
             self.code_edit.setPlaceholderText("예: 삼성전자 / 005930")
             self.avg_label.setText("평단가")
             self.avg_spin.setDecimals(0)
             self.avg_spin.setSingleStep(100)
             self.avg_spin.setSuffix("  원")
-            self.krw_avg_spin.setVisible(False)
-            self.krw_avg_label.setVisible(False)
+            self.basis_label.setVisible(False)
+            self.basis_field.setVisible(False)
         # 관심종목 모드에서는 시장이 바뀌어도 가격/수량 행을 항상 접어둔다
         if getattr(self, "watch_mode", False):
             self._collapse_price_fields()
 
+    def _on_basis_changed(self):
+        """매수 기준 선택에 따라 값 입력칸의 단위/소수점/표시를 바꾼다."""
+        mode = self.basis_combo.currentData()
+        if mode == "fx_rate":
+            self.basis_spin.setDecimals(2)
+            self.basis_spin.setSingleStep(10)
+            self.basis_spin.setRange(0, 100_000)
+            self.basis_spin.setSuffix("  원/$")
+        elif mode == "krw_total":
+            self.basis_spin.setDecimals(0)
+            self.basis_spin.setSingleStep(10_000)
+            self.basis_spin.setRange(0, 1_000_000_000_000)
+            self.basis_spin.setSuffix("  원")
+        else:  # krw_unit
+            self.basis_spin.setDecimals(0)
+            self.basis_spin.setSingleStep(1_000)
+            self.basis_spin.setRange(0, 1_000_000_000)
+            self.basis_spin.setSuffix("  원/주")
+        unknown = mode == "unknown"
+        self.basis_spin.setVisible(not unknown)
+        self.basis_hint.setVisible(unknown)
+
+    def _buy_rate_from_basis(self, avg_price: float, quantity: float) -> float | None:
+        """선택한 매수 기준 입력값을 매수 환율(원/$)로 환산한다.
+
+        값이 비었거나(0) 환산이 불가능하면 None — 매수 환율을 저장하지 않아
+        계산 시 현재 환율로 폴백한다('모름'과 동일).
+        """
+        mode = self.basis_combo.currentData()
+        if mode == "unknown":
+            return None
+        value = self.basis_spin.value()
+        if value <= 0 or avg_price <= 0:
+            return None
+        if mode == "fx_rate":
+            rate = value
+        elif mode == "krw_total":
+            if quantity <= 0:
+                return None
+            rate = value / (avg_price * quantity)
+        else:  # krw_unit
+            rate = value / avg_price
+        return round(rate, 4) if rate > 0 else None
+
     def _collapse_price_fields(self):
         """관심종목 다이얼로그: 평단가/원화단가/수량 행을 레이아웃에서 접는다."""
-        for w in (self.avg_spin, self.krw_avg_spin, self.qty_spin):
+        for w in (self.avg_spin, self.basis_field, self.qty_spin):
             self.form_layout.setRowVisible(w, False)
 
     def _selected_tag(self) -> str:
@@ -585,15 +659,18 @@ class StockDialog(QDialog):
                 "tag":      self._selected_tag(),
             }
         avg_price = self.avg_spin.value()
+        quantity = round(self.qty_spin.value(), 3)
         data = {
             "code":      self.code_edit.text().strip().upper(),
             "market":    market,
             "currency":  CURRENCY_USD if market == MARKET_US else CURRENCY_KRW,
             "avg_price": round(avg_price, 4) if market == MARKET_US else int(round(avg_price)),
-            "quantity":  round(self.qty_spin.value(), 3),
+            "quantity":  quantity,
         }
         if market == MARKET_US:
-            data["buy_exchange_rate"] = round(self.krw_avg_spin.value() / avg_price, 4)
+            rate = self._buy_rate_from_basis(avg_price, quantity)
+            if rate is not None:
+                data["buy_exchange_rate"] = rate
         return data
 
 
@@ -1068,6 +1145,8 @@ class ManageStocksDialog(QDialog):
         self._stocks[stock_idx]["quantity"]  = new["quantity"]
         if "buy_exchange_rate" in new:
             self._stocks[stock_idx]["buy_exchange_rate"] = new["buy_exchange_rate"]
+        else:
+            self._stocks[stock_idx].pop("buy_exchange_rate", None)
         self._rebuild_table(select_row=stock_idx)
 
     def _delete_selected(self):

@@ -749,6 +749,8 @@ class MacAppManager(QObject):
         target["quantity"]  = new["quantity"]
         if "buy_exchange_rate" in new:
             target["buy_exchange_rate"] = new["buy_exchange_rate"]
+        else:
+            target.pop("buy_exchange_rate", None)
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()
