@@ -218,7 +218,7 @@ class _CurrencySegmentControl(QWidget):
     def __init__(self, currency: str = "usd", parent=None):
         super().__init__(parent)
         self._currency = "krw" if currency == "krw" else "usd"
-        self.setFixedSize(86, 34)
+        self.setFixedSize(150, 34)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -289,7 +289,7 @@ class BuyPreviewDialog(QDialog):
         action_word = "물타기" if profit_rate < 0 else "불타기"
         action_icon = "💧" if profit_rate < 0 else "🔥"
         self.setWindowTitle(f"{action_icon} {action_word} 매수")
-        self.setFixedSize(640, 430)
+        self.setFixedSize(560, 430)
         self.setStyleSheet(DIALOG_STYLE)
 
         root = QVBoxLayout(self)
@@ -299,23 +299,28 @@ class BuyPreviewDialog(QDialog):
         name = stock.get("name") or stock.get("code", "")
         code = stock.get("code", "")
         title = QLabel(f"{action_icon} {name} ({code}) 추가 매수")
-        title.setStyleSheet(f"color: {C['text']}; font-size: 14px; font-weight: bold;")
-        root.addWidget(title)
+        title.setStyleSheet(
+            f"color: {C['text']}; font-size: 14px; font-weight: bold;"
+        )
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        root.addLayout(title_row)
 
         input_grid = QGridLayout()
         input_grid.setContentsMargins(0, 0, 0, 0)
         input_grid.setHorizontalSpacing(8)
         input_grid.setVerticalSpacing(8)
-        input_grid.setColumnMinimumWidth(0, 44)
-        input_grid.setColumnMinimumWidth(1, 130)
-        input_grid.setColumnMinimumWidth(2, 18)
+        input_grid.setColumnMinimumWidth(0, 58)
+        input_grid.setColumnMinimumWidth(1, 160)
+        input_grid.setColumnMinimumWidth(2, 12)
         input_grid.setColumnMinimumWidth(3, 92)
         input_grid.setColumnMinimumWidth(4, 150)
-        input_grid.setColumnMinimumWidth(5, 86)
         root.addLayout(input_grid)
 
         self.price_val = self._value_label()
-        input_grid.addWidget(self._label("현재가"), 0, 0, Qt.AlignmentFlag.AlignLeft)
+        input_grid.addWidget(self._row_header_label("현재가"), 0, 0)
         input_grid.addWidget(self.price_val, 0, 1)
 
         self.add_qty_spin = QuantitySpinBox()
@@ -340,7 +345,8 @@ class BuyPreviewDialog(QDialog):
         if is_us_stock(self.stock):
             self.amount_currency_btn = _CurrencySegmentControl(self._amount_currency)
             self.amount_currency_btn.currency_changed.connect(self._set_amount_currency)
-            input_grid.addWidget(self.amount_currency_btn, 1, 5, Qt.AlignmentFlag.AlignLeft)
+            input_grid.addWidget(self._label("통화 선택"), 2, 3, Qt.AlignmentFlag.AlignRight)
+            input_grid.addWidget(self.amount_currency_btn, 2, 4, Qt.AlignmentFlag.AlignLeft)
 
         self.add_qty_spin.valueChanged.connect(self._on_add_qty_changed)
         self.add_amount_spin.valueChanged.connect(self._on_add_amount_changed)
@@ -355,8 +361,8 @@ class BuyPreviewDialog(QDialog):
         compare_grid = QGridLayout()
         compare_grid.setHorizontalSpacing(10)
         compare_grid.setVerticalSpacing(9)
-        compare_grid.setColumnMinimumWidth(0, 110)
-        compare_grid.setColumnMinimumWidth(1, 220)
+        compare_grid.setColumnMinimumWidth(0, 58)
+        compare_grid.setColumnMinimumWidth(1, 180)
         compare_grid.setColumnMinimumWidth(2, 220)
         compare_grid.setColumnStretch(0, 0)
         compare_grid.setColumnStretch(1, 0)
