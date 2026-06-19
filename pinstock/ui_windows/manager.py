@@ -55,7 +55,7 @@ from .theme import C, TRAY_MENU_STYLE
 from .floating_widget import StockWidget, TagGroupWidget
 from .master_widget import MasterWidget
 from .manage_dialog import (
-    StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
+    BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
     fetch_quote_for_stock,
 )
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
@@ -880,6 +880,7 @@ class WidgetManager:
         w = StockWidget(stock, width=self.uniform_w, stagger_idx=stagger_idx)
         w.deleted.connect(self._on_delete)
         w.edited.connect(self._on_edited)
+        w.buy_requested.connect(self._on_buy_requested)
         w.price_updated.connect(lambda _: self._recompute_master())
         w.layout_changed.connect(lambda _: self._schedule_visible_widgets_reflow())
         w.set_usd_krw_rate(self.usd_krw_rate)
@@ -898,6 +899,53 @@ class WidgetManager:
 
     def _on_edited(self, _code: str):
         """개별 위젯에서 평단가/수량을 수정한 경우. 저장 + 마스터 갱신."""
+        self._save_config()
+        self._recompute_master()
+
+    def _on_buy_requested(self, code: str):
+        stock = next((s for s in self.stocks if s.get("code") == code), None)
+        widget = self.widgets.get(code)
+        if not stock or not widget:
+            return
+
+        current_price = widget.current_price
+        if not current_price:
+            result = fetch_quote_for_stock(stock)
+            if result:
+                current_price = float(result["price"])
+                widget.current_price = current_price
+        if not current_price:
+            QMessageBox.warning(
+                None,
+                "현재가 없음",
+                "현재가를 확인할 수 없어 예상 평단가를 계산할 수 없습니다.",
+            )
+            return
+        if is_us_stock(stock) and not self.usd_krw_rate:
+            rate_result = fetch_usd_krw_rate()
+            if rate_result:
+                self.usd_krw_rate = float(rate_result["rate"])
+                for w in self.widgets.values():
+                    w.set_usd_krw_rate(self.usd_krw_rate)
+
+        dlg = BuyPreviewDialog(
+            stock=copy.deepcopy(stock),
+            current_price=current_price,
+            usd_krw_rate=self.usd_krw_rate,
+        )
+        if not dlg.exec():
+            return
+
+        updated = dlg.get_data()
+        stock["avg_price"] = updated["avg_price"]
+        stock["quantity"] = updated["quantity"]
+        if "buy_exchange_rate" in updated:
+            stock["buy_exchange_rate"] = updated["buy_exchange_rate"]
+        else:
+            stock.pop("buy_exchange_rate", None)
+
+        widget.data.update(stock)
+        widget._update_detail(current_price)
         self._save_config()
         self._recompute_master()
 

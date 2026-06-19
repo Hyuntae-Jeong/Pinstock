@@ -34,6 +34,7 @@ class StockWidget(QWidget):
 
     deleted        = pyqtSignal(str)   # code 전달
     edited         = pyqtSignal(str)   # 수정 완료 후 저장 요청
+    buy_requested  = pyqtSignal(str)   # 추가 매수 예상/확정 요청
     price_updated  = pyqtSignal(str)   # 현재가 갱신 시 (마스터 위젯 재집계용)
     layout_changed = pyqtSignal(str)   # compact 높이 변경 시 재정렬 요청
 
@@ -565,12 +566,22 @@ class StockWidget(QWidget):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(TRAY_MENU_STYLE)
+        metrics = stock_metrics(
+            self.data,
+            self.current_price or self.data.get("avg_price", 0),
+            self.usd_krw_rate,
+        )
+        buy_label = "💧   물타기" if metrics["profit_rate"] < 0 else "🔥   불타기"
+        buy_act = menu.addAction(buy_label)
+        menu.addSeparator()
         edit_act = menu.addAction("✏️   수정")
         menu.addSeparator()
         del_act  = menu.addAction("🗑️   삭제")
 
         action = menu.exec(event.globalPos())
-        if action == edit_act:
+        if action == buy_act:
+            self.buy_requested.emit(self.data["code"])
+        elif action == edit_act:
             self._open_edit()
         elif action == del_act:
             self.deleted.emit(self.data["code"])

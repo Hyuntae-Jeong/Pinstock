@@ -31,7 +31,8 @@ from ..core.storage import (
     normalize_watchlist_schema, normalize_tags, prune_watch_tags,
 )
 from ..ui_windows.manage_dialog import (
-    StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog, fetch_quote_for_stock,
+    BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
+    ImportModeDialog, fetch_quote_for_stock,
 )
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
@@ -220,6 +221,7 @@ class MacAppManager(QObject):
         self.menubar.toggle_popover_requested.connect(self._on_toggle_popover)
         self.menubar.context_menu_requested.connect(self._on_tray_context_menu)
         self.popover.toggle_assets_requested.connect(self._toggle_assets_hidden)
+        self.popover.buy_requested.connect(self._on_buy_request)
         self.popover.edit_requested.connect(self._on_edit_request)
         self.popover.delete_requested.connect(self._on_delete_request)
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
@@ -750,6 +752,52 @@ class MacAppManager(QObject):
 
         self.stocks = new_stocks
         self._sync_fx_timer()
+        self._save_config()
+        self._sync_popover_stocks()
+        self._recompute_summary()
+
+    # ── 종목 행 우클릭: 추가 매수 ─────────────────────────────────────────
+    def _on_buy_request(self, code: str):
+        target = next((s for s in self.stocks if s["code"] == code), None)
+        if target is None:
+            return
+
+        current_price = self.current_prices.get(code)
+        if not current_price:
+            result = fetch_quote_for_stock(target)
+            if result:
+                current_price = float(result["price"])
+                self.current_prices[code] = current_price
+                self.last_price_result[code] = result
+                self.popover.update_stock_price(code, result)
+        if not current_price:
+            QMessageBox.warning(
+                None,
+                "현재가 없음",
+                "현재가를 확인할 수 없어 예상 평단가를 계산할 수 없습니다.",
+            )
+            return
+        if is_us_stock(target) and not self.usd_krw_rate:
+            rate_result = fetch_usd_krw_rate()
+            if rate_result:
+                self.usd_krw_rate = float(rate_result["rate"])
+                self.popover.set_usd_krw_rate(self.usd_krw_rate)
+
+        dlg = BuyPreviewDialog(
+            stock=copy.deepcopy(target),
+            current_price=current_price,
+            usd_krw_rate=self.usd_krw_rate,
+        )
+        if not dlg.exec():
+            return
+
+        updated = dlg.get_data()
+        target["avg_price"] = updated["avg_price"]
+        target["quantity"] = updated["quantity"]
+        if "buy_exchange_rate" in updated:
+            target["buy_exchange_rate"] = updated["buy_exchange_rate"]
+        else:
+            target.pop("buy_exchange_rate", None)
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()

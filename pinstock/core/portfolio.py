@@ -97,6 +97,53 @@ def stock_metrics(
     }
 
 
+def buy_preview(
+    stock: dict,
+    add_quantity: float | int,
+    current_price: float | int | None = None,
+    usd_krw_rate: float | int | None = None,
+) -> dict:
+    """현재가로 추가 매수했을 때의 예상 보유 상태와 손익 지표를 계산한다."""
+    avg_price = _to_float(stock.get("avg_price"))
+    quantity = _to_float(stock.get("quantity"))
+    add_qty = max(0.0, _to_float(add_quantity))
+    price = _to_float(current_price, avg_price) or avg_price
+    new_quantity = quantity + add_qty
+    if new_quantity > 0:
+        new_avg_price = ((avg_price * quantity) + (price * add_qty)) / new_quantity
+    else:
+        new_avg_price = avg_price
+
+    preview_stock = dict(stock)
+    preview_stock["avg_price"] = new_avg_price
+    preview_stock["quantity"] = new_quantity
+    if is_us_stock(stock) and add_qty > 0 and new_avg_price > 0 and new_quantity > 0:
+        current_metrics = stock_metrics(stock, price, usd_krw_rate)
+        current_rate = current_metrics["current_rate"]
+        old_invest = avg_price * quantity * current_metrics["buy_rate"]
+        add_invest = price * add_qty * current_rate
+        new_buy_rate = (old_invest + add_invest) / (new_avg_price * new_quantity)
+        if new_buy_rate > 0:
+            preview_stock["buy_exchange_rate"] = round(new_buy_rate, 4)
+
+    current_metrics = stock_metrics(stock, price, usd_krw_rate)
+    preview_metrics = stock_metrics(preview_stock, price, usd_krw_rate)
+    return {
+        "stock": preview_stock,
+        "current_metrics": current_metrics,
+        "preview_metrics": preview_metrics,
+        "current_avg_price": avg_price,
+        "preview_avg_price": new_avg_price,
+        "current_quantity": quantity,
+        "preview_quantity": new_quantity,
+        "current_price": price,
+        "avg_price_delta": new_avg_price - avg_price,
+        "profit_rate_delta": (
+            preview_metrics["profit_rate"] - current_metrics["profit_rate"]
+        ),
+    }
+
+
 def portfolio_totals(
     stocks: list[dict],
     current_prices: dict | None = None,
