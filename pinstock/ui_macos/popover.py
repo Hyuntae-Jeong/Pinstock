@@ -40,6 +40,7 @@ class StockRow(QWidget):
     """
 
     expanded_toggled = pyqtSignal(str)   # code
+    buy_requested    = pyqtSignal(str)   # code
     edit_requested   = pyqtSignal(str)   # code
     delete_requested = pyqtSignal(str)   # code
 
@@ -407,11 +408,21 @@ class StockRow(QWidget):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(TRAY_MENU_STYLE)
+        metrics = stock_metrics(
+            self.data,
+            self.current_price or self.data.get("avg_price", 0),
+            self.usd_krw_rate,
+        )
+        buy_label = "💧   물타기" if metrics["profit_rate"] < 0 else "🔥   불타기"
+        buy_act = menu.addAction(buy_label)
+        menu.addSeparator()
         edit_act = menu.addAction("✏️   수정")
         menu.addSeparator()
         del_act  = menu.addAction("🗑️   삭제")
         action = menu.exec(event.globalPos())
-        if action == edit_act:
+        if action == buy_act:
+            self.buy_requested.emit(self.data["code"])
+        elif action == edit_act:
             self.edit_requested.emit(self.data["code"])
         elif action == del_act:
             self.delete_requested.emit(self.data["code"])
@@ -771,6 +782,7 @@ class Popover(QWidget):
     RESIZE_MARGIN = 10
 
     toggle_assets_requested  = pyqtSignal()      # 상단 요약 카드 클릭 → 자산 숨김 토글
+    buy_requested            = pyqtSignal(str)   # code
     edit_requested           = pyqtSignal(str)   # code
     delete_requested         = pyqtSignal(str)   # code
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
@@ -1171,6 +1183,7 @@ class Popover(QWidget):
             row.assets_hidden = self._assets_hidden
             row.us_return_basis = self._us_return_basis
             row.set_usd_krw_rate(self._usd_krw_rate)
+            row.buy_requested.connect(self.buy_requested.emit)
             row.edit_requested.connect(self.edit_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
             row.expanded_toggled.connect(self._on_row_expanded)

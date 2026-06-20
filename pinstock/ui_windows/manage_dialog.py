@@ -9,24 +9,29 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QRadioButton, QButtonGroup, QWidget,
     QCompleter, QComboBox, QColorDialog, QFrame, QCheckBox,
 )
-from PyQt6.QtCore import Qt, QTimer, QModelIndex, QSize
-from PyQt6.QtGui import QColor, QStandardItemModel, QStandardItem, QPixmap, QIcon
+from PyQt6.QtCore import Qt, QTimer, QModelIndex, QSize, QRectF, pyqtSignal
+from PyQt6.QtGui import (
+    QColor, QFont, QPainter, QPen, QStandardItemModel, QStandardItem, QPixmap, QIcon,
+    QValidator,
+)
 
 from ..core.api import (
     fetch_stock, fetch_us_stock, fetch_index,
     search_us_stocks, search_korean_stocks,
 )
 from ..core.indices import index_by_code, search_indices, index_exact_match
-from ..core.portfolio import is_us_stock, stock_metrics
+from ..core.portfolio import buy_preview, is_us_stock, stock_metrics
 from ..core.storage import (
     MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD,
     DEFAULT_TAG_COLOR, new_tag_id, normalize_tags, prune_watch_tags,
 )
 from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE, TAG_PALETTE, MA_COLORS
 from .form_widgets import (
-    AutoSelectDoubleSpinBox, AutoSelectLineEdit, SearchLineEdit,
+    ArrowDoubleSpinBox, AutoSelectDoubleSpinBox, AutoSelectLineEdit, SearchLineEdit,
     QuantitySpinBox, ToggleSwitch,
 )
+
+_NUMBER_FONT_FAMILY = "Arial"
 
 
 # ─── 태그 색상 유틸 ───────────────────────────────────────────────────────────
@@ -164,6 +169,478 @@ class ImportModeDialog(QDialog):
     def _on_ok(self):
         self.mode = "overwrite" if self.overwrite_rb.isChecked() else "merge"
         self.accept()
+
+
+class _AmountSpinBox(ArrowDoubleSpinBox):
+    """천 단위 쉼표를 표시/입력 모두에서 허용하는 금액 입력 스핀박스."""
+
+    def textFromValue(self, value: float) -> str:
+        if self.decimals() <= 0:
+            return f"{int(round(value)):,}"
+        text = f"{value:,.{self.decimals()}f}".rstrip("0").rstrip(".")
+        return text or "0"
+
+    def valueFromText(self, text: str) -> float:
+        cleaned = (
+            text.replace(",", "")
+            .replace("원", "")
+            .replace("USD", "")
+            .strip()
+        )
+        if cleaned in {"", ".", "-"}:
+            return 0.0
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+
+    def validate(self, text: str, pos: int):
+        cleaned = (
+            text.replace(",", "")
+            .replace("원", "")
+            .replace("USD", "")
+            .strip()
+        )
+        if cleaned in {"", ".", "-"}:
+            return QValidator.State.Intermediate, text, pos
+        try:
+            float(cleaned)
+        except ValueError:
+            return QValidator.State.Invalid, text, pos
+        return QValidator.State.Acceptable, text, pos
+
+
+class _CurrencySegmentControl(QWidget):
+    """USD/원 두 모드를 한 버튼처럼 보여주는 작은 세그먼트 토글."""
+
+    currency_changed = pyqtSignal(str)
+
+    def __init__(self, currency: str = "usd", parent=None):
+        super().__init__(parent)
+        self._currency = "krw" if currency == "krw" else "usd"
+        self.setFixedSize(150, 34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def set_currency(self, currency: str):
+        currency = "krw" if currency == "krw" else "usd"
+        if self._currency == currency:
+            return
+        self._currency = currency
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position().x()
+        next_currency = "usd" if pos < self.width() / 2 else "krw"
+        if next_currency == self._currency:
+            next_currency = "krw" if self._currency == "usd" else "usd"
+        self._currency = next_currency
+        self.update()
+        self.currency_changed.emit(self._currency)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        outer = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        painter.setPen(QPen(QColor(C["surface2"]), 1))
+        painter.setBrush(QColor(C["surface"]))
+        painter.drawRoundedRect(outer, 7, 7)
+
+        pad = 3
+        half_w = (self.width() - pad * 2) / 2
+        left = QRectF(pad, pad, half_w, self.height() - pad * 2)
+        right = QRectF(pad + half_w, pad, half_w, self.height() - pad * 2)
+        active_rect = left if self._currency == "usd" else right
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(C["blue"]))
+        painter.drawRoundedRect(active_rect, 5, 5)
+
+        painter.setFont(QFont(_NUMBER_FONT_FAMILY, 10, QFont.Weight.Bold))
+        painter.setPen(QColor(C["bg"] if self._currency == "usd" else C["text"]))
+        painter.drawText(left, Qt.AlignmentFlag.AlignCenter, "USD")
+        painter.setPen(QColor(C["bg"] if self._currency == "krw" else C["text"]))
+        painter.drawText(right, Qt.AlignmentFlag.AlignCenter, "원")
+        painter.end()
+
+
+class BuyPreviewDialog(QDialog):
+    """보유 종목의 현재가 기준 추가 매수 예상 평단가/수익률을 보여준다."""
+
+    def __init__(
+        self,
+        stock: dict,
+        current_price: float | int | None = None,
+        usd_krw_rate: float | int | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.stock = dict(stock)
+        self.current_price = current_price
+        self.usd_krw_rate = usd_krw_rate
+        self._preview: dict | None = None
+        self._syncing_buy_inputs = False
+        self._amount_currency = "usd" if is_us_stock(self.stock) else "krw"
+
+        profit_rate = stock_metrics(stock, current_price, usd_krw_rate)["profit_rate"]
+        action_word = "물타기" if profit_rate < 0 else "불타기"
+        action_icon = "💧" if profit_rate < 0 else "🔥"
+        self.setWindowTitle(f"{action_icon} {action_word} 매수")
+        self.setFixedSize(560, 430)
+        self.setStyleSheet(DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 18)
+        root.setSpacing(12)
+
+        name = stock.get("name") or stock.get("code", "")
+        code = stock.get("code", "")
+        title = QLabel(f"{action_icon} {name} ({code}) 추가 매수")
+        title.setStyleSheet(
+            f"color: {C['text']}; font-size: 14px; font-weight: bold;"
+        )
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        root.addLayout(title_row)
+
+        input_grid = QGridLayout()
+        input_grid.setContentsMargins(0, 0, 0, 0)
+        input_grid.setHorizontalSpacing(8)
+        input_grid.setVerticalSpacing(8)
+        input_grid.setColumnMinimumWidth(0, 58)
+        input_grid.setColumnMinimumWidth(1, 160)
+        input_grid.setColumnMinimumWidth(2, 12)
+        input_grid.setColumnMinimumWidth(3, 92)
+        input_grid.setColumnMinimumWidth(4, 150)
+        root.addLayout(input_grid)
+
+        self.price_val = self._value_label()
+        input_grid.addWidget(self._row_header_label("현재가"), 0, 0)
+        input_grid.addWidget(self.price_val, 0, 1)
+
+        self.add_qty_spin = QuantitySpinBox()
+        self.add_qty_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.add_qty_spin.setRange(0, 1_000_000)
+        self.add_qty_spin.setSingleStep(1)
+        self.add_qty_spin.setDecimals(0)
+        self.add_qty_spin.setSuffix("  주")
+        self.add_qty_spin.setValue(1)
+        self.add_qty_spin.setFixedSize(150, 34)
+        input_grid.addWidget(self._label("추가 매수 수량"), 0, 3, Qt.AlignmentFlag.AlignRight)
+        input_grid.addWidget(self.add_qty_spin, 0, 4, Qt.AlignmentFlag.AlignLeft)
+
+        self.add_amount_spin = _AmountSpinBox()
+        self.add_amount_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.add_amount_spin.setRange(0, 1_000_000_000_000)
+        self.add_amount_spin.setValue(0)
+        self.add_amount_spin.setFixedSize(150, 34)
+        input_grid.addWidget(self._label("추가 매수 금액"), 1, 3, Qt.AlignmentFlag.AlignRight)
+        input_grid.addWidget(self.add_amount_spin, 1, 4, Qt.AlignmentFlag.AlignLeft)
+        self.amount_currency_btn = None
+        if is_us_stock(self.stock):
+            self.amount_currency_btn = _CurrencySegmentControl(self._amount_currency)
+            self.amount_currency_btn.currency_changed.connect(self._set_amount_currency)
+            input_grid.addWidget(self._label("통화 선택"), 2, 3, Qt.AlignmentFlag.AlignRight)
+            input_grid.addWidget(self.amount_currency_btn, 2, 4, Qt.AlignmentFlag.AlignLeft)
+
+        self.add_qty_spin.valueChanged.connect(self._on_add_qty_changed)
+        self.add_amount_spin.valueChanged.connect(self._on_add_amount_changed)
+        self._sync_amount_spin_format()
+        self._sync_amount_from_quantity()
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background: {C['border']}; max-height: 1px; border: none;")
+        root.addWidget(sep)
+
+        compare_grid = QGridLayout()
+        compare_grid.setHorizontalSpacing(10)
+        compare_grid.setVerticalSpacing(9)
+        compare_grid.setColumnMinimumWidth(0, 58)
+        compare_grid.setColumnMinimumWidth(1, 180)
+        compare_grid.setColumnMinimumWidth(2, 220)
+        compare_grid.setColumnStretch(0, 0)
+        compare_grid.setColumnStretch(1, 0)
+        compare_grid.setColumnStretch(2, 0)
+        root.addLayout(compare_grid)
+
+        compare_grid.addWidget(self._header_label("항목"), 0, 0)
+        compare_grid.addWidget(self._header_label("현재", C["blue"]), 0, 1)
+        compare_grid.addWidget(self._header_label("예상", C["green"]), 0, 2)
+
+        self.qty_val = self._value_label()
+        self.avg_val = self._value_label()
+        self.rate_val = self._value_label()
+        self.invest_val = self._value_label()
+        self.eval_val = self._value_label()
+        self.preview_qty_val = self._value_label()
+        self.preview_avg_val = self._value_label()
+        self.preview_rate_val = self._value_label()
+        self.preview_invest_val = self._value_label()
+        self.preview_eval_val = self._value_label()
+
+        rows = [
+            ("보유수량", self.qty_val, self.preview_qty_val),
+            ("평단가", self.avg_val, self.preview_avg_val),
+            ("수익률", self.rate_val, self.preview_rate_val),
+            ("투자원금", self.invest_val, self.preview_invest_val),
+            ("평가금액", self.eval_val, self.preview_eval_val),
+        ]
+        for row_idx, (label, current, preview) in enumerate(rows, start=1):
+            compare_grid.addWidget(self._row_header_label(label), row_idx, 0)
+            compare_grid.addWidget(current, row_idx, 1)
+            compare_grid.addWidget(preview, row_idx, 2)
+
+        root.addStretch()
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("매수 확정")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._render_current()
+        self._update_preview()
+
+    @staticmethod
+    def _label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        return lbl
+
+    @staticmethod
+    def _header_label(text: str, color: str | None = None) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            f"color: {color or C['subtext']}; font-size: 13px; font-weight: bold;"
+        )
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return lbl
+
+    @staticmethod
+    def _row_header_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return lbl
+
+    def _apply_currency_button_style(self):
+        if self.amount_currency_btn is not None:
+            self.amount_currency_btn.set_currency(self._amount_currency)
+
+    @staticmethod
+    def _value_label() -> QLabel:
+        lbl = QLabel("─")
+        lbl.setFont(QFont(_NUMBER_FONT_FAMILY, 13, QFont.Weight.Bold))
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl.setStyleSheet(f"color: {C['text']}; font-size: 13px; font-weight: bold;")
+        return lbl
+
+    def _price_text(self, value: float | int | None) -> str:
+        price = float(value or 0)
+        if is_us_stock(self.stock):
+            return f"{price:,.4f} USD"
+        return f"{int(round(price)):,} 원"
+
+    def _current_price_text(self) -> str:
+        price = self._current_price_value()
+        if is_us_stock(self.stock) and self._amount_currency == "krw":
+            return f"{int(round(price * self._current_fx_rate())):,} 원"
+        return self._price_text(price)
+
+    def _avg_price_value(self, stock: dict, metrics: dict) -> float:
+        avg_price = float(stock.get("avg_price", 0) or 0)
+        if is_us_stock(stock) and self._amount_currency == "krw":
+            return avg_price * float(metrics.get("buy_rate", 1.0) or 1.0)
+        return avg_price
+
+    def _avg_price_text(self, stock: dict, metrics: dict) -> str:
+        value = self._avg_price_value(stock, metrics)
+        if is_us_stock(stock) and self._amount_currency == "krw":
+            return f"{int(round(value)):,} 원"
+        return self._price_text(value)
+
+    def _avg_price_text_for_delta(self, value: float) -> str:
+        if is_us_stock(self.stock) and self._amount_currency == "krw":
+            return f"{int(round(value)):,} 원"
+        return self._price_text(value)
+
+    @staticmethod
+    def _rate_text(value: float) -> str:
+        sign = "+" if value >= 0 else ""
+        return f"{sign}{value:.2f}%"
+
+    @staticmethod
+    def _won_text(value: float | int) -> str:
+        return f"{int(round(value)):,} 원"
+
+    def _set_rate_label(self, label: QLabel, value: float):
+        color = C["red"] if value >= 0 else C["blue"]
+        label.setText(self._rate_text(value))
+        label.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold;")
+
+    def _delta_text(self, delta: float, formatter) -> tuple[str, str]:
+        if delta > 0:
+            return f"▲ {formatter(delta)}", C["red"]
+        if delta < 0:
+            return f"▼ {formatter(abs(delta))}", C["blue"]
+        return f"─ {formatter(0)}", C["subtext"]
+
+    def _effective_add_quantity(self) -> int:
+        return int(self.add_qty_spin.value())
+
+    def _current_price_value(self) -> float:
+        return float(self.current_price or self.stock.get("avg_price", 0) or 0)
+
+    def _current_fx_rate(self) -> float:
+        rate = float(self.usd_krw_rate or self.stock.get("buy_exchange_rate", 0) or 0)
+        return rate if rate > 0 else 1.0
+
+    def _amount_unit_price(self) -> float:
+        price = self._current_price_value()
+        if is_us_stock(self.stock) and self._amount_currency == "krw":
+            return price * self._current_fx_rate()
+        return price
+
+    def _amount_step_value(self) -> float:
+        price = abs(self._amount_unit_price())
+        if price <= 0:
+            return 1.0
+        integer_part = int(price)
+        if integer_part <= 0:
+            return 1.0
+        digits = len(str(integer_part))
+        return float(10 ** max(0, digits - 1))
+
+    def _sync_amount_spin_format(self):
+        is_krw_amount = self._amount_currency == "krw"
+        self.add_amount_spin.setDecimals(0 if is_krw_amount else 4)
+        self.add_amount_spin.setSingleStep(self._amount_step_value())
+        self.add_amount_spin.setSuffix("  원" if is_krw_amount else "  USD")
+        self._apply_currency_button_style()
+
+    def _set_amount_currency(self, currency: str):
+        currency = "krw" if currency == "krw" else "usd"
+        if self._amount_currency == currency:
+            return
+        self._amount_currency = currency
+        self._sync_amount_spin_format()
+        self._sync_amount_from_quantity()
+        self._render_current()
+        self._update_preview()
+
+    def _sync_amount_from_quantity(self):
+        self._syncing_buy_inputs = True
+        amount = self._effective_add_quantity() * self._amount_unit_price()
+        self.add_amount_spin.setValue(amount)
+        self._syncing_buy_inputs = False
+
+    def _on_add_qty_changed(self, _value: float):
+        if self._syncing_buy_inputs:
+            return
+        self._sync_amount_from_quantity()
+        self._update_preview()
+
+    def _on_add_amount_changed(self, value: float):
+        if self._syncing_buy_inputs:
+            return
+        price = self._amount_unit_price()
+        quantity = int(float(value) // price) if price > 0 else 0
+        self._syncing_buy_inputs = True
+        self.add_qty_spin.setValue(quantity)
+        self._syncing_buy_inputs = False
+        self._update_preview()
+
+    def _render_current(self):
+        metrics = stock_metrics(self.stock, self.current_price, self.usd_krw_rate)
+        self.qty_val.setText(f"{format_quantity(self.stock.get('quantity', 0))} 주")
+        self.avg_val.setText(self._avg_price_text(self.stock, metrics))
+        self._set_rate_label(self.rate_val, metrics["profit_rate"])
+        self.price_val.setText(self._current_price_text())
+        self.invest_val.setText(self._won_text(metrics["invest"]))
+        self.eval_val.setText(self._won_text(metrics["eval"]))
+
+    def _update_preview(self):
+        self._preview = buy_preview(
+            self.stock,
+            self._effective_add_quantity(),
+            self.current_price,
+            self.usd_krw_rate,
+        )
+        preview_stock = self._preview["stock"]
+        current_metrics = self._preview["current_metrics"]
+        metrics = self._preview["preview_metrics"]
+        rate_delta = self._preview["profit_rate_delta"]
+        has_addition = self._effective_add_quantity() > 0
+
+        self.preview_qty_val.setText(f"{format_quantity(preview_stock.get('quantity', 0))} 주")
+
+        avg_text = self._avg_price_text(preview_stock, metrics)
+        avg_delta = (
+            self._avg_price_value(preview_stock, metrics)
+            - self._avg_price_value(self.stock, current_metrics)
+        )
+        avg_delta_text, avg_color = self._delta_text(avg_delta, self._avg_price_text_for_delta)
+        self.preview_avg_val.setText(
+            f"{avg_text}  ({avg_delta_text})" if has_addition else avg_text
+        )
+        if not has_addition:
+            avg_color = C["text"]
+        self.preview_avg_val.setStyleSheet(
+            f"color: {avg_color}; font-size: 13px; font-weight: bold;"
+        )
+
+        rate_text = self._rate_text(metrics["profit_rate"])
+        rate_delta_text, rate_color = self._delta_text(
+            rate_delta, lambda v: f"{v:.2f}%"
+        )
+        self.preview_rate_val.setText(
+            f"{rate_text}  ({rate_delta_text})" if has_addition else rate_text
+        )
+        if not has_addition:
+            rate_color = C["red"] if metrics["profit_rate"] >= 0 else C["blue"]
+        self.preview_rate_val.setStyleSheet(
+            f"color: {rate_color}; font-size: 13px; font-weight: bold;"
+        )
+
+        self.preview_invest_val.setText(self._won_text(metrics["invest"]))
+        self.preview_invest_val.setStyleSheet(
+            f"color: {C['text']}; font-size: 13px; font-weight: bold;"
+        )
+        self.preview_eval_val.setText(self._won_text(metrics["eval"]))
+        self.preview_eval_val.setStyleSheet(
+            f"color: {C['text']}; font-size: 13px; font-weight: bold;"
+        )
+
+    def accept(self):
+        if self._effective_add_quantity() <= 0:
+            QMessageBox.information(
+                self,
+                "매수 수량 확인",
+                "추가 매수 수량이 1주 이상이 되도록 수량 또는 금액을 입력하세요.",
+            )
+            return
+        super().accept()
+
+    def get_data(self) -> dict:
+        if self._preview is None:
+            self._update_preview()
+        stock = dict(self._preview["stock"])
+        if is_us_stock(stock):
+            stock["avg_price"] = round(float(stock.get("avg_price", 0)), 4)
+        else:
+            stock["avg_price"] = int(round(float(stock.get("avg_price", 0))))
+        stock["quantity"] = round(float(stock.get("quantity", 0)), 3)
+        return stock
 
 
 # ─── 종목 추가 / 수정 다이얼로그 ──────────────────────────────────────────────
