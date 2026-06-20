@@ -72,17 +72,26 @@ def normalize_stocks_schema(stocks: list[dict]) -> list[dict]:
 # 앱 전체에서 1개만 존재하는 자유 메모. {text, updated_at} 객체로 저장하며,
 # 구버전/형식 깨짐(문자열·None 등)도 안전하게 받아 준다.
 def normalize_memo(raw) -> dict:
-    """메모를 {text: str, updated_at: str|None} 로 정규화."""
+    """메모를 {text: str, updated_at: str|None, geometry: [x,y,w,h]|None} 로 정규화.
+
+    geometry 는 메모창의 마지막 위치/크기. 구버전(문자열 형태·geometry 없음)도
+    안전하게 받아 준다.
+    """
+    text, updated, geometry = "", None, None
     if isinstance(raw, str):
-        return {"text": raw, "updated_at": None}
-    if isinstance(raw, dict):
-        text = raw.get("text")
-        updated = raw.get("updated_at")
-        return {
-            "text": text if isinstance(text, str) else "",
-            "updated_at": updated if isinstance(updated, str) else None,
-        }
-    return {"text": "", "updated_at": None}
+        text = raw
+    elif isinstance(raw, dict):
+        t = raw.get("text")
+        text = t if isinstance(t, str) else ""
+        u = raw.get("updated_at")
+        updated = u if isinstance(u, str) else None
+        g = raw.get("geometry")
+        if isinstance(g, (list, tuple)) and len(g) == 4:
+            try:
+                geometry = [int(g[0]), int(g[1]), int(g[2]), int(g[3])]
+            except (TypeError, ValueError):
+                geometry = None
+    return {"text": text, "updated_at": updated, "geometry": geometry}
 
 
 # ─── 관심종목(워치리스트) 스키마 ──────────────────────────────────────────────

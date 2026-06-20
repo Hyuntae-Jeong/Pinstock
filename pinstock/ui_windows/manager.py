@@ -1013,6 +1013,9 @@ class WidgetManager:
             w.setWindowOpacity(opacity)
         for w in self.watch_groups.values():
             w.setWindowOpacity(opacity)
+        # 메모창도 같은 투명도를 따른다 (단, 입력해야 하므로 click-through 대상은 아님).
+        if self._memo_dialog is not None and self._memo_dialog.isVisible():
+            self._memo_dialog.set_opacity(opacity)
 
     def _apply_click_through(self, opacity: float):
         """종목 위젯 + 관심 그룹 위젯 + 마스터 카드에 OS-레벨 click-through 토글.
@@ -1218,18 +1221,22 @@ class WidgetManager:
             return
         self._memo_dialog = MemoDialog(
             initial_text=self.memo.get("text", ""),
-            on_save=self._on_memo_saved,
+            initial_geometry=self.memo.get("geometry"),
+            opacity=self.popover_opacity,
+            on_change=self._on_memo_changed,
         )
         self._memo_dialog.show()
         self._memo_dialog.raise_()
         self._memo_dialog.activateWindow()
 
-    def _on_memo_saved(self, text: str):
-        """메모 다이얼로그의 자동 저장 콜백 — 수정 시각과 함께 보존."""
-        self.memo = {
-            "text": text,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
+    def _on_memo_changed(self, text: str, geometry: list):
+        """메모 다이얼로그 콜백 — 텍스트/위치/크기 변경을 저장. 텍스트가 바뀐 경우에만
+        수정 시각을 갱신한다(위치·크기 변경은 시각에 영향 없음)."""
+        prev = self.memo or {}
+        updated_at = prev.get("updated_at")
+        if text != prev.get("text", ""):
+            updated_at = datetime.now().isoformat(timespec="seconds")
+        self.memo = {"text": text, "updated_at": updated_at, "geometry": geometry}
         self._save_config()
 
     # ── 도움말 / 앱 정보 ──────────────────────────────────────────────────
