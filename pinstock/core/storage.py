@@ -94,6 +94,46 @@ def normalize_memo(raw) -> dict:
     return {"text": text, "updated_at": updated, "geometry": geometry}
 
 
+# ─── 분리(detach) 창 상태 스키마 (macOS 전용) ─────────────────────────────────
+# 보유/관심 중 한 뷰를 독립 창으로 분리한 상태. 어느 뷰가 분리됐는지(view)와 그
+# 창의 위치/높이/고정/투명도/시장필터를 저장해 재시작 후 복원한다. 형식이 깨졌거나
+# 구버전(없음)이면 분리 안 한 기본 상태로 돌린다.
+def normalize_detached(raw) -> dict:
+    """{view: 'holdings'|'watch'|None, pos: [x,y]|None, height: int|None,
+    pinned: bool, opacity: float, market_filter: 'ALL'|'KR'|'US'} 로 정규화."""
+    view = None
+    pos = None
+    height = None
+    pinned = True
+    opacity = 1.0
+    market_filter = "ALL"
+    if isinstance(raw, dict):
+        v = raw.get("view")
+        if v in ("holdings", "watch"):
+            view = v
+        p = raw.get("pos")
+        if isinstance(p, (list, tuple)) and len(p) == 2:
+            try:
+                pos = [int(p[0]), int(p[1])]
+            except (TypeError, ValueError):
+                pos = None
+        h = raw.get("height")
+        if h is not None:
+            try:
+                height = int(h)
+            except (TypeError, ValueError):
+                height = None
+        pinned = bool(raw.get("pinned", True))
+        try:
+            opacity = max(0.1, min(1.0, float(raw.get("opacity", 1.0))))
+        except (TypeError, ValueError):
+            opacity = 1.0
+        mf = str(raw.get("market_filter") or "ALL").strip().upper()
+        market_filter = mf if mf in ("ALL", "KR", "US") else "ALL"
+    return {"view": view, "pos": pos, "height": height,
+            "pinned": pinned, "opacity": opacity, "market_filter": market_filter}
+
+
 # ─── 관심종목(워치리스트) 스키마 ──────────────────────────────────────────────
 # 관심종목은 보유와 완전히 독립된 별도 목록이다. 평단가/수량/손익 개념이 없고,
 # 시세는 일봉 기준으로 본다. 같은 종목이 보유와 관심에 동시에 존재할 수 있다.

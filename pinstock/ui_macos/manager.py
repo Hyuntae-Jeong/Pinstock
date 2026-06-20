@@ -13,7 +13,7 @@ import shutil
 import threading
 from datetime import datetime, date
 
-from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, QPoint, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog, QMenu
 
 from ..__version__ import __version__
@@ -29,6 +29,7 @@ from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
+    normalize_detached,
 )
 from ..ui_windows.manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
@@ -192,6 +193,9 @@ class MacAppManager(QObject):
         self.last_price_result: dict[str, dict] = {}
         self.last_minute_data:  dict[str, tuple[list, float]] = {}
         self.last_daily_data:   dict[str, list] = {}
+        # 관심종목 캐시 — 분리/도킹으로 관심 뷰가 창을 옮길 때 즉시 재주입해 '─' 깜빡임 제거.
+        self.last_watch_price:  dict[str, dict] = {}
+        self.last_watch_daily:  dict[str, list] = {}
 
         # 설정 로드 (Windows 와 동일 스키마)
         self.master_visible: bool = True
@@ -203,6 +207,15 @@ class MacAppManager(QObject):
         self.popover_offset: list[int] | None = None
         self.pinned: bool = False
         self.market_filter: str = "ALL"
+        # 분리(detach) 상태 — 보유/관심 중 하나를 독립 창으로 분리(한쪽만 분리 정책).
+        # detached_view 가 None 이면 둘 다 메인 팝오버에 탭으로 있다.
+        self.detached_view: str | None = None
+        self.detached_window: Popover | None = None
+        self.detached_pos: list[int] | None = None
+        self.detached_height: int | None = None
+        self.detached_pinned: bool = True
+        self.detached_opacity: float = 1.0
+        self.detached_market_filter: str = "ALL"
         # 투자 메모장 — 앱 전체 단일 메모 {text, updated_at}. 모드리스 창은 1개만 띄운다.
         self.memo: dict = {"text": "", "updated_at": None}
         self._memo_dialog: MemoDialog | None = None
@@ -234,6 +247,7 @@ class MacAppManager(QObject):
         self.popover.position_offset_changed.connect(self._on_position_offset_changed)
         self.popover.pinned_changed.connect(self._on_pinned_changed)
         self.popover.closed_by_user.connect(self._on_popover_closed_by_user)
+        self.popover.detach_requested.connect(self._detach_view)
 
         # 로드한 자산 숨김 / 팝오버 투명도 상태를 팝오버에 한 번 주입
         self.popover.set_assets_hidden(self.assets_hidden)
@@ -251,6 +265,9 @@ class MacAppManager(QObject):
         self._sync_popover_stocks()
         self._sync_popover_watchlist()
         self._recompute_summary()
+
+        # 저장된 분리 상태 복원 — 메인 호스팅 뷰는 즉시 줄이고 분리 창은 잠시 뒤 생성.
+        self._apply_restored_detach()
 
         # 종목별 폴링 시작
         for i, s in enumerate(self.stocks):
@@ -387,6 +404,24 @@ class MacAppManager(QObject):
         self.last_minute_data.pop(code, None)
         self.last_daily_data.pop(code, None)
 
+    # ── 뷰별 대상 창 라우팅 ────────────────────────────────────────────────
+    # 보유/관심 데이터는 그 뷰를 호스팅 중인 창(메인 팝오버 또는 분리 창)으로 보낸다.
+    def _holdings_window(self) -> "Popover":
+        if self.detached_view == "holdings" and self.detached_window is not None:
+            return self.detached_window
+        return self.popover
+
+    def _watch_window(self) -> "Popover":
+        if self.detached_view == "watch" and self.detached_window is not None:
+            return self.detached_window
+        return self.popover
+
+    def _all_windows(self) -> list:
+        wins = [self.popover]
+        if self.detached_window is not None:
+            wins.append(self.detached_window)
+        return wins
+
     def _on_price_updated(self, code: str, result: dict):
         # stocks 의 name 도 동기화 (네이버에서 이름 받아오면)
         for s in self.stocks:
@@ -395,18 +430,18 @@ class MacAppManager(QObject):
                 break
         self.current_prices[code] = float(result["price"])
         self.last_price_result[code] = result
-        self.popover.update_stock_price(code, result)
+        self._holdings_window().update_stock_price(code, result)
         self._recompute_summary()
 
     def _on_minute_updated(self, code: str, prices: list, open_price: float):
         self.last_minute_data[code] = (prices, open_price)
         self.last_daily_data.pop(code, None)
-        self.popover.update_stock_minute(code, prices, open_price)
+        self._holdings_window().update_stock_minute(code, prices, open_price)
 
     def _on_daily_updated(self, code: str, candles: list):
         self.last_daily_data[code] = candles
         self.last_minute_data.pop(code, None)
-        self.popover.update_stock_daily(code, candles)
+        self._holdings_window().update_stock_daily(code, candles)
 
     # ── 관심종목 폴링 워커 관리 ─────────────────────────────────────────────
     def _spawn_watch_fetcher(self, item: dict, stagger_idx: int = 0):
@@ -427,16 +462,19 @@ class MacAppManager(QObject):
             if w["code"] == code:
                 w["name"] = result["name"]
                 break
-        self.popover.update_watch_price(code, result)
+        self.last_watch_price[code] = result
+        self._watch_window().update_watch_price(code, result)
 
     def _on_watch_daily_updated(self, code: str, candles: list):
-        self.popover.update_watch_daily(code, candles)
+        self.last_watch_daily[code] = candles
+        self._watch_window().update_watch_daily(code, candles)
 
     def _toggle_assets_hidden(self):
         """자산 숨김 토글 — 우클릭 메뉴 / 팝오버 상단 카드 클릭 양쪽에서 호출.
         팝오버와 메뉴 체크 상태를 함께 동기화하고 설정에 저장한다."""
         self.assets_hidden = not self.assets_hidden
-        self.popover.set_assets_hidden(self.assets_hidden)
+        for win in self._all_windows():
+            win.set_assets_hidden(self.assets_hidden)
         self.tray_assets_action.setText(_checkmark_text(_LABEL_ASSETS_HIDDEN, self.assets_hidden))
         self._save_config()
 
@@ -447,7 +485,8 @@ class MacAppManager(QObject):
     def toggle_us_return_basis(self):
         """미국 주식 상세의 수익률(%)을 원화 기준(환율 포함) ↔ 달러 기준(주가만) 전환."""
         self.us_return_basis = "usd" if self.us_return_basis == "krw" else "krw"
-        self.popover.set_us_return_basis(self.us_return_basis)
+        for win in self._all_windows():
+            win.set_us_return_basis(self.us_return_basis)
         self.tray_us_basis_action.setText(self._us_basis_text())
         self._save_config()
 
@@ -478,56 +517,211 @@ class MacAppManager(QObject):
             self._popover_shown = True
         self._save_config()
 
-    def _reapply_cached_data(self):
-        """popover.set_stocks() 이후 새로 만들어진 행에 캐시된 가격/차트를 즉시 다시
-        넣어 차트가 비어 보이는 시간을 없앤다."""
+    # ── 분리 / 도킹 (탭을 독립 창으로 분리, 다시 합치기) ─────────────────────
+    def _wire_detached_window(self, win):
+        """분리 창의 시그널을 매니저 슬롯에 연결한다. buy/edit/delete/assets 는 메인과
+        동일(code-keyed/전역), 투명도·필터·고정·지오메트리·도킹은 분리 전용 슬롯."""
+        win.toggle_assets_requested.connect(self._toggle_assets_hidden)
+        win.buy_requested.connect(self._on_buy_request)
+        win.edit_requested.connect(self._on_edit_request)
+        win.delete_requested.connect(self._on_delete_request)
+        win.market_filter_changed.connect(self._on_detached_market_filter_changed)
+        win.opacity_changed.connect(self._on_detached_opacity_changed)
+        win.height_changed.connect(self._on_detached_height_changed)
+        win.pinned_changed.connect(self._on_detached_pinned_changed)
+        win.dock_requested.connect(self._dock_view)
+        win.detached_geometry_changed.connect(self._on_detached_geometry_changed)
+
+    def _detached_show_pos(self, drop_pos=None):
+        """분리 창 표시 좌표. 저장값 우선, 없으면 드롭 위치(살짝 보정), 그것도 없으면
+        메인 팝오버 오른쪽에 나란히."""
+        if self.detached_pos and len(self.detached_pos) == 2:
+            return QPoint(int(self.detached_pos[0]), int(self.detached_pos[1]))
+        if drop_pos is not None:
+            # 커서가 탭 근처에 오도록 살짝 좌상향 보정
+            return QPoint(drop_pos.x() - 30, drop_pos.y() - 10)
+        g = self.popover.frameGeometry()
+        return QPoint(g.right() + 12, g.top())
+
+    def _detach_view(self, view: str, drop_pos=None):
+        """뷰(보유/관심)를 메인 팝오버에서 떼어 독립 창으로 분리한다 (드래그 경로).
+        한쪽만 분리 정책 — 이미 분리된 뷰가 있으면 무시한다."""
+        if view not in ("holdings", "watch") or self.detached_view is not None:
+            return
+        other = "watch" if view == "holdings" else "holdings"
+        # 새로 분리할 때는 저장된 위치를 비워 드롭 위치에 뜨게 한다.
+        self.detached_pos = None
+        self.popover.set_hosted_views([other])
+        self._create_detached_window(view, drop_pos)
+
+    def _create_detached_window(self, view: str, drop_pos=None):
+        """분리 창을 실제로 생성·배선·표시한다 (드래그 분리 / 시작 시 복원 공용)."""
+        self.detached_view = view
+        if not self.detached_market_filter:
+            self.detached_market_filter = self.market_filter
+        win = Popover(detached=True, hosted_views=[view])
+        self.detached_window = win
+        self._wire_detached_window(win)
+
+        # 현재 전역/표시 상태 주입
+        win.set_assets_hidden(self.assets_hidden)
+        win.set_us_return_basis(self.us_return_basis)
+        win.set_usd_krw_rate(self.usd_krw_rate)
+        win.set_watch_ma(self.watch_ma)
+        win.set_market_filter(self.detached_market_filter)
+        win.set_opacity(self.detached_opacity)
+        if self.detached_height is not None:
+            win.set_preferred_height(self.detached_height)
+
+        # 데이터 주입 — 라우팅 헬퍼가 보유/관심을 각자의 창으로 보낸다(+캐시 재생).
+        self._sync_popover_stocks()
+        self._sync_popover_watchlist()
+        self._recompute_summary()
+
+        # 고정 상태는 show 전에 적용해 플래그 재설정 깜빡임을 줄인다 (기본은 핀 On).
+        if win.is_pinned() != self.detached_pinned:
+            win.set_pinned(self.detached_pinned)
+        pos = self._detached_show_pos(drop_pos)
+        win.show_at(pos)
+        # 위치/높이를 즉시 저장해 이동 전에 종료해도 복원되게 한다.
+        self.detached_pos = [win.x(), win.y()]
+        self.detached_height = win.height()
+        self._save_config()
+
+    def _apply_restored_detach(self):
+        """시작 시 저장된 분리 상태를 복원한다. 메인 호스팅 뷰는 즉시 줄여(탭 깜빡임
+        방지) 두고, 분리 창 생성·표시는 트레이 준비 시점(팝오버 표시 직후)으로 미룬다."""
+        view = self.detached_view
+        if view not in ("holdings", "watch"):
+            self.detached_view = None
+            return
+        other = "watch" if view == "holdings" else "holdings"
+        self.popover.set_hosted_views([other])
+        # detached_view 는 창이 실제로 만들어질 때 _create_detached_window 에서 다시 세팅.
+        self.detached_view = None
+        QTimer.singleShot(320, lambda v=view: self._create_detached_window(v))
+
+    def _dock_view(self):
+        """분리 창을 메인 팝오버로 다시 합친다."""
+        if self.detached_window is None or self.detached_view is None:
+            return
+        redocked = self.detached_view
+        win = self.detached_window
+        self.detached_pos = [win.x(), win.y()]
+        self.detached_height = win.height()
+        win.hide()
+        win.deleteLater()
+        self.detached_window = None
+        self.detached_view = None
+        # 메인이 두 뷰를 다시 호스팅하고, 재결합한 뷰를 활성 탭으로 둔다.
+        self.popover.set_hosted_views(["holdings", "watch"], active=redocked)
+        self._sync_popover_stocks()
+        self._sync_popover_watchlist()
+        self._recompute_summary()
+        self._save_config()
+
+    def _on_detached_opacity_changed(self, opacity: float):
+        self.detached_opacity = opacity
+        self._save_config()
+
+    def _on_detached_height_changed(self, height: int):
+        self.detached_height = height
+        self._save_config()
+
+    def _on_detached_pinned_changed(self, pinned: bool):
+        self.detached_pinned = bool(pinned)
+        self._save_config()
+
+    def _on_detached_geometry_changed(self, x: int, y: int, w: int, h: int):
+        self.detached_pos = [int(x), int(y)]
+        self.detached_height = int(h)
+        self._save_config()
+
+    def _reapply_cached_data(self, win=None):
+        """set_stocks() 이후 새로 만들어진 보유 행에 캐시된 가격/차트를 즉시 다시
+        넣어 차트가 비어 보이는 시간을 없앤다. win 미지정 시 보유 호스팅 창."""
+        win = win or self._holdings_window()
         for code, result in self.last_price_result.items():
-            self.popover.update_stock_price(code, result)
+            win.update_stock_price(code, result)
         for code, (prices, open_price) in self.last_minute_data.items():
-            self.popover.update_stock_minute(code, prices, open_price)
+            win.update_stock_minute(code, prices, open_price)
         for code, candles in self.last_daily_data.items():
-            self.popover.update_stock_daily(code, candles)
+            win.update_stock_daily(code, candles)
+
+    def _reapply_watch_cached_data(self, win=None):
+        """관심 행에 캐시된 시세/일봉을 즉시 다시 넣는다 (분리/도킹 직후 '─' 깜빡임 제거)."""
+        win = win or self._watch_window()
+        for code, result in self.last_watch_price.items():
+            win.update_watch_price(code, result)
+        for code, candles in self.last_watch_daily.items():
+            win.update_watch_daily(code, candles)
 
     def _sync_popover_watchlist(self):
-        self.popover.set_watch_tags(self.watch_tags)
-        self.popover.set_watchlist(self.watchlist)
+        win = self._watch_window()
+        win.set_watch_tags(self.watch_tags)
+        win.set_watchlist(self.watchlist)
+        self._reapply_watch_cached_data(win)
 
     def _sync_popover_stocks(self):
-        self.popover.set_stocks(self.stocks)
-        self._reapply_cached_data()
+        win = self._holdings_window()
+        win.set_stocks(self.stocks)
+        self._reapply_cached_data(win)
 
     # ── 포트폴리오 요약 재계산 ───────────────────────────────────────────
     def _recompute_summary(self):
+        win = self._holdings_window()
         if not self.stocks:
-            self.popover.update_summary(0, 0)
+            win.update_summary(0, 0)
             return
-
-        stocks = [s for s in self.stocks if self._matches_market_filter(s)]
+        market = self._holdings_filter()
+        stocks = [s for s in self.stocks if self._matches_filter(s, market)]
         totals = portfolio_totals(
             stocks,
             current_prices=self.current_prices,
             usd_krw_rate=self.usd_krw_rate,
         )
-        self.popover.update_summary(totals["total_invest"], totals["total_eval"])
+        win.update_summary(totals["total_invest"], totals["total_eval"])
+
+    def _holdings_filter(self) -> str:
+        """보유 뷰를 호스팅 중인 창의 시장 필터 (요약 계산 기준)."""
+        return self.detached_market_filter if self.detached_view == "holdings" else self.market_filter
+
+    def _matches_filter(self, stock: dict, market: str) -> bool:
+        if market == "ALL":
+            return True
+        return ("US" if is_us_stock(stock) else "KR") == market
 
     def _matches_market_filter(self, stock: dict) -> bool:
-        if self.market_filter == "ALL":
-            return True
-        market = "US" if is_us_stock(stock) else "KR"
-        return market == self.market_filter
+        return self._matches_filter(stock, self.market_filter)
 
     def _on_market_filter_changed(self, market: str):
+        """메인 팝오버의 시장 필터 변경 — 메인이 호스팅 중인 뷰만 다시 렌더한다.
+        (분리 창은 자기 필터를 따로 가진다.)"""
         self.market_filter = market if market in {"ALL", "KR", "US"} else "ALL"
-        self._sync_popover_stocks()
-        self._sync_popover_watchlist()
-        self._recompute_summary()
+        if self.detached_view != "holdings":   # 메인이 보유를 호스팅
+            self._sync_popover_stocks()
+            self._recompute_summary()
+        if self.detached_view != "watch":      # 메인이 관심을 호스팅
+            self._sync_popover_watchlist()
+        self._save_config()
+
+    def _on_detached_market_filter_changed(self, market: str):
+        """분리 창의 시장 필터 변경 — 분리 창이 호스팅 중인 뷰만 다시 렌더한다."""
+        self.detached_market_filter = market if market in {"ALL", "KR", "US"} else "ALL"
+        if self.detached_view == "holdings":
+            self._sync_popover_stocks()
+            self._recompute_summary()
+        elif self.detached_view == "watch":
+            self._sync_popover_watchlist()
+        self._save_config()
 
     def _fetch_usd_krw_rate(self):
         result = fetch_usd_krw_rate()
         if not result:
             return
         self.usd_krw_rate = float(result["rate"])
-        self.popover.set_usd_krw_rate(self.usd_krw_rate)
+        for win in self._all_windows():
+            win.set_usd_krw_rate(self.usd_krw_rate)
         self._recompute_summary()
 
     def _sync_fx_timer(self):
@@ -539,7 +733,8 @@ class MacAppManager(QObject):
         else:
             self.fx_timer.stop()
             self.usd_krw_rate = None
-            self.popover.set_usd_krw_rate(None)
+            for win in self._all_windows():
+                win.set_usd_krw_rate(None)
 
     # ── 설정 파일 ──────────────────────────────────────────────────────────
     def _load_config(self):
@@ -595,6 +790,14 @@ class MacAppManager(QObject):
                 except (TypeError, ValueError):
                     self.popover_offset = None
             self.pinned = bool(data.get("pinned", False))
+            # 분리(detach) 상태 복원 — 어느 뷰가 분리됐는지 + 그 창의 위치/높이/고정/투명도/필터
+            det = normalize_detached(data.get("detached"))
+            self.detached_view = det["view"]
+            self.detached_pos = det["pos"]
+            self.detached_height = det["height"]
+            self.detached_pinned = det["pinned"]
+            self.detached_opacity = det["opacity"]
+            self.detached_market_filter = det["market_filter"]
             # 자동 업데이트 메타 — 오늘 체크했는지(날짜) + 건너뛴 버전
             upd = data.get("update") or {}
             last_date = upd.get("last_check_date")
@@ -629,6 +832,14 @@ class MacAppManager(QObject):
             "popover_offset": self.popover_offset,
             "pinned": self.pinned,
             "memo": self.memo,
+            "detached": {
+                "view": self.detached_view,
+                "pos": self.detached_pos,
+                "height": self.detached_height,
+                "pinned": self.detached_pinned,
+                "opacity": self.detached_opacity,
+                "market_filter": self.detached_market_filter,
+            },
         }
         upd: dict = {}
         if self.update_last_check_date is not None:
