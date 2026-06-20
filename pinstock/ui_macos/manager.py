@@ -28,7 +28,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
-    normalize_watchlist_schema, normalize_tags, prune_watch_tags,
+    normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
 )
 from ..ui_windows.manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
@@ -37,6 +37,7 @@ from ..ui_windows.manage_dialog import (
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
 from ..ui_common.about_dialog import AboutDialog
+from ..ui_common.memo_dialog import MemoDialog
 
 from .popover import Popover
 from .menubar import MenuBarIcon
@@ -202,6 +203,9 @@ class MacAppManager(QObject):
         self.popover_offset: list[int] | None = None
         self.pinned: bool = False
         self.market_filter: str = "ALL"
+        # 투자 메모장 — 앱 전체 단일 메모 {text, updated_at}. 모드리스 창은 1개만 띄운다.
+        self.memo: dict = {"text": "", "updated_at": None}
+        self._memo_dialog: MemoDialog | None = None
         # 자동 업데이트 체크 상태 — 하루 1회 체크(날짜) + 건너뛴 버전 기억
         self.update_last_check_date: date | None = None
         self.update_skipped_version: str | None = None
@@ -294,6 +298,8 @@ class MacAppManager(QObject):
                 _checkmark_text(_LABEL_AUTOSTART, is_autostart_enabled()),
                 self.toggle_autostart,
             )
+        menu.addSeparator()
+        menu.addAction("메모장", self.open_memo_dialog)
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
         self.tray_about_action = menu.addAction(
@@ -453,6 +459,9 @@ class MacAppManager(QObject):
 
     def _on_opacity_changed(self, opacity: float):
         self.popover_opacity = opacity
+        # 메모창도 같은 투명도를 따른다 (열려 있을 때만 실시간 반영).
+        if self._memo_dialog is not None and self._memo_dialog.isVisible():
+            self._memo_dialog.set_opacity(opacity)
         self._save_config()
 
     def _on_height_changed(self, height: int):
@@ -565,6 +574,7 @@ class MacAppManager(QObject):
                     self.master_pos = None
             self.assets_hidden = bool(data.get("assets_hidden", False))
             self.us_return_basis = "usd" if data.get("us_return_basis") == "usd" else "krw"
+            self.memo = normalize_memo(data.get("memo"))
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
                 self.popover_opacity = max(0.1, min(1.0, opacity))
@@ -602,6 +612,7 @@ class MacAppManager(QObject):
         self.stocks = normalize_stocks_schema(self.stocks)
         self.watchlist = normalize_watchlist_schema(self.watchlist)
         self.watch_tags = normalize_tags(self.watch_tags)
+        self.memo = normalize_memo(self.memo)
         data = {
             "stocks": self.stocks,
             "watchlist": self.watchlist,
@@ -617,6 +628,7 @@ class MacAppManager(QObject):
             "popover_height": self.popover_height,
             "popover_offset": self.popover_offset,
             "pinned": self.pinned,
+            "memo": self.memo,
         }
         upd: dict = {}
         if self.update_last_check_date is not None:
@@ -979,6 +991,33 @@ class MacAppManager(QObject):
 
         for i, s in enumerate(self.stocks):
             self._spawn_fetcher(s, stagger_idx=i)
+
+    # ── 메모장 ────────────────────────────────────────────────────────────
+    def open_memo_dialog(self):
+        """투자 메모장 — 모드리스 항상-위 창. 이미 떠 있으면 새로 만들지 않고 앞으로 가져온다."""
+        if self._memo_dialog is not None and self._memo_dialog.isVisible():
+            self._memo_dialog.raise_()
+            self._memo_dialog.activateWindow()
+            return
+        self._memo_dialog = MemoDialog(
+            initial_text=self.memo.get("text", ""),
+            initial_geometry=self.memo.get("geometry"),
+            opacity=self.popover_opacity,
+            on_change=self._on_memo_changed,
+        )
+        self._memo_dialog.show()
+        self._memo_dialog.raise_()
+        self._memo_dialog.activateWindow()
+
+    def _on_memo_changed(self, text: str, geometry: list):
+        """메모 다이얼로그 콜백 — 텍스트/위치/크기 변경을 저장. 텍스트가 바뀐 경우에만
+        수정 시각을 갱신한다(위치·크기 변경은 시각에 영향 없음)."""
+        prev = self.memo or {}
+        updated_at = prev.get("updated_at")
+        if text != prev.get("text", ""):
+            updated_at = datetime.now().isoformat(timespec="seconds")
+        self.memo = {"text": text, "updated_at": updated_at, "geometry": geometry}
+        self._save_config()
 
     # ── 도움말 / 앱 정보 ──────────────────────────────────────────────────
     def open_help_dialog(self):

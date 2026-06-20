@@ -68,6 +68,32 @@ def normalize_stocks_schema(stocks: list[dict]) -> list[dict]:
     return [normalize_stock_schema(s) for s in stocks if isinstance(s, dict)]
 
 
+# ─── 메모(투자 메모장) 스키마 ─────────────────────────────────────────────────
+# 앱 전체에서 1개만 존재하는 자유 메모. {text, updated_at} 객체로 저장하며,
+# 구버전/형식 깨짐(문자열·None 등)도 안전하게 받아 준다.
+def normalize_memo(raw) -> dict:
+    """메모를 {text: str, updated_at: str|None, geometry: [x,y,w,h]|None} 로 정규화.
+
+    geometry 는 메모창의 마지막 위치/크기. 구버전(문자열 형태·geometry 없음)도
+    안전하게 받아 준다.
+    """
+    text, updated, geometry = "", None, None
+    if isinstance(raw, str):
+        text = raw
+    elif isinstance(raw, dict):
+        t = raw.get("text")
+        text = t if isinstance(t, str) else ""
+        u = raw.get("updated_at")
+        updated = u if isinstance(u, str) else None
+        g = raw.get("geometry")
+        if isinstance(g, (list, tuple)) and len(g) == 4:
+            try:
+                geometry = [int(g[0]), int(g[1]), int(g[2]), int(g[3])]
+            except (TypeError, ValueError):
+                geometry = None
+    return {"text": text, "updated_at": updated, "geometry": geometry}
+
+
 # ─── 관심종목(워치리스트) 스키마 ──────────────────────────────────────────────
 # 관심종목은 보유와 완전히 독립된 별도 목록이다. 평단가/수량/손익 개념이 없고,
 # 시세는 일봉 기준으로 본다. 같은 종목이 보유와 관심에 동시에 존재할 수 있다.

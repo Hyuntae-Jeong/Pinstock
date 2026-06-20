@@ -49,7 +49,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
-    normalize_watchlist_schema, normalize_tags, prune_watch_tags,
+    normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
 )
 from .theme import C, TRAY_MENU_STYLE
 from .floating_widget import StockWidget, TagGroupWidget
@@ -61,6 +61,7 @@ from .manage_dialog import (
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
 from ..ui_common.about_dialog import AboutDialog
+from ..ui_common.memo_dialog import MemoDialog
 
 
 # 태그 미지정 관심종목을 묶는 그룹의 키/제목/색
@@ -101,6 +102,9 @@ class WidgetManager:
         self.usd_krw_rate: float | None = None
         self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
         self.market_filter: str = "ALL"
+        # 투자 메모장 — 앱 전체 단일 메모 {text, updated_at}. 모드리스 창은 1개만 띄운다.
+        self.memo: dict = {"text": "", "updated_at": None}
+        self._memo_dialog: MemoDialog | None = None
 
         # 투명도 슬라이더가 멈춘 뒤에만 click-through 토글 + 설정 저장 — 50% 경계를
         # 지날 때 setWindowFlag 로 윈도우가 재생성되며 발생하던 멈칫을 없앤다.
@@ -443,6 +447,7 @@ class WidgetManager:
         gather_act = QAction("🎯   마스터 화면에 정렬", menu)
         self.autostart_act = QAction("🚀   시작 시 자동 실행", menu)
         self.autostart_act.setCheckable(True)
+        memo_act   = QAction("📝   메모장",      menu)
         help_act   = QAction("❓   도움말",      menu)
         self.about_act = QAction("ℹ️   앱 정보",  menu)
         quit_act   = QAction("❌   종료",        menu)
@@ -460,6 +465,7 @@ class WidgetManager:
         watch_reset_act.triggered.connect(self.reset_watch_positions)
         gather_act.triggered.connect(self.gather_to_master_screen)
         self.autostart_act.triggered.connect(self.toggle_autostart)
+        memo_act.triggered.connect(self.open_memo_dialog)
         help_act.triggered.connect(self.open_help_dialog)
         self.about_act.triggered.connect(self.open_about_dialog)
         quit_act.triggered.connect(self.app.quit)
@@ -495,6 +501,10 @@ class WidgetManager:
         if autostart_supported():
             self.autostart_act.setChecked(is_autostart_enabled())
             settings_menu.addAction(self.autostart_act)
+        menu.addSeparator()
+
+        # ── 메모 ──
+        menu.addAction(memo_act)
         menu.addSeparator()
 
         # ── 정보 · 종료 ──
@@ -575,6 +585,7 @@ class WidgetManager:
             self.assets_hidden = bool(data.get("assets_hidden", False))
             self.watch_visible = bool(data.get("watch_visible", True))
             self.us_return_basis = "usd" if data.get("us_return_basis") == "usd" else "krw"
+            self.memo = normalize_memo(data.get("memo"))
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
                 # Windows 는 10–100% 까지 허용 (macOS 는 자체적으로 60% 미만은 60% 로 clamp).
@@ -597,6 +608,7 @@ class WidgetManager:
         self.stocks = normalize_stocks_schema(self.stocks)
         self.watchlist = normalize_watchlist_schema(self.watchlist)
         self.watch_tags = normalize_tags(self.watch_tags)
+        self.memo = normalize_memo(self.memo)
         self._snapshot_watch_group_state()   # 현재 그룹 위치/고정 상태 반영
         data = {
             "stocks": self.stocks,
@@ -612,6 +624,7 @@ class WidgetManager:
             "watch_visible": self.watch_visible,
             "us_return_basis": self.us_return_basis,
             "popover_opacity": self.popover_opacity,
+            "memo": self.memo,
         }
         upd: dict = {}
         if self.update_last_check_date is not None:
@@ -1000,6 +1013,9 @@ class WidgetManager:
             w.setWindowOpacity(opacity)
         for w in self.watch_groups.values():
             w.setWindowOpacity(opacity)
+        # 메모창도 같은 투명도를 따른다 (단, 입력해야 하므로 click-through 대상은 아님).
+        if self._memo_dialog is not None and self._memo_dialog.isVisible():
+            self._memo_dialog.set_opacity(opacity)
 
     def _apply_click_through(self, opacity: float):
         """종목 위젯 + 관심 그룹 위젯 + 마스터 카드에 OS-레벨 click-through 토글.
@@ -1195,6 +1211,33 @@ class WidgetManager:
         # 숨김 상태에서 변경한 경우 자동으로 표시 상태로 전환
         if self.is_hidden and self.watch_groups:
             self.toggle_visibility()
+
+    # ── 메모장 ────────────────────────────────────────────────────────────
+    def open_memo_dialog(self):
+        """투자 메모장 — 모드리스 항상-위 창. 이미 떠 있으면 새로 만들지 않고 앞으로 가져온다."""
+        if self._memo_dialog is not None and self._memo_dialog.isVisible():
+            self._memo_dialog.raise_()
+            self._memo_dialog.activateWindow()
+            return
+        self._memo_dialog = MemoDialog(
+            initial_text=self.memo.get("text", ""),
+            initial_geometry=self.memo.get("geometry"),
+            opacity=self.popover_opacity,
+            on_change=self._on_memo_changed,
+        )
+        self._memo_dialog.show()
+        self._memo_dialog.raise_()
+        self._memo_dialog.activateWindow()
+
+    def _on_memo_changed(self, text: str, geometry: list):
+        """메모 다이얼로그 콜백 — 텍스트/위치/크기 변경을 저장. 텍스트가 바뀐 경우에만
+        수정 시각을 갱신한다(위치·크기 변경은 시각에 영향 없음)."""
+        prev = self.memo or {}
+        updated_at = prev.get("updated_at")
+        if text != prev.get("text", ""):
+            updated_at = datetime.now().isoformat(timespec="seconds")
+        self.memo = {"text": text, "updated_at": updated_at, "geometry": geometry}
+        self._save_config()
 
     # ── 도움말 / 앱 정보 ──────────────────────────────────────────────────
     def open_help_dialog(self):
