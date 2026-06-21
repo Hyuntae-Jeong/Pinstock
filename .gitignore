@@ -27,6 +27,10 @@ pinstock_holdings_*.xlsx
 *.zip
 files.zip
 
+# 스모크 테스트 산출물 (scripts/smoke_*.py 실행 시 레포 루트에 생성)
+smoke_*.png
+smoke_*.log
+
 # IDE / 에디터
 .vscode/
 .idea/
