@@ -817,6 +817,54 @@ class _ViewTab(QPushButton):
         super().mouseReleaseEvent(event)
 
 
+# ─── 창 이동용 드래그 핸들 (탑 바 빈 영역 = 타이틀바 역할) ─────────────────────
+class _DragArea(QWidget):
+    """탭 토글 행의 빈 영역을 잡고 끌면 창을 이동시키는 핸들.
+    탭 버튼(_ViewTab)은 자식이라 자기 영역의 이벤트를 먼저 소비하고, 그 바깥
+    빈 공간만 이 위젯이 받는다. PortfolioSummary 와 동일한 드래그 패턴."""
+
+    drag_started  = pyqtSignal(QPoint)
+    drag_moved    = pyqtSignal(QPoint)
+    drag_finished = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._press_global_pos: QPoint | None = None
+        self._dragging: bool = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_global_pos = event.globalPosition().toPoint()
+            self._dragging = False
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_global_pos is None:
+            super().mouseMoveEvent(event)
+            return
+        pos = event.globalPosition().toPoint()
+        if not self._dragging and (pos - self._press_global_pos).manhattanLength() >= 4:
+            self._dragging = True
+            self.drag_started.emit(self._press_global_pos)
+        if self._dragging:
+            self.drag_moved.emit(pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._press_global_pos is not None:
+            if self._dragging:
+                self.drag_finished.emit()
+            self._press_global_pos = None
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 # ─── 팝오버 메인 ─────────────────────────────────────────────────────────────
 class Popover(QWidget):
     """메뉴바 아이콘 아래에 펼쳐지는 팝오버 패널.
@@ -931,9 +979,14 @@ class Popover(QWidget):
         root.setSpacing(0)
 
         # ── 뷰 토글: 보유 / 관심 (호스팅 중인 뷰만 탭으로) ────────────────
-        self.view_row = QWidget(self.card)
+        # 탑 바의 빈 영역은 창 이동 핸들(타이틀바 역할) — 탭/요약 외에도 여기를 잡고
+        # 끌면 메인/분리 창 모두 이동한다.
+        self.view_row = _DragArea(self.card)
         self.view_row.setStyleSheet("background: transparent;")
         self.view_row.setFixedHeight(self.VIEW_ROW_H)
+        self.view_row.drag_started.connect(self._start_position_drag)
+        self.view_row.drag_moved.connect(self._move_position_drag)
+        self.view_row.drag_finished.connect(self._finish_position_drag)
         self._view_row_layout = QHBoxLayout(self.view_row)
         self._view_row_layout.setContentsMargins(10, 6, 10, 2)
         self._view_row_layout.setSpacing(6)
@@ -1727,6 +1780,8 @@ class Popover(QWidget):
         super().moveEvent(event)
         if self._detached:
             return   # 분리 창은 자유 이동 허용 (외부 이동 되돌리기 없음)
+        if self._move_start_window_pos is not None:
+            return   # 사용자가 드래그로 이동 중 — 우리 이동을 되돌리지 않는다
         if self._intended_pos is None or self._reverting_move:
             return
         if self.pos() != self._intended_pos:
@@ -1738,8 +1793,8 @@ class Popover(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             if self._detached:
-                # 분리 창은 닫는 대신 팝오버로 다시 합친다.
-                self.dock_requested.emit()
+                # 분리 창은 ESC 로 닫히거나 합쳐지지 않는다. 합치기는 '⇤ 합치기'
+                # 버튼으로만 한다 (실수로 합쳐지는 것 방지).
                 return
             self.closed_by_user.emit()
             self.hide()
