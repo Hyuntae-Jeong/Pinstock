@@ -5,12 +5,32 @@
 """
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QTextBrowser, QPushButton,
 )
 
+from ..__version__ import __version__
 from ..ui_windows.theme import C, DIALOG_STYLE
+
+
+# ─── 의존성 라이브러리 — (이름, 라이선스, 홈페이지 URL) ────────────────────
+# 표기 의도: 사용자에게 어떤 라이브러리가 쓰였고 어느 라이선스인지 한눈에
+# 보여주는 것. 라이선스 전문은 각 프로젝트 페이지에서 직접 확인하도록 안내.
+# 'Pinstock 정보' 도움말 섹션(_about_section)에서 사용한다.
+_DEPENDENCIES: list[tuple[str, str, str]] = [
+    ("PyQt6",              "GPL v3 (또는 상용)", "https://www.riverbankcomputing.com/software/pyqt/"),
+    ("Qt 6",               "LGPL v3",            "https://www.qt.io/"),
+    ("requests",           "Apache 2.0",         "https://github.com/psf/requests"),
+    ("openpyxl",           "MIT",                "https://openpyxl.readthedocs.io/"),
+    ("certifi",            "MPL 2.0",            "https://github.com/certifi/python-certifi"),
+    ("urllib3",            "MIT",                "https://github.com/urllib3/urllib3"),
+    ("charset-normalizer", "MIT",                "https://github.com/jawah/charset_normalizer"),
+    ("idna",               "BSD",                "https://github.com/kjd/idna"),
+]
+
+_APP_LICENSE_LINE = "MIT License — 자유롭게 사용·수정·재배포할 수 있습니다."
 
 
 # ─── 카테고리별 본문 ─────────────────────────────────────────────────────────
@@ -209,8 +229,8 @@ HELP_SECTIONS: list[tuple[str, str, str]] = [
             <li>새 버전이 있으면 현재·최신 버전을 보여주는 <b>업데이트 창이 바로 뜹니다.</b></li>
             <li><b>이 버전에서는 업데이트를 하지 않음</b>을 선택하면 그 버전은
                 자동 확인에서 다시 안내하지 않습니다 (수동 확인에서는 계속 보임).</li>
-            <li>수동 확인은 트레이 메뉴 → <b>앱 정보</b> → <b>🔄 업데이트 확인</b>
-                순서로 언제든 가능합니다.</li>
+            <li>수동 확인은 <b>도움말</b> 의 <b>ℹ️ Pinstock 정보</b> 섹션 →
+                <b>🔄 업데이트 확인</b> 에서 언제든 가능합니다.</li>
         </ul>
         """,
     ),
@@ -248,7 +268,7 @@ HELP_SECTIONS: list[tuple[str, str, str]] = [
         <h3>macOS 팝오버</h3>
         <ul>
             <li><b>메뉴바 아이콘 좌클릭</b>: 팝오버 펼침 / 접기</li>
-            <li><b>메뉴바 아이콘 우클릭</b>: 종목 추가·관리·Excel·앱 정보 등
+            <li><b>메뉴바 아이콘 우클릭</b>: 종목 추가·관리·Excel·도움말 등
                 컨텍스트 메뉴</li>
             <li>화면 <b>상단 왼쪽 앱 메뉴바</b>(종목/파일/보기/도움말…) 에도
                 같은 항목들이 있어요. 메뉴바 아이콘이 안 보일 때 백업 진입로로 활용하세요.</li>
@@ -314,12 +334,63 @@ def _content_default_style() -> str:
 class HelpDialog(QDialog):
     """좌측 카테고리 + 우측 본문의 단일 도움말 모달."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, on_check_update=None):
+        """
+        on_check_update: 'Pinstock 정보' 섹션의 '🔄 업데이트 확인' 링크가 호출할
+            콜백. None 이면 링크를 노출하지 않는다 — macOS 는 항상 manager 가
+            전달하고, Windows 는 별도 '앱 정보' 메뉴에서 업데이트를 확인하므로
+            도움말에서는 생략한다.
+        """
         super().__init__(parent)
+        self._on_check_update = on_check_update
         self.setWindowTitle("Pinstock 도움말")
         self.resize(780, 560)
         self.setStyleSheet(DIALOG_STYLE)
+        # 정적 카테고리 + 런타임에 만드는 'Pinstock 정보'(버전·업데이트 확인 노출
+        # 여부가 가변) 섹션. 마지막에 붙여 '시작하기' 가 기본 선택으로 남게 한다.
+        self._sections = list(HELP_SECTIONS) + [self._about_section()]
         self._build_ui()
+
+    def _about_section(self) -> tuple[str, str, str]:
+        """버전 · 업데이트 확인 · 라이선스를 담은 'Pinstock 정보' 섹션.
+
+        예전 About 다이얼로그를 도움말 안으로 흡수한 것. 업데이트 확인은
+        on_check_update 가 있을 때만 링크로 노출되며, 클릭은 QTextBrowser 의
+        anchorClicked 로 받아 콜백을 호출한다 (_on_anchor_clicked 참고)."""
+        deps_html = "\n".join(
+            f'<li><b>{name}</b> — {license_name} '
+            f'<a href="{url}">홈페이지</a></li>'
+            for name, license_name, url in _DEPENDENCIES
+        )
+        update_html = ""
+        if self._on_check_update is not None:
+            update_html = (
+                '<p><a href="pinstock:check-update">🔄 업데이트 확인</a> — '
+                '최신 버전이 있는지 지금 확인합니다.</p>'
+            )
+        body = f"""
+        <p><b>Pinstock</b> · 버전 {__version__}<br>
+        한국·미국 주식 미니 위젯</p>
+        {update_html}
+        <h3>라이선스</h3>
+        <p><b>Pinstock</b> — {_APP_LICENSE_LINE}</p>
+        <p><b>사용 중인 오픈소스 라이브러리</b></p>
+        <ul>
+            {deps_html}
+        </ul>
+        """
+        return ("ℹ️  Pinstock 정보", "ℹ️ Pinstock 정보", body)
+
+    def _on_anchor_clicked(self, url):
+        """본문 링크 분기. '업데이트 확인'은 콜백으로, 라이브러리 홈페이지 등
+        외부 링크는 기본 브라우저로 보낸다. content_view 는 setOpenLinks(False)
+        라 자동 내비게이션이 없고 모든 클릭이 여기로 들어온다."""
+        if url.scheme() == "pinstock":
+            if self._on_check_update is not None:
+                self._on_check_update()
+            return
+        if url.scheme() in ("http", "https"):
+            QDesktopServices.openUrl(url)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -339,12 +410,15 @@ class HelpDialog(QDialog):
             QAbstractItemView.ScrollMode.ScrollPerPixel
         )
         self.category_list.setStyleSheet(self._list_style())
-        for sidebar_label, _h2, _body in HELP_SECTIONS:
+        for sidebar_label, _h2, _body in self._sections:
             QListWidgetItem(sidebar_label, self.category_list)
 
-        # 우측: 본문
+        # 우측: 본문 — 자동 링크 내비게이션을 끄고(setOpenLinks(False))
+        # anchorClicked 로 직접 분기한다. '업데이트 확인'(내부 동작)과 외부
+        # 홈페이지 링크를 한 핸들러에서 갈라 처리하기 위함.
         self.content_view = QTextBrowser()
-        self.content_view.setOpenExternalLinks(True)
+        self.content_view.setOpenLinks(False)
+        self.content_view.anchorClicked.connect(self._on_anchor_clicked)
         self.content_view.document().setDefaultStyleSheet(_content_default_style())
         self.content_view.setStyleSheet(
             f"QTextBrowser {{ background: {C['bg2']}; color: {C['text']}; "
@@ -371,9 +445,9 @@ class HelpDialog(QDialog):
         self.category_list.setCurrentRow(0)
 
     def _show_section(self, row: int):
-        if not (0 <= row < len(HELP_SECTIONS)):
+        if not (0 <= row < len(self._sections)):
             return
-        _sidebar, body_title, body_html = HELP_SECTIONS[row]
+        _sidebar, body_title, body_html = self._sections[row]
         html = f"<h2>{body_title}</h2>\n{body_html}"
         self.content_view.setHtml(html)
         self.content_view.verticalScrollBar().setValue(0)

@@ -37,7 +37,6 @@ from ..ui_windows.manage_dialog import (
 )
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
-from ..ui_common.about_dialog import AboutDialog
 from ..ui_common.memo_dialog import MemoDialog
 
 from .popover import Popover
@@ -319,9 +318,6 @@ class MacAppManager(QObject):
         menu.addAction("메모장", self.open_memo_dialog)
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
-        self.tray_about_action = menu.addAction(
-            "Pinstock 정보", self.open_about_dialog
-        )
         menu.addSeparator()
         menu.addAction("종료", self.app.quit)
         self.tray_menu = menu
@@ -1242,14 +1238,11 @@ class MacAppManager(QObject):
         self.memo = {"text": text, "updated_at": updated_at, "geometry": geometry}
         self._save_config()
 
-    # ── 도움말 / 앱 정보 ──────────────────────────────────────────────────
+    # ── 도움말 ────────────────────────────────────────────────────────────
     def open_help_dialog(self):
-        HelpDialog().exec()
-
-    def open_about_dialog(self):
-        # 업데이트 확인은 About 다이얼로그 내부 버튼에서 트리거 — manager 가 오늘자
-        # 체크 기록/건너뛴 버전을 갱신하도록 콜백을 그쪽으로 전달한다.
-        AboutDialog(on_check_update=self.open_update_dialog).exec()
+        # 예전 'Pinstock 정보' 메뉴를 도움말로 흡수했다 — 업데이트 확인 콜백을
+        # 넘겨 도움말 'Pinstock 정보' 섹션의 '🔄 업데이트 확인' 링크를 살린다.
+        HelpDialog(on_check_update=self.open_update_dialog).exec()
 
     # ── 업데이트 확인 ─────────────────────────────────────────────────────
     # Windows WidgetManager 와 1:1 대응되는 패턴 — 다이얼로그가 결과를 manager 에

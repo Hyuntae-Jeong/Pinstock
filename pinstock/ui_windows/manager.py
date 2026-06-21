@@ -60,7 +60,6 @@ from .manage_dialog import (
 )
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
-from ..ui_common.about_dialog import AboutDialog
 from ..ui_common.memo_dialog import MemoDialog
 
 
@@ -449,7 +448,6 @@ class WidgetManager:
         self.autostart_act.setCheckable(True)
         memo_act   = QAction("📝   메모장",      menu)
         help_act   = QAction("❓   도움말",      menu)
-        self.about_act = QAction("ℹ️   앱 정보",  menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
@@ -467,7 +465,6 @@ class WidgetManager:
         self.autostart_act.triggered.connect(self.toggle_autostart)
         memo_act.triggered.connect(self.open_memo_dialog)
         help_act.triggered.connect(self.open_help_dialog)
-        self.about_act.triggered.connect(self.open_about_dialog)
         quit_act.triggered.connect(self.app.quit)
 
         # ── 최상위: 자주 쓰는 토글 ──
@@ -507,9 +504,8 @@ class WidgetManager:
         menu.addAction(memo_act)
         menu.addSeparator()
 
-        # ── 정보 · 종료 ──
+        # ── 도움말 · 종료 ──
         menu.addAction(help_act)
-        menu.addAction(self.about_act)
         menu.addAction(quit_act)
 
         self.context_menu = menu   # 마스터 위젯 우클릭에서도 같은 메뉴 재사용
@@ -1239,14 +1235,11 @@ class WidgetManager:
         self.memo = {"text": text, "updated_at": updated_at, "geometry": geometry}
         self._save_config()
 
-    # ── 도움말 / 앱 정보 ──────────────────────────────────────────────────
+    # ── 도움말 ────────────────────────────────────────────────────────────
     def open_help_dialog(self):
-        HelpDialog().exec()
-
-    def open_about_dialog(self):
-        # 업데이트 확인은 About 다이얼로그 내부 버튼에서 트리거 — manager 가 오늘자
-        # 체크 기록/건너뛴 버전을 갱신하도록 콜백을 그쪽으로 전달한다.
-        AboutDialog(on_check_update=self.open_update_dialog).exec()
+        # 예전 '앱 정보' 메뉴를 도움말로 흡수했다 — 업데이트 확인 콜백을 넘겨
+        # 도움말 'Pinstock 정보' 섹션의 '🔄 업데이트 확인' 링크를 살린다.
+        HelpDialog(on_check_update=self.open_update_dialog).exec()
 
     # ── 업데이트 확인 ─────────────────────────────────────────────────────
     def open_update_dialog(self):
