@@ -29,7 +29,7 @@ def _run(log_fp):
     log("[step] imports ok")
 
     # HelpDialog
-    assert len(HELP_SECTIONS) == 10
+    assert len(HELP_SECTIONS) == 11
     help_dlg = HelpDialog()
     log("[step] HelpDialog() ok")
     assert help_dlg.category_list.count() == len(HELP_SECTIONS)
