@@ -916,8 +916,9 @@ class Popover(QWidget):
             [v for v in (hosted_views or []) if v in ("holdings", "watch")]
             or ["holdings", "watch"]
         )
-        # 분리 창은 기본적으로 항상 위(핀 On)로 떠 동반 창처럼 유지된다.
-        self._pinned: bool = self._detached
+        # 핀(📌)은 메인/분리 모두 기본 해제. 분리 창도 메인 팝오버와 같은 단위로
+        # 아이콘 토글·비활성화 숨김을 따르고, 핀을 켜야 비활성화돼도 유지된다.
+        self._pinned: bool = False
         self.setWindowFlags(self._window_flags())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.rows: dict[str, StockRow] = {}
@@ -1150,17 +1151,16 @@ class Popover(QWidget):
 
         메인 팝오버: 항상 항상위(StaysOnTop). 핀 켜짐 → Window(앱 비활성에도 유지),
         꺼짐 → Tool(NSPanel, 앱 비활성 시 자동 숨김 = 외부클릭 닫힘 UX).
-        분리 창: 항상 Window — 동반 창이라 앱 비활성(다른 앱 클릭)에도 사라지면 안 되고,
-        메뉴바 앱(LSUIElement)이라 Window 라도 Dock 아이콘이 생기지 않는다(고정 팝오버가
-        이미 동일하게 증명). 핀은 '다른 앱 위에도 항상 위' 토글(StaysOnTop)로 쓴다."""
+        분리 창: 항상 Window + 항상위(StaysOnTop) — 표시 중엔 늘 위에 떠 가려지지 않게
+        한다. 메뉴바 앱(LSUIElement)이라 Window 라도 Dock 아이콘이 안 생긴다(고정
+        팝오버가 이미 증명). 핀은 '앱 비활성 시에도 유지'(매니저가 처리) 의미로만 쓰며
+        플래그에는 영향을 주지 않는다."""
         flags = (
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.NoDropShadowWindowHint
         )
         if self._detached:
-            flags |= Qt.WindowType.Window
-            if self._pinned:
-                flags |= Qt.WindowType.WindowStaysOnTopHint
+            flags |= Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint
         else:
             flags |= Qt.WindowType.WindowStaysOnTopHint
             flags |= Qt.WindowType.Window if self._pinned else Qt.WindowType.Tool
@@ -1178,7 +1178,10 @@ class Popover(QWidget):
     def set_pinned(self, pinned: bool):
         self._pinned = bool(pinned)
         self._sync_pin_button()
-        self._apply_window_flags()
+        # 분리 창은 플래그가 핀과 무관(항상 Window+항상위)하므로 재적용하지 않는다.
+        # 핀의 효과(비활성화 시 유지)는 매니저가 처리한다.
+        if not self._detached:
+            self._apply_window_flags()
 
     def is_pinned(self) -> bool:
         return self._pinned

@@ -104,7 +104,7 @@ def normalize_detached(raw) -> dict:
     view = None
     pos = None
     height = None
-    pinned = True
+    pinned = False
     opacity = 1.0
     market_filter = "ALL"
     if isinstance(raw, dict):

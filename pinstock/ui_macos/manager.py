@@ -213,7 +213,7 @@ class MacAppManager(QObject):
         self.detached_window: Popover | None = None
         self.detached_pos: list[int] | None = None
         self.detached_height: int | None = None
-        self.detached_pinned: bool = True
+        self.detached_pinned: bool = False
         self.detached_opacity: float = 1.0
         self.detached_market_filter: str = "ALL"
         # 투자 메모장 — 앱 전체 단일 메모 {text, updated_at}. 모드리스 창은 1개만 띄운다.
@@ -347,21 +347,31 @@ class MacAppManager(QObject):
             self._on_app_deactivated()
 
     def _on_app_deactivated(self):
-        """앱 비활성화(외부 클릭 등) → popover 를 닫고 플래그를 맞춘다.
-        고정(pin) 상태면 비활성화돼도 닫지 않으므로 그대로 둔다."""
+        """앱 비활성화(외부 클릭 등) → 고정 안 된 창을 숨긴다. 메인/분리 창은 각자
+        자기 핀 상태를 따른다 (둘 다 핀 해제면 둘 다 숨김, 핀 된 창은 유지)."""
+        if self.detached_window is not None and not self.detached_pinned:
+            self.detached_window.hide()
         if self.pinned:
             return
-        self._hide_popover()
+        self.popover.hide()
+        self._popover_shown = False
 
     # ── 팝오버 표시/숨김 ──────────────────────────────────────────────────
+    # 분리 상태여도 아이콘 토글/명시적 닫기는 메인+분리 두 창을 한 단위로 함께
+    # 표시/숨김한다. 한 창만 보고 싶으면 합치기(도킹)로 한 창으로 만든다.
     def _show_popover(self, anchor_pos, anchor_w):
         self.popover.show_below(anchor_pos, anchor_w)
         self.popover.raise_()
         self.popover.activateWindow()
+        if self.detached_window is not None:
+            self.detached_window.show_at(self._detached_show_pos())
         self._popover_shown = True
 
     def _hide_popover(self):
+        """명시적 닫기(아이콘 토글/ESC) — 핀과 무관하게 메인+분리 모두 숨긴다."""
         self.popover.hide()
+        if self.detached_window is not None:
+            self.detached_window.hide()
         self._popover_shown = False
 
     def _show_popover_initial(self, attempts: int = 0):
@@ -376,7 +386,9 @@ class MacAppManager(QObject):
         self._show_popover(anchor_pos, anchor_w)
 
     def _on_popover_closed_by_user(self):
-        # ESC 등으로 사용자가 직접 닫음 → 플래그를 False 로 맞춘다.
+        # ESC 등으로 메인을 직접 닫음 → 분리 창도 함께 숨긴다 (두 창은 한 단위).
+        if self.detached_window is not None:
+            self.detached_window.hide()
         self._popover_shown = False
 
     # ── 팝오버 토글 ───────────────────────────────────────────────────────
