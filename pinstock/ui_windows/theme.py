@@ -167,6 +167,23 @@ QHeaderView::section {{
 QHeaderView::section:last {{
     border-right: none;
 }}
+/* 체크박스: '체크 안 한' 상태에만 테두리를 입혀 어두운 표 배경에서도 또렷하게 한다.
+   테두리 색은 '체크된' 네이티브 박스의 채움색(= 시스템 강조색 palette Highlight, #58558f)에
+   맞춰 두 상태가 같은 색조로 보이게 한다. indicator:checked 에는 규칙을 주지 않아야 Qt
+   기본 체크 표시(✓)가 그대로 그려진다(subcontrol 에 border/background 지정 시 사라짐). */
+QCheckBox {{
+    color: {C['text']};
+    spacing: 6px;
+}}
+QCheckBox::indicator:unchecked {{
+    border: 1px solid #58558f;
+    border-radius: 4px;
+    background: transparent;
+}}
+QCheckBox::indicator:unchecked:hover {{
+    border: 1px solid #58558f;
+    background: rgba(88, 85, 143, 0.28);
+}}
 """
 
 # ─── 검색 자동완성 드롭다운(QCompleter 팝업) 스타일 ──────────────────────────
