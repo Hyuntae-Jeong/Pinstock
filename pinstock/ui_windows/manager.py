@@ -75,8 +75,8 @@ class WidgetManager:
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
-        # 확대 일봉 팝업 이동평균선 표시 설정 — 모든 관심 행이 공유(제자리 갱신)한다.
-        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
+        # 확대 일봉 팝업 표시 설정(이동평균선 + 배경 종목명) — 모든 관심 행이 공유(제자리 갱신)한다.
+        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True, "show_name": True}
         self.widgets: dict[str, StockWidget] = {}
         # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
         self.watch_groups: dict[str, TagGroupWidget] = {}

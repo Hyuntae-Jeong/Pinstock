@@ -665,9 +665,9 @@ class CompactWatchRow(QWidget):
         self.data = item
         self.current_price: float = 0.0
         self._chart_popup: ChartPopup | None = None
-        # 확대 팝업 이동평균선 표시 설정 — 매니저가 넘긴 공유 dict 를 참조(제자리 갱신).
+        # 확대 팝업 표시 설정(이동평균선·종목명) — 매니저가 넘긴 공유 dict 를 참조(제자리 갱신).
         self._ma_settings = ma_settings if ma_settings is not None else {
-            "ma5": True, "ma20": True, "ma60": True,
+            "ma5": True, "ma20": True, "ma60": True, "show_name": True,
         }
         self.setFixedHeight(self.ROW_H)
         self._build_ui()
@@ -710,10 +710,14 @@ class CompactWatchRow(QWidget):
                 round(self.SPARK_H * self.POPUP_SCALE),
                 parent=self,
             )
+        # '종목명표시'가 켜져 있으면 차트 배경에 깔 종목명을 넘긴다(꺼져 있으면 빈 값).
+        show_name = bool((self._ma_settings or {}).get("show_name", True))
+        name = (self.data.get("name") or self.data.get("code", "")) if show_name else ""
         self._chart_popup.show_with(
             candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size(),
             ma_periods=self._active_ma_periods(),
             display_count=self.POPUP_DISPLAY_CANDLES,
+            name=name,
         )
 
     def _hide_chart_popup(self):

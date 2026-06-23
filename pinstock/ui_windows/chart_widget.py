@@ -2,7 +2,7 @@
 
 from PyQt6.QtWidgets import QWidget, QFrame, QApplication
 from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize
-from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont
+from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont, QFontMetricsF
 
 from .theme import C, MA_COLORS
 
@@ -32,6 +32,7 @@ class SparklineWidget(QWidget):
         self.candles: list[dict] = []  # OHLC dict 리스트 (candle 모드)
         self.ma_periods: tuple = ()    # 그릴 이동평균 기간들 (예: (5, 20, 60))
         self.display_count: int | None = None  # 표시할 최근 캔들 수 (None=전부)
+        self.watermark_name: str = ""  # 캔들 뒤 배경에 은은히 깔 종목명 (확대 팝업 전용)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -167,6 +168,9 @@ class SparklineWidget(QWidget):
         shown = candles[start:]
 
         painter = QPainter(self)
+        # 종목명 워터마크를 캔들보다 먼저 그려 제일 하단 레이어로 깐다 (확대 팝업 전용)
+        if self.watermark_name:
+            self._draw_watermark_name(painter)
         # 캔들은 픽셀 정렬이 더 선명 — antialias off
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
@@ -246,6 +250,32 @@ class SparklineWidget(QWidget):
 
         painter.end()
 
+    # ── 배경 종목명 워터마크 — 캔들 뒤에 아주 은은하게 반투명으로 ────────────────
+    def _draw_watermark_name(self, painter: QPainter):
+        """확대 차트 중앙에 종목명을 반투명 큰 글씨로 깐다(제일 하단 레이어).
+        위젯 폭을 넘으면 폰트를 줄여 한 줄에 들어오게 한다."""
+        name = (self.watermark_name or "").strip()
+        if not name:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(8, 6, self.W - 16, self.H - 12)
+        px = max(11, int(self.H * 0.16))
+        font = QFont("Malgun Gothic")
+        font.setBold(True)
+        while px > 11:
+            font.setPixelSize(px)
+            if QFontMetricsF(font).horizontalAdvance(name) <= rect.width():
+                break
+            px -= 1
+        font.setPixelSize(px)
+        painter.setFont(font)
+        color = QColor(C['text'])
+        color.setAlpha(42)                 # 아주 은은하게 (다크 배경 위 반투명)
+        painter.setPen(color)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, name)
+        painter.restore()
+
     # ── 이동평균 범례 (좌상단) — 색 숫자 미니멀: 5 · 20 · 60 ──────────────────
     def _draw_ma_legend(self, painter: QPainter, pad: int):
         painter.setFont(QFont("Malgun Gothic", 9, QFont.Weight.DemiBold))
@@ -303,8 +333,9 @@ class ChartPopup(QWidget):
         self.chart.move(self.PAD, self.PAD)
 
     def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
-                  ma_periods=(), display_count: int | None = None):
+                  ma_periods=(), display_count: int | None = None, name: str = ""):
         """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
+        self.chart.watermark_name = name or ""   # 배경 종목명 (빈 값이면 안 그림)
         self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count)
         self._position(anchor_tl, anchor_size)
         self.show()

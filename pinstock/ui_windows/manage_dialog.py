@@ -2015,8 +2015,8 @@ class ManageWatchlistDialog(QDialog):
         self._check_boxes: list = []                  # 행별 선택 체크박스 (여러 개 한 번에 삭제용)
         self._tag_filter: str = self.FILTER_ALL       # 태그 필터 ("__ALL__"=전체, ""=태그없음, 그 외=tag id)
         self._row_item_indexes: list[int] = []        # 표의 행 → self._items 인덱스 매핑(필터 때문에 불일치)
-        # 확대 일봉 팝업 이동평균선 표시 설정 (기본: 모두 켜짐)
-        self._ma_settings = {"ma5": True, "ma20": True, "ma60": True}
+        # 확대 일봉 팝업 표시 설정 (이동평균선 + 배경 종목명, 기본: 모두 켜짐)
+        self._ma_settings = {"ma5": True, "ma20": True, "ma60": True, "show_name": True}
         if isinstance(ma_settings, dict):
             for k in self._ma_settings:
                 if k in ma_settings:
@@ -2114,6 +2114,14 @@ class ManageWatchlistDialog(QDialog):
             )
             self._ma_checks[key] = cb
             ma_row.addWidget(cb)
+        # 확대 차트 배경에 종목명을 은은하게 깔지 여부 (이동평균선과 별개 옵션)
+        self._show_name_check = QCheckBox("종목명표시")
+        self._show_name_check.setChecked(bool(self._ma_settings.get("show_name", True)))
+        self._show_name_check.setStyleSheet(
+            f"QCheckBox {{ color: {C['text']}; font-size: 12px; spacing: 6px; }}"
+            f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+        )
+        ma_row.addWidget(self._show_name_check)
         ma_row.addStretch()
         root.addLayout(ma_row)
 
@@ -2566,5 +2574,7 @@ class ManageWatchlistDialog(QDialog):
         return self._tags
 
     def get_ma_settings(self) -> dict:
-        """확대 일봉 팝업 이동평균선 표시 설정 {'ma5','ma20','ma60': bool}."""
-        return {key: cb.isChecked() for key, cb in self._ma_checks.items()}
+        """확대 일봉 팝업 표시 설정 {'ma5','ma20','ma60','show_name': bool}."""
+        out = {key: cb.isChecked() for key, cb in self._ma_checks.items()}
+        out["show_name"] = self._show_name_check.isChecked()
+        return out
