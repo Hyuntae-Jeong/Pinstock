@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDialogButtonBox, QPushButton, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyledItemDelegate, QRadioButton, QButtonGroup, QWidget,
-    QCompleter, QComboBox, QColorDialog, QFrame, QCheckBox, QSlider,
+    QCompleter, QComboBox, QColorDialog, QFrame, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QModelIndex, QSize, QRectF, pyqtSignal
 from PyQt6.QtGui import (
@@ -2127,39 +2127,23 @@ class ManageWatchlistDialog(QDialog):
             f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
         )
         ma_row.addWidget(self._show_name_check)
+
+        # 확대 차트 표시 기간 (1~6개월) — 캔들 크기·세로는 그대로, 가로 폭만 비례 확장.
+        ma_row.addSpacing(8)
+        period_lbl = QLabel("기간")
+        period_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        ma_row.addWidget(period_lbl)
+        self._period_combo = _NoScrollComboBox()
+        self._period_combo.setToolTip("확대 차트에 표시할 기간 — 길수록 차트가 가로로 넓어집니다")
+        for m in range(1, 7):
+            self._period_combo.addItem(f"{m}개월", m)
+        cur = int(self._ma_settings.get("popup_months", 3))
+        idx = self._period_combo.findData(cur)
+        self._period_combo.setCurrentIndex(idx if idx >= 0 else 2)
+        self._period_combo.setFixedWidth(84)
+        ma_row.addWidget(self._period_combo)
         ma_row.addStretch()
         root.addLayout(ma_row)
-
-        # ── 확대 차트 표시 기간 (1~6개월) ─────────────────────────────────────
-        # 캔들 크기·세로 높이는 그대로 두고, 기간이 늘수록 차트가 가로로 길어진다.
-        period_row = QHBoxLayout()
-        period_row.setSpacing(10)
-        period_lbl = QLabel("확대 차트 기간")
-        period_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
-        period_row.addWidget(period_lbl)
-        self._period_slider = QSlider(Qt.Orientation.Horizontal)
-        self._period_slider.setRange(1, 6)
-        self._period_slider.setSingleStep(1)
-        self._period_slider.setPageStep(1)
-        self._period_slider.setValue(int(self._ma_settings.get("popup_months", 3)))
-        self._period_slider.setFixedWidth(150)
-        self._period_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self._period_slider.setTickInterval(1)
-        self._period_slider.setStyleSheet(
-            f"QSlider::groove:horizontal {{ height: 3px; background: {C['surface2']}; border-radius: 1px; }}"
-            f"QSlider::sub-page:horizontal {{ background: {C['subtext']}; border-radius: 1px; }}"
-            f"QSlider::handle:horizontal {{ width: 12px; height: 12px; margin: -5px 0;"
-            f" background: {C['text']}; border-radius: 6px; }}"
-        )
-        self._period_slider.valueChanged.connect(self._on_period_changed)
-        period_row.addWidget(self._period_slider)
-        self._period_value_lbl = QLabel()
-        self._period_value_lbl.setStyleSheet(f"color: {C['text']}; font-size: 12px; font-weight: bold;")
-        self._period_value_lbl.setFixedWidth(48)
-        period_row.addWidget(self._period_value_lbl)
-        period_row.addStretch()
-        root.addLayout(period_row)
-        self._on_period_changed(self._period_slider.value())
 
         # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
         action_row = QHBoxLayout()
@@ -2609,12 +2593,9 @@ class ManageWatchlistDialog(QDialog):
     def get_tags(self) -> list[dict]:
         return self._tags
 
-    def _on_period_changed(self, v: int):
-        self._period_value_lbl.setText(f"{int(v)}개월")
-
     def get_ma_settings(self) -> dict:
         """확대 일봉 팝업 표시 설정 {'ma5','ma20','ma60','show_name': bool, 'popup_months': int}."""
         out = {key: cb.isChecked() for key, cb in self._ma_checks.items()}
         out["show_name"] = self._show_name_check.isChecked()
-        out["popup_months"] = int(self._period_slider.value())
+        out["popup_months"] = int(self._period_combo.currentData() or 3)
         return out
