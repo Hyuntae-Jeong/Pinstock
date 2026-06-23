@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFrame, QPushButton, QPlainTextEdit,
+    QDialog, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton, QPlainTextEdit,
     QSizeGrip, QApplication,
 )
 
@@ -40,14 +40,16 @@ class MemoDialog(QDialog):
         initial_geometry: Optional[list] = None,
         opacity: float = 1.0,
         on_change: Optional[Callable[[str, list], None]] = None,
+        title: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self._on_change = on_change
+        self._title = title or ""                  # 종목 메모면 종목명, 전역 메모면 빈 문자열
         self._ready = False                       # 초기 기하 적용 중 발생하는 이벤트 무시용
         self._drag_offset: Optional[QPoint] = None  # 프레임리스 창 드래그 이동용
 
-        self.setWindowTitle("Pinstock 메모")
+        self.setWindowTitle(self._title or "Pinstock 메모")
         # 프레임리스 + 모드리스 + 항상 위. 둥근 카드를 보여주려고 창 배경을 투명 처리
         # (팝오버와 동일 방식). 제목 표시줄이 없어 상단을 드래그해 창을 옮긴다.
         self.setWindowFlags(
@@ -134,9 +136,15 @@ class MemoDialog(QDialog):
         root.setContentsMargins(12, 8, 12, 12)
         root.setSpacing(6)
 
-        # 상단: 오른쪽 X 닫기 버튼 (배경 없음, 글리프만). 이 줄이 드래그 이동 손잡이.
+        # 상단: (종목 메모면) 왼쪽에 종목명 + 오른쪽 X 닫기 버튼. 이 줄이 드래그 이동 손잡이.
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
+        if self._title:
+            title_lbl = QLabel(self._title)
+            title_lbl.setStyleSheet(
+                f"color: {C['subtext']}; font-size: 12px; font-weight: bold; padding-left: 2px;"
+            )
+            top_row.addWidget(title_lbl)
         top_row.addStretch(1)
         self.btn_close = QPushButton("✕")
         self.btn_close.setFixedSize(26, 26)
@@ -160,7 +168,8 @@ class MemoDialog(QDialog):
         self.editor = QPlainTextEdit()
         self.editor.setPlainText(initial_text)
         self.editor.setPlaceholderText(
-            "투자 관련 메모를 자유롭게 적어두세요.\n자동으로 저장됩니다."
+            "이 종목 메모를 적어두세요.\n자동으로 저장됩니다." if self._title
+            else "투자 관련 메모를 자유롭게 적어두세요.\n자동으로 저장됩니다."
         )
         self.editor.setFrameShape(QFrame.Shape.NoFrame)
         self.editor.setStyleSheet(f"""

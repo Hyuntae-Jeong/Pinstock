@@ -218,6 +218,8 @@ class MacAppManager(QObject):
         # 투자 메모장 — 앱 전체 단일 메모 {text, updated_at}. 모드리스 창은 1개만 띄운다.
         self.memo: dict = {"text": "", "updated_at": None}
         self._memo_dialog: MemoDialog | None = None
+        # 종목별 메모 — 종목 코드별 모드리스 창. 여러 종목 메모를 동시에 띄울 수 있다.
+        self._stock_memo_dialogs: dict[str, MemoDialog] = {}
         # 자동 업데이트 체크 상태 — 하루 1회 체크(날짜) + 건너뛴 버전 기억
         self.update_last_check_date: date | None = None
         self.update_skipped_version: str | None = None
@@ -239,6 +241,7 @@ class MacAppManager(QObject):
         self.popover.toggle_assets_requested.connect(self._toggle_assets_hidden)
         self.popover.buy_requested.connect(self._on_buy_request)
         self.popover.edit_requested.connect(self._on_edit_request)
+        self.popover.memo_requested.connect(self.open_stock_memo_dialog)
         self.popover.delete_requested.connect(self._on_delete_request)
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
         self.popover.opacity_changed.connect(self._on_opacity_changed)
@@ -509,6 +512,9 @@ class MacAppManager(QObject):
         # 메모창도 같은 투명도를 따른다 (열려 있을 때만 실시간 반영).
         if self._memo_dialog is not None and self._memo_dialog.isVisible():
             self._memo_dialog.set_opacity(opacity)
+        for dlg in self._stock_memo_dialogs.values():
+            if dlg is not None and dlg.isVisible():
+                dlg.set_opacity(opacity)
         self._save_config()
 
     def _on_height_changed(self, height: int):
@@ -532,6 +538,7 @@ class MacAppManager(QObject):
         win.toggle_assets_requested.connect(self._toggle_assets_hidden)
         win.buy_requested.connect(self._on_buy_request)
         win.edit_requested.connect(self._on_edit_request)
+        win.memo_requested.connect(self.open_stock_memo_dialog)
         win.delete_requested.connect(self._on_delete_request)
         win.market_filter_changed.connect(self._on_detached_market_filter_changed)
         win.opacity_changed.connect(self._on_detached_opacity_changed)
@@ -1067,6 +1074,9 @@ class MacAppManager(QObject):
         if ret != QMessageBox.StandardButton.Yes:
             return
         self.stocks = [s for s in self.stocks if s["code"] != code]
+        memo_dlg = self._stock_memo_dialogs.pop(code, None)
+        if memo_dlg is not None:
+            memo_dlg.close()
         self._kill_fetcher(code)
         self.current_prices.pop(code, None)
         self._sync_fx_timer()
@@ -1236,6 +1246,44 @@ class MacAppManager(QObject):
         if text != prev.get("text", ""):
             updated_at = datetime.now().isoformat(timespec="seconds")
         self.memo = {"text": text, "updated_at": updated_at, "geometry": geometry}
+        self._save_config()
+
+    # ── 종목별 메모 ────────────────────────────────────────────────────────
+    def open_stock_memo_dialog(self, code: str):
+        """종목별 메모 — 전역 메모장과 같은 모드리스 항상-위 창을 종목마다 띄운다.
+        이미 떠 있으면 새로 만들지 않고 앞으로 가져온다."""
+        stock = next((s for s in self.stocks if s.get("code") == code), None)
+        if stock is None:
+            return
+        existing = self._stock_memo_dialogs.get(code)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        memo = normalize_memo(stock.get("memo"))
+        name = stock.get("name", code)
+        dlg = MemoDialog(
+            initial_text=memo.get("text", ""),
+            initial_geometry=memo.get("geometry"),
+            opacity=self.popover_opacity,
+            on_change=lambda text, geom, c=code: self._on_stock_memo_changed(c, text, geom),
+            title=f"📝 {name}",
+        )
+        self._stock_memo_dialogs[code] = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_stock_memo_changed(self, code: str, text: str, geometry: list):
+        """종목별 메모 콜백 — 해당 종목 dict 의 memo 를 갱신·저장한다(전역 메모와 동일 구조)."""
+        stock = next((s for s in self.stocks if s.get("code") == code), None)
+        if stock is None:
+            return
+        prev = normalize_memo(stock.get("memo"))
+        updated_at = prev.get("updated_at")
+        if text != prev.get("text", ""):
+            updated_at = datetime.now().isoformat(timespec="seconds")
+        stock["memo"] = {"text": text, "updated_at": updated_at, "geometry": geometry}
         self._save_config()
 
     # ── 도움말 ────────────────────────────────────────────────────────────

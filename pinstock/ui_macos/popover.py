@@ -42,6 +42,7 @@ class StockRow(QWidget):
     expanded_toggled = pyqtSignal(str)   # code
     buy_requested    = pyqtSignal(str)   # code
     edit_requested   = pyqtSignal(str)   # code
+    memo_requested   = pyqtSignal(str)   # code
     delete_requested = pyqtSignal(str)   # code
 
     COMPACT_H = 52
@@ -414,16 +415,17 @@ class StockRow(QWidget):
             self.usd_krw_rate,
         )
         buy_label = "💧   물타기" if metrics["profit_rate"] < 0 else "🔥   불타기"
-        buy_act = menu.addAction(buy_label)
-        menu.addSeparator()
+        buy_act  = menu.addAction(buy_label)
         edit_act = menu.addAction("✏️   수정")
-        menu.addSeparator()
+        memo_act = menu.addAction("📝   메모")
         del_act  = menu.addAction("🗑️   삭제")
         action = menu.exec(event.globalPos())
         if action == buy_act:
             self.buy_requested.emit(self.data["code"])
         elif action == edit_act:
             self.edit_requested.emit(self.data["code"])
+        elif action == memo_act:
+            self.memo_requested.emit(self.data["code"])
         elif action == del_act:
             self.delete_requested.emit(self.data["code"])
 
@@ -891,6 +893,7 @@ class Popover(QWidget):
     toggle_assets_requested  = pyqtSignal()      # 상단 요약 카드 클릭 → 자산 숨김 토글
     buy_requested            = pyqtSignal(str)   # code
     edit_requested           = pyqtSignal(str)   # code
+    memo_requested           = pyqtSignal(str)   # code
     delete_requested         = pyqtSignal(str)   # code
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
     opacity_changed          = pyqtSignal(float)   # 0.1 ~ 1.0
@@ -1418,6 +1421,7 @@ class Popover(QWidget):
             row.set_usd_krw_rate(self._usd_krw_rate)
             row.buy_requested.connect(self.buy_requested.emit)
             row.edit_requested.connect(self.edit_requested.emit)
+            row.memo_requested.connect(self.memo_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
             row.expanded_toggled.connect(self._on_row_expanded)
             self.rows[s["code"]] = row
