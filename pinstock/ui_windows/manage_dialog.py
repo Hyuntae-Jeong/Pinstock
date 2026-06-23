@@ -2057,6 +2057,17 @@ class ManageWatchlistDialog(QDialog):
         # 태그 콤보 글자(한글)가 위아래로 잘리지 않도록 행 높이를 충분히 준다
         self.table.verticalHeader().setDefaultSectionSize(38)
 
+        # 드래그로 행 순서 변경 (보유 관리와 동일 방식). 태그 필터가 걸리면 표가
+        # 부분 목록이라 전체 순서 동기화가 모호해 _update_drag_enabled 에서 끈다.
+        self.table.setDragEnabled(True)
+        self.table.setAcceptDrops(True)
+        self.table.viewport().setAcceptDrops(True)
+        self.table.setDropIndicatorShown(True)
+        self.table.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.table.setDragDropOverwriteMode(False)
+        # 드래그 정렬: 모델의 rowsMoved 시그널로 self._items 순서를 동기화
+        self.table.model().rowsMoved.connect(self._on_rows_moved)
+
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)             # 선택 체크박스
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)            # 종목명
@@ -2143,6 +2154,10 @@ class ManageWatchlistDialog(QDialog):
         root.addWidget(btns)
 
         self._populate_filter_combo()
+        # self._items 를 그룹 순서로 정규화('전체' 뷰 = floating 위젯과 같은 그룹 조합)
+        self._regroup_items()
+        # 초기 필터는 '전체'라 드래그는 꺼진 상태로 시작
+        self._update_drag_enabled()
         self._rebuild_table()
 
     # ── 태그 필터 ─────────────────────────────────────────────────────────
@@ -2167,6 +2182,61 @@ class ManageWatchlistDialog(QDialog):
 
     def _on_filter_changed(self, _idx: int):
         self._tag_filter = self.filter_combo.currentData()
+        self._update_drag_enabled()
+        self._rebuild_table()
+
+    def _update_drag_enabled(self):
+        """드래그 순서 변경은 특정 태그(또는 '태그 없음')로 필터링했을 때만 허용한다.
+        관심종목은 floating 위젯에서 태그 그룹 단위로 보이므로 순서도 그룹 안에서만
+        의미가 있다. '전체'는 각 그룹 순서를 이어 붙여 보여주기만 하고 드래그는 끈다."""
+        per_tag = self._tag_filter != self.FILTER_ALL
+        self.table.setDragEnabled(per_tag)
+        self.table.setAcceptDrops(per_tag)
+        self.table.viewport().setAcceptDrops(per_tag)
+        self.table.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove
+            if per_tag else QAbstractItemView.DragDropMode.NoDragDrop
+        )
+
+    def _regroup_items(self):
+        """self._items 를 태그 레지스트리 순서로 묶는다(각 그룹 내부의 상대 순서는 유지).
+        floating 위젯의 그룹 배치(_compute_watch_groups: 태그 등록순 + '태그 없음' 맨 뒤)와
+        같은 순서라 '전체' 뷰가 실제 떠 있는 관심 그룹 순서와 일치한다. 그룹 내부 순서는
+        특정 태그 필터에서 드래그로 정한 self._items 상대 순서가 그대로 보존된다."""
+        tag_ids = [t["id"] for t in self._tags]
+        buckets: dict[str, list] = {tid: [] for tid in tag_ids}
+        untagged: list = []
+        for it in self._items:
+            tag = str(it.get("tag") or "")
+            (buckets[tag] if tag in buckets else untagged).append(it)
+        ordered: list = []
+        for tid in tag_ids:
+            ordered.extend(buckets[tid])
+        ordered.extend(untagged)
+        self._items = ordered
+
+    def _on_rows_moved(self, parent, start, end, dest_parent, dest_row):
+        """드래그로 행을 옮기면 같은 태그 그룹 안에서 self._items 순서를 갱신한다.
+        드래그는 특정 태그 필터일 때만 켜지므로(전체는 비활성) 여기 도달하면 표에는
+        같은 태그 항목만 보인다. _row_item_indexes(표 행 → self._items 인덱스)로 그
+        그룹이 점유한 슬롯들을 찾아 새 순서로 다시 채운다 — 다른 그룹은 건드리지 않는다.
+        SingleSelection 이라 한 번에 한 행만 이동하며, Qt 의 dest_row 는 '이동 전
+        좌표계' 기준이라 아래로 끌 때 한 칸 보정한다."""
+        order = list(self._row_item_indexes)        # 이 그룹 항목들의 self._items 인덱스(표시 순서)
+        if not (0 <= start < len(order)):
+            self._rebuild_table()
+            return
+        moved = order.pop(start)
+        insert_at = dest_row if dest_row < start else dest_row - 1
+        insert_at = max(0, min(insert_at, len(order)))
+        order.insert(insert_at, moved)
+        # 이 그룹이 차지하던 self._items 슬롯(위치)에 새 순서대로 항목을 재배치
+        slots = sorted(self._row_item_indexes)
+        reordered = [self._items[i] for i in order]
+        for slot, it in zip(slots, reordered):
+            self._items[slot] = it
+        # cell widget(체크박스/태그 콤보/토글)은 행 이동 시 자동으로 따라오지 않으므로
+        # 표를 다시 그려 위치와 콜백의 인덱스 캡처를 동기화한다
         self._rebuild_table()
 
     def _matches_tag_filter(self, item: dict) -> bool:
@@ -2183,14 +2253,19 @@ class ManageWatchlistDialog(QDialog):
         """select_row 는 self._items 인덱스. 현재 필터에 보이면 그 행을 선택한다."""
         self._check_boxes = []
         self._row_item_indexes = []
-        self.table.setRowCount(0)
-        for item_idx, item in enumerate(self._items):
-            if not self._matches_tag_filter(item):
-                continue
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            self._row_item_indexes.append(item_idx)
-            self._fill_row(row, item, item_idx)
+        # 재구성 중 setRowCount/insertRow 가 rowsMoved 핸들러를 깨우지 않도록 차단
+        self.table.model().rowsMoved.disconnect(self._on_rows_moved)
+        try:
+            self.table.setRowCount(0)
+            for item_idx, item in enumerate(self._items):
+                if not self._matches_tag_filter(item):
+                    continue
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self._row_item_indexes.append(item_idx)
+                self._fill_row(row, item, item_idx)
+        finally:
+            self.table.model().rowsMoved.connect(self._on_rows_moved)
         # 표를 다시 그리면 모든 체크가 풀리므로 헤더 '전체 선택'도 초기화(신호 차단)
         if getattr(self, "_header_check", None) is not None:
             self._header_check.blockSignals(True)
@@ -2232,7 +2307,7 @@ class ManageWatchlistDialog(QDialog):
         check = QCheckBox()
         check.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
         ph_check = QTableWidgetItem("")
-        ph_check.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        ph_check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled)
         self.table.setItem(row, 0, ph_check)
         self.table.setCellWidget(row, 0, self._centered(check))
         self._check_boxes.append(check)
@@ -2245,7 +2320,11 @@ class ManageWatchlistDialog(QDialog):
             cell = QTableWidgetItem(text)
             align = Qt.AlignmentFlag.AlignLeft if col == 1 else Qt.AlignmentFlag.AlignCenter
             cell.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
-            cell.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            cell.setFlags(
+                Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsDragEnabled
+            )
             if col == 1:
                 cell.setToolTip(name)           # 폭이 좁아 잘려도 hover 로 전체 이름 확인
             self.table.setItem(row, col, cell)
@@ -2255,7 +2334,7 @@ class ManageWatchlistDialog(QDialog):
         combo = self._make_tag_combo(item.get("tag", ""))
         combo.activated.connect(lambda _, idx=item_idx, c=combo: self._on_tag_changed(idx, c))
         placeholder_tag = QTableWidgetItem("")
-        placeholder_tag.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        placeholder_tag.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled)
         self.table.setItem(row, 4, placeholder_tag)
         self.table.setCellWidget(row, 4, combo)
 
@@ -2264,7 +2343,7 @@ class ManageWatchlistDialog(QDialog):
         toggle = ToggleSwitch(checked=not hidden)
         toggle.toggled.connect(lambda checked, idx=item_idx: self._on_visibility_toggled(idx, checked))
         placeholder = QTableWidgetItem("")
-        placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled)
         self.table.setItem(row, 5, placeholder)
         self.table.setCellWidget(row, 5, self._centered(toggle))
 
@@ -2310,9 +2389,10 @@ class ManageWatchlistDialog(QDialog):
     def _on_tag_changed(self, item_idx: int, combo: QComboBox):
         if 0 <= item_idx < len(self._items):
             self._items[item_idx]["tag"] = combo.currentData() or ""
-            # 특정 태그로 필터 중인데 더 이상 그 태그가 아니면 목록에서 빠지도록 다시 그림
-            if self._tag_filter != self.FILTER_ALL and not self._matches_tag_filter(self._items[item_idx]):
-                self._rebuild_table()
+            # 태그가 바뀌면 소속 그룹이 달라지므로 그룹 순서를 다시 정규화하고 표를 갱신한다.
+            # (특정 태그로 필터 중이면 그 항목이 목록에서 빠지고, '전체'면 새 그룹 위치로 이동)
+            self._regroup_items()
+            self._rebuild_table()
 
     def _on_visibility_toggled(self, item_idx: int, checked: bool):
         if 0 <= item_idx < len(self._items):
@@ -2331,8 +2411,11 @@ class ManageWatchlistDialog(QDialog):
         self._items = dlg.get_watchlist()
         # 혹시 남은 dangling 태그 참조는 비워 표시(콤보)를 안전하게 갱신 (안전망)
         prune_watch_tags(self._items, self._tags)
+        # 태그 추가/삭제/재정렬이 있었을 수 있으니 그룹 순서를 다시 정규화
+        self._regroup_items()
         # 태그가 추가/삭제됐을 수 있으니 필터 콤보도 다시 채운다(없어진 태그면 전체로)
         self._populate_filter_combo()
+        self._update_drag_enabled()  # 필터가 전체로 되돌려졌을 수 있어 드래그 상태 갱신
         self._rebuild_table()
 
     # ── 보유 종목 → '보유중' 태그 동기화 ──────────────────────────────────
@@ -2400,7 +2483,9 @@ class ManageWatchlistDialog(QDialog):
 
         # 동기화 결과(신규/지정)가 가려지지 않도록 '전체'로 보여주고 필터 콤보 갱신
         self._tag_filter = self.FILTER_ALL
+        self._regroup_items()        # 새로 추가/태그지정된 항목을 그룹 순서로 정렬
         self._populate_filter_combo()
+        self._update_drag_enabled()  # '전체'로 돌아왔으니 드래그는 끈다
         self._rebuild_table()
         QMessageBox.information(
             self, "보유종목 동기화",
@@ -2427,10 +2512,13 @@ class ManageWatchlistDialog(QDialog):
             return
         d["name"] = result["name"]
         self._items.append(d)
+        self._regroup_items()        # 새 항목을 제 태그 그룹 위치로 정렬
         # 새 항목이 현재 태그 필터에 가려지지 않도록 '전체'로 보여준다
         self._tag_filter = self.FILTER_ALL
         self._populate_filter_combo()
-        self._rebuild_table(select_row=len(self._items) - 1)
+        self._update_drag_enabled()  # '전체'로 돌아왔으니 드래그는 끈다
+        sel = next((i for i, w in enumerate(self._items) if w is d), None)
+        self._rebuild_table(select_row=sel)
 
     def _toggle_all_checks(self, checked: bool):
         for cb in self._check_boxes:
