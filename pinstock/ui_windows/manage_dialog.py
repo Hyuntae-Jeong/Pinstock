@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDialogButtonBox, QPushButton, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyledItemDelegate, QRadioButton, QButtonGroup, QWidget,
-    QCompleter, QComboBox, QColorDialog, QFrame, QCheckBox,
+    QCompleter, QComboBox, QColorDialog, QFrame, QCheckBox, QSlider,
 )
 from PyQt6.QtCore import Qt, QTimer, QModelIndex, QSize, QRectF, pyqtSignal
 from PyQt6.QtGui import (
@@ -2015,12 +2015,17 @@ class ManageWatchlistDialog(QDialog):
         self._check_boxes: list = []                  # 행별 선택 체크박스 (여러 개 한 번에 삭제용)
         self._tag_filter: str = self.FILTER_ALL       # 태그 필터 ("__ALL__"=전체, ""=태그없음, 그 외=tag id)
         self._row_item_indexes: list[int] = []        # 표의 행 → self._items 인덱스 매핑(필터 때문에 불일치)
-        # 확대 일봉 팝업 표시 설정 (이동평균선 + 배경 종목명, 기본: 모두 켜짐)
-        self._ma_settings = {"ma5": True, "ma20": True, "ma60": True, "show_name": True}
+        # 확대 일봉 팝업 표시 설정 (이동평균선 + 배경 종목명 + 표시 기간(개월))
+        # popup_months 만 정수(1~6), 나머지는 on/off 불리언이다.
+        self._ma_settings = {"ma5": True, "ma20": True, "ma60": True,
+                             "show_name": True, "popup_months": 3}
         if isinstance(ma_settings, dict):
-            for k in self._ma_settings:
+            for k in ("ma5", "ma20", "ma60", "show_name"):
                 if k in ma_settings:
                     self._ma_settings[k] = bool(ma_settings[k])
+            pm = ma_settings.get("popup_months")
+            if isinstance(pm, (int, float)):
+                self._ma_settings["popup_months"] = max(1, min(6, int(pm)))
 
         self.setWindowTitle("관심종목 관리")
         # 긴 종목명(예: State Street SPDR S&P …)이 잘리지 않게 기본 폭을 넉넉히.
@@ -2124,6 +2129,37 @@ class ManageWatchlistDialog(QDialog):
         ma_row.addWidget(self._show_name_check)
         ma_row.addStretch()
         root.addLayout(ma_row)
+
+        # ── 확대 차트 표시 기간 (1~6개월) ─────────────────────────────────────
+        # 캔들 크기·세로 높이는 그대로 두고, 기간이 늘수록 차트가 가로로 길어진다.
+        period_row = QHBoxLayout()
+        period_row.setSpacing(10)
+        period_lbl = QLabel("확대 차트 기간")
+        period_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        period_row.addWidget(period_lbl)
+        self._period_slider = QSlider(Qt.Orientation.Horizontal)
+        self._period_slider.setRange(1, 6)
+        self._period_slider.setSingleStep(1)
+        self._period_slider.setPageStep(1)
+        self._period_slider.setValue(int(self._ma_settings.get("popup_months", 3)))
+        self._period_slider.setFixedWidth(150)
+        self._period_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._period_slider.setTickInterval(1)
+        self._period_slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ height: 3px; background: {C['surface2']}; border-radius: 1px; }}"
+            f"QSlider::sub-page:horizontal {{ background: {C['subtext']}; border-radius: 1px; }}"
+            f"QSlider::handle:horizontal {{ width: 12px; height: 12px; margin: -5px 0;"
+            f" background: {C['text']}; border-radius: 6px; }}"
+        )
+        self._period_slider.valueChanged.connect(self._on_period_changed)
+        period_row.addWidget(self._period_slider)
+        self._period_value_lbl = QLabel()
+        self._period_value_lbl.setStyleSheet(f"color: {C['text']}; font-size: 12px; font-weight: bold;")
+        self._period_value_lbl.setFixedWidth(48)
+        period_row.addWidget(self._period_value_lbl)
+        period_row.addStretch()
+        root.addLayout(period_row)
+        self._on_period_changed(self._period_slider.value())
 
         # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
         action_row = QHBoxLayout()
@@ -2573,8 +2609,12 @@ class ManageWatchlistDialog(QDialog):
     def get_tags(self) -> list[dict]:
         return self._tags
 
+    def _on_period_changed(self, v: int):
+        self._period_value_lbl.setText(f"{int(v)}개월")
+
     def get_ma_settings(self) -> dict:
-        """확대 일봉 팝업 표시 설정 {'ma5','ma20','ma60','show_name': bool}."""
+        """확대 일봉 팝업 표시 설정 {'ma5','ma20','ma60','show_name': bool, 'popup_months': int}."""
         out = {key: cb.isChecked() for key, cb in self._ma_checks.items()}
         out["show_name"] = self._show_name_check.isChecked()
+        out["popup_months"] = int(self._period_slider.value())
         return out

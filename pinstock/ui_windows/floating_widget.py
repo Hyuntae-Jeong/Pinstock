@@ -657,7 +657,8 @@ class CompactWatchRow(QWidget):
     POLL_MS = 60_000
     STAGGER_MS = 500
     POPUP_SCALE = 7.5            # hover 시 확대 팝업 배율 (기존 2.5의 3배)
-    POPUP_DISPLAY_CANDLES = 63   # 확대 팝업에 표시할 일봉 수 (약 3개월)
+    POPUP_BASE_MONTHS = 3        # 기준 기간(이 기간에서 팝업 가로폭 = SPARK_W*POPUP_SCALE)
+    TRADING_DAYS_PER_MONTH = 21  # 1개월 ≈ 21 거래일 (표시 캔들 수 환산)
     MINI_CANDLES = 30            # 행에 박힌 미니 차트에 표시할 일봉 수
 
     def __init__(self, item: dict, stagger_idx: int = 0, parent=None, ma_settings: dict | None = None):
@@ -665,9 +666,9 @@ class CompactWatchRow(QWidget):
         self.data = item
         self.current_price: float = 0.0
         self._chart_popup: ChartPopup | None = None
-        # 확대 팝업 표시 설정(이동평균선·종목명) — 매니저가 넘긴 공유 dict 를 참조(제자리 갱신).
+        # 확대 팝업 표시 설정(이동평균선·종목명·표시 기간) — 매니저가 넘긴 공유 dict 참조(제자리 갱신).
         self._ma_settings = ma_settings if ma_settings is not None else {
-            "ma5": True, "ma20": True, "ma60": True, "show_name": True,
+            "ma5": True, "ma20": True, "ma60": True, "show_name": True, "popup_months": 3,
         }
         self.setFixedHeight(self.ROW_H)
         self._build_ui()
@@ -699,24 +700,34 @@ class CompactWatchRow(QWidget):
         s = self._ma_settings or {}
         return tuple(p for p, key in ((5, "ma5"), (20, "ma20"), (60, "ma60")) if s.get(key, True))
 
+    def _popup_months(self) -> int:
+        """확대 차트 표시 기간(1~6개월). 관리창 슬라이더 값(공유 dict)을 따른다."""
+        s = self._ma_settings or {}
+        return max(1, min(6, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
+
     def _show_chart_popup(self):
         # 미니 차트가 보유한 전체 일봉 이력을 재사용 — 새 네트워크 호출은 하지 않는다
         candles = getattr(self.sparkline, "candles", None)
         if not candles or self.sparkline.mode != "candle":
             return
-        if self._chart_popup is None:
-            self._chart_popup = ChartPopup(
-                round(self.SPARK_W * self.POPUP_SCALE),
-                round(self.SPARK_H * self.POPUP_SCALE),
-                parent=self,
-            )
+        # 기간이 늘수록 캔들 크기(밀도)·세로 높이는 그대로 두고 가로 폭만 비례해 넓힌다.
+        months = self._popup_months()
+        display_count = months * self.TRADING_DAYS_PER_MONTH
+        chart_w = round(self.SPARK_W * self.POPUP_SCALE * months / self.POPUP_BASE_MONTHS)
+        chart_h = round(self.SPARK_H * self.POPUP_SCALE)
+        # 기간 변경 시 폭이 달라지므로(ChartPopup 은 고정 크기) 필요하면 새로 만든다.
+        if self._chart_popup is None or self._chart_popup.chart.W != chart_w:
+            if self._chart_popup is not None:
+                self._chart_popup.hide()
+                self._chart_popup.deleteLater()
+            self._chart_popup = ChartPopup(chart_w, chart_h, parent=self)
         # '종목명표시'가 켜져 있으면 차트 배경에 깔 종목명을 넘긴다(꺼져 있으면 빈 값).
         show_name = bool((self._ma_settings or {}).get("show_name", True))
         name = (self.data.get("name") or self.data.get("code", "")) if show_name else ""
         self._chart_popup.show_with(
             candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size(),
             ma_periods=self._active_ma_periods(),
-            display_count=self.POPUP_DISPLAY_CANDLES,
+            display_count=display_count,
             name=name,
         )
 
