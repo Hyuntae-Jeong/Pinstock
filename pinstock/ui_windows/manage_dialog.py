@@ -2018,9 +2018,10 @@ class ManageWatchlistDialog(QDialog):
         # 확대 일봉 팝업 표시 설정 (이동평균선 + 배경 종목명 + 표시 기간(개월))
         # popup_months 만 정수(1~6), 나머지는 on/off 불리언이다.
         self._ma_settings = {"ma5": True, "ma20": True, "ma60": True,
-                             "show_name": True, "popup_months": 3}
+                             "show_name": True, "popup_months": 3,
+                             "axis_date": False, "axis_price": False}
         if isinstance(ma_settings, dict):
-            for k in ("ma5", "ma20", "ma60", "show_name"):
+            for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
                 if k in ma_settings:
                     self._ma_settings[k] = bool(ma_settings[k])
             pm = ma_settings.get("popup_months")
@@ -2144,6 +2145,30 @@ class ManageWatchlistDialog(QDialog):
         ma_row.addWidget(self._period_combo)
         ma_row.addStretch()
         root.addLayout(ma_row)
+
+        # ── 확대 차트 보조축 (하단 날짜 · 우측 가격) 표시 토글 ──────────────────
+        # 날짜축: 표시 구간을 4등분한 대략적 날짜(M/D). 가격축: 최고·평균·최저가 눈금.
+        axis_row = QHBoxLayout()
+        axis_row.setSpacing(14)
+        axis_lbl = QLabel("확대 차트 보조축")
+        axis_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        axis_row.addWidget(axis_lbl)
+        self._axis_checks: dict[str, QCheckBox] = {}
+        for label, key, tip in (
+            ("날짜축", "axis_date", "차트 아래에 대략적인 날짜(월/일)를 표시합니다"),
+            ("가격축", "axis_price", "차트 오른쪽에 최고가·평균가·최저가를 표시합니다"),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(bool(self._ma_settings.get(key, False)))
+            cb.setToolTip(tip)
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {C['text']}; font-size: 12px; spacing: 6px; }}"
+                f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+            )
+            self._axis_checks[key] = cb
+            axis_row.addWidget(cb)
+        axis_row.addStretch()
+        root.addLayout(axis_row)
 
         # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
         action_row = QHBoxLayout()
@@ -2594,8 +2619,11 @@ class ManageWatchlistDialog(QDialog):
         return self._tags
 
     def get_ma_settings(self) -> dict:
-        """확대 일봉 팝업 표시 설정 {'ma5','ma20','ma60','show_name': bool, 'popup_months': int}."""
+        """확대 일봉 팝업 표시 설정
+        {'ma5','ma20','ma60','show_name','axis_date','axis_price': bool, 'popup_months': int}."""
         out = {key: cb.isChecked() for key, cb in self._ma_checks.items()}
         out["show_name"] = self._show_name_check.isChecked()
         out["popup_months"] = int(self._period_combo.currentData() or 3)
+        for key, cb in self._axis_checks.items():
+            out[key] = cb.isChecked()
         return out

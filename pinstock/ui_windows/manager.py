@@ -78,7 +78,8 @@ class WidgetManager:
         # 확대 일봉 팝업 표시 설정(이동평균선 + 배경 종목명 + 표시 기간) — 모든 관심 행이 공유(제자리 갱신).
         # popup_months 만 정수(1~6개월), 나머지는 on/off 불리언이다.
         self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True,
-                               "show_name": True, "popup_months": 3}
+                               "show_name": True, "popup_months": 3,
+                               "axis_date": False, "axis_price": False}
         self.widgets: dict[str, StockWidget] = {}
         # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
         self.watch_groups: dict[str, TagGroupWidget] = {}
@@ -571,7 +572,7 @@ class WidgetManager:
             # popup_months 만 정수(1~6)로, 나머지 키는 불리언으로 받는다.
             ma = data.get("watch_ma")
             if isinstance(ma, dict):
-                for k in ("ma5", "ma20", "ma60", "show_name"):
+                for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
                     if k in ma:
                         self.watch_ma[k] = bool(ma[k])
                 pm = ma.get("popup_months")

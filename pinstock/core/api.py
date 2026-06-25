@@ -24,6 +24,17 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _epoch_to_date(ts) -> str:
+    """Yahoo epoch(초) → 'YYYYMMDD' 거래일 문자열. 변환 실패 시 빈 문자열.
+    일봉 timestamp 는 거래소 개장시각(UTC) 기준이라 UTC 날짜가 곧 거래일이다."""
+    try:
+        if not ts:
+            return ""
+        return datetime.utcfromtimestamp(int(ts)).strftime("%Y%m%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
 def _signed_naver_value(value, compare_to_previous: dict | None, default: float = 0.0) -> float:
     number = _to_float(value, default)
     compare = compare_to_previous or {}
@@ -284,6 +295,7 @@ def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict 
             return None
         candles = [
             {
+                "date":  str(d.get("localDate") or ""),
                 "open":  float(d["openPrice"]),
                 "high":  float(d["highPrice"]),
                 "low":   float(d["lowPrice"]),
@@ -520,16 +532,18 @@ def fetch_us_daily_chart(symbol: str, range_: str = "3mo", max_candles: int = 30
         if not result:
             return _fetch_us_daily_chart_naver(symbol, days=_days_for_candles(max_candles), max_candles=max_candles)
         quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
+        timestamps = result.get("timestamp") or []
         candles = []
-        for open_, high, low, close in zip(
+        for i, (open_, high, low, close) in enumerate(zip(
             quote_data.get("open") or [],
             quote_data.get("high") or [],
             quote_data.get("low") or [],
             quote_data.get("close") or [],
-        ):
+        )):
             if None in {open_, high, low, close}:
                 continue
             candle = {
+                "date":  _epoch_to_date(timestamps[i] if i < len(timestamps) else None),
                 "open":  _to_float(open_),
                 "high":  _to_float(high),
                 "low":   _to_float(low),
@@ -665,6 +679,7 @@ def _fetch_us_daily_chart_naver(symbol: str, days: int = 90, max_candles: int = 
                 candles = []
                 for d in data:
                     candle = {
+                        "date":  str(d.get("localDate") or ""),
                         "open":  _to_float(d.get("openPrice")),
                         "high":  _to_float(d.get("highPrice")),
                         "low":   _to_float(d.get("lowPrice")),
@@ -731,6 +746,7 @@ def _fetch_kr_index_daily(code: str, days: int = 45, max_candles: int = 30) -> d
             return None
         candles = [
             {
+                "date":  str(d.get("localDate") or ""),
                 "open":  _to_float(d.get("openPrice")),
                 "high":  _to_float(d.get("highPrice")),
                 "low":   _to_float(d.get("lowPrice")),

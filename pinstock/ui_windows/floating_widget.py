@@ -669,6 +669,7 @@ class CompactWatchRow(QWidget):
         # 확대 팝업 표시 설정(이동평균선·종목명·표시 기간) — 매니저가 넘긴 공유 dict 참조(제자리 갱신).
         self._ma_settings = ma_settings if ma_settings is not None else {
             "ma5": True, "ma20": True, "ma60": True, "show_name": True, "popup_months": 3,
+            "axis_date": False, "axis_price": False,
         }
         self.setFixedHeight(self.ROW_H)
         self._build_ui()
@@ -722,13 +723,16 @@ class CompactWatchRow(QWidget):
                 self._chart_popup.deleteLater()
             self._chart_popup = ChartPopup(chart_w, chart_h, parent=self)
         # '종목명표시'가 켜져 있으면 차트 배경에 깔 종목명을 넘긴다(꺼져 있으면 빈 값).
-        show_name = bool((self._ma_settings or {}).get("show_name", True))
+        s = self._ma_settings or {}
+        show_name = bool(s.get("show_name", True))
         name = (self.data.get("name") or self.data.get("code", "")) if show_name else ""
         self._chart_popup.show_with(
             candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size(),
             ma_periods=self._active_ma_periods(),
             display_count=display_count,
             name=name,
+            show_date_axis=bool(s.get("axis_date", False)),
+            show_price_axis=bool(s.get("axis_price", False)),
         )
 
     def _hide_chart_popup(self):
