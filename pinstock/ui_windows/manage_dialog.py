@@ -2015,12 +2015,18 @@ class ManageWatchlistDialog(QDialog):
         self._check_boxes: list = []                  # 행별 선택 체크박스 (여러 개 한 번에 삭제용)
         self._tag_filter: str = self.FILTER_ALL       # 태그 필터 ("__ALL__"=전체, ""=태그없음, 그 외=tag id)
         self._row_item_indexes: list[int] = []        # 표의 행 → self._items 인덱스 매핑(필터 때문에 불일치)
-        # 확대 일봉 팝업 이동평균선 표시 설정 (기본: 모두 켜짐)
-        self._ma_settings = {"ma5": True, "ma20": True, "ma60": True}
+        # 확대 일봉 팝업 표시 설정 (이동평균선 + 배경 종목명 + 표시 기간(개월))
+        # popup_months 만 정수(1~6), 나머지는 on/off 불리언이다.
+        self._ma_settings = {"ma5": True, "ma20": True, "ma60": True,
+                             "show_name": True, "popup_months": 3,
+                             "axis_date": False, "axis_price": False}
         if isinstance(ma_settings, dict):
-            for k in self._ma_settings:
+            for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
                 if k in ma_settings:
                     self._ma_settings[k] = bool(ma_settings[k])
+            pm = ma_settings.get("popup_months")
+            if isinstance(pm, (int, float)):
+                self._ma_settings["popup_months"] = max(1, min(6, int(pm)))
 
         self.setWindowTitle("관심종목 관리")
         # 긴 종목명(예: State Street SPDR S&P …)이 잘리지 않게 기본 폭을 넉넉히.
@@ -2114,8 +2120,55 @@ class ManageWatchlistDialog(QDialog):
             )
             self._ma_checks[key] = cb
             ma_row.addWidget(cb)
+        # 확대 차트 배경에 종목명을 은은하게 깔지 여부 (이동평균선과 별개 옵션)
+        self._show_name_check = QCheckBox("종목명표시")
+        self._show_name_check.setChecked(bool(self._ma_settings.get("show_name", True)))
+        self._show_name_check.setStyleSheet(
+            f"QCheckBox {{ color: {C['text']}; font-size: 12px; spacing: 6px; }}"
+            f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+        )
+        ma_row.addWidget(self._show_name_check)
+
+        # 확대 차트 표시 기간 (1~6개월) — 캔들 크기·세로는 그대로, 가로 폭만 비례 확장.
+        ma_row.addSpacing(8)
+        period_lbl = QLabel("기간")
+        period_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        ma_row.addWidget(period_lbl)
+        self._period_combo = _NoScrollComboBox()
+        self._period_combo.setToolTip("확대 차트에 표시할 기간 — 길수록 차트가 가로로 넓어집니다")
+        for m in range(1, 7):
+            self._period_combo.addItem(f"{m}개월", m)
+        cur = int(self._ma_settings.get("popup_months", 3))
+        idx = self._period_combo.findData(cur)
+        self._period_combo.setCurrentIndex(idx if idx >= 0 else 2)
+        self._period_combo.setFixedWidth(84)
+        ma_row.addWidget(self._period_combo)
         ma_row.addStretch()
         root.addLayout(ma_row)
+
+        # ── 확대 차트 보조축 (하단 날짜 · 우측 가격) 표시 토글 ──────────────────
+        # 날짜축: 표시 구간을 4등분한 대략적 날짜(M/D). 가격축: 최고·평균·최저가 눈금.
+        axis_row = QHBoxLayout()
+        axis_row.setSpacing(14)
+        axis_lbl = QLabel("확대 차트 보조축")
+        axis_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        axis_row.addWidget(axis_lbl)
+        self._axis_checks: dict[str, QCheckBox] = {}
+        for label, key, tip in (
+            ("날짜축", "axis_date", "차트 아래에 대략적인 날짜(월/일)를 표시합니다"),
+            ("가격축", "axis_price", "차트 오른쪽에 최고가·평균가·최저가를 표시합니다"),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(bool(self._ma_settings.get(key, False)))
+            cb.setToolTip(tip)
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {C['text']}; font-size: 12px; spacing: 6px; }}"
+                f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+            )
+            self._axis_checks[key] = cb
+            axis_row.addWidget(cb)
+        axis_row.addStretch()
+        root.addLayout(axis_row)
 
         # ── 행 액션 (추가 / 삭제 / 태그 관리) ──────────────────────────────
         action_row = QHBoxLayout()
@@ -2566,5 +2619,11 @@ class ManageWatchlistDialog(QDialog):
         return self._tags
 
     def get_ma_settings(self) -> dict:
-        """확대 일봉 팝업 이동평균선 표시 설정 {'ma5','ma20','ma60': bool}."""
-        return {key: cb.isChecked() for key, cb in self._ma_checks.items()}
+        """확대 일봉 팝업 표시 설정
+        {'ma5','ma20','ma60','show_name','axis_date','axis_price': bool, 'popup_months': int}."""
+        out = {key: cb.isChecked() for key, cb in self._ma_checks.items()}
+        out["show_name"] = self._show_name_check.isChecked()
+        out["popup_months"] = int(self._period_combo.currentData() or 3)
+        for key, cb in self._axis_checks.items():
+            out[key] = cb.isChecked()
+        return out

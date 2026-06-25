@@ -75,8 +75,11 @@ class WidgetManager:
         self.stocks: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
-        # 확대 일봉 팝업 이동평균선 표시 설정 — 모든 관심 행이 공유(제자리 갱신)한다.
-        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
+        # 확대 일봉 팝업 표시 설정(이동평균선 + 배경 종목명 + 표시 기간) — 모든 관심 행이 공유(제자리 갱신).
+        # popup_months 만 정수(1~6개월), 나머지는 on/off 불리언이다.
+        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True,
+                               "show_name": True, "popup_months": 3,
+                               "axis_date": False, "axis_price": False}
         self.widgets: dict[str, StockWidget] = {}
         # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
         self.watch_groups: dict[str, TagGroupWidget] = {}
@@ -565,12 +568,16 @@ class WidgetManager:
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
             prune_watch_tags(self.watchlist, self.watch_tags)
-            # 이동평균선 표시 설정 — 공유 dict 를 제자리 갱신(참조 유지)
+            # 확대 팝업 표시 설정 — 공유 dict 를 제자리 갱신(참조 유지).
+            # popup_months 만 정수(1~6)로, 나머지 키는 불리언으로 받는다.
             ma = data.get("watch_ma")
             if isinstance(ma, dict):
-                for k in self.watch_ma:
+                for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
                     if k in ma:
                         self.watch_ma[k] = bool(ma[k])
+                pm = ma.get("popup_months")
+                if isinstance(pm, (int, float)):
+                    self.watch_ma["popup_months"] = max(1, min(6, int(pm)))
             self.watch_group_state = self._parse_watch_group_state(data.get("watch_group_state"))
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))

@@ -643,10 +643,13 @@ class WatchRow(QWidget):
                 round(self.sparkline.height() * self.POPUP_SCALE),
                 parent=self,
             )
+        s = self._ma_settings or {}
         self._chart_popup.show_with(
             candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size(),
             ma_periods=self._active_ma_periods(),
             display_count=self.POPUP_DISPLAY_CANDLES,
+            show_date_axis=bool(s.get("axis_date", False)),
+            show_price_axis=bool(s.get("axis_price", False)),
         )
 
     def _hide_chart_popup(self):

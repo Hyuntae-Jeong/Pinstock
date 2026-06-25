@@ -2,7 +2,7 @@
 
 from PyQt6.QtWidgets import QWidget, QFrame, QApplication
 from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize
-from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont
+from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont, QFontMetricsF
 
 from .theme import C, MA_COLORS
 
@@ -15,6 +15,8 @@ class SparklineWidget(QWidget):
 
     W = 100   # 차트 너비 (기본값 — 인스턴스에서 재정의 가능)
     H = 40    # 차트 높이
+    PRICE_AXIS_W = 40   # 우측 가격 보조축 라벨 폭 (확대 팝업, 가격축 ON 시)
+    DATE_AXIS_H  = 14   # 하단 날짜 보조축 라벨 높이 (확대 팝업, 날짜축 ON 시)
 
     def __init__(self, parent=None, width: int | None = None, height: int | None = None):
         super().__init__(parent)
@@ -32,6 +34,10 @@ class SparklineWidget(QWidget):
         self.candles: list[dict] = []  # OHLC dict 리스트 (candle 모드)
         self.ma_periods: tuple = ()    # 그릴 이동평균 기간들 (예: (5, 20, 60))
         self.display_count: int | None = None  # 표시할 최근 캔들 수 (None=전부)
+        self.watermark_name: str = ""  # 캔들 뒤 배경에 은은히 깔 종목명 (확대 팝업 전용)
+        # 확대 팝업 보조축 — 우측 가격(최고·평균·최저)·하단 날짜 눈금. 미니 차트는 항상 꺼짐.
+        self.show_date_axis: bool = False
+        self.show_price_axis: bool = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -41,16 +47,20 @@ class SparklineWidget(QWidget):
         self.prev_close = prev_close
         self.update()
 
-    def set_candles(self, candles: list[dict], ma_periods=(), display_count: int | None = None):
+    def set_candles(self, candles: list[dict], ma_periods=(), display_count: int | None = None,
+                    show_date_axis: bool = False, show_price_axis: bool = False):
         """일봉 캔들 표시.
         - candles: 전체 OHLC 이력 (이동평균은 표시 구간 밖 데이터까지 평균에 사용)
         - ma_periods: 그릴 이동평균 기간들 (예: (5, 20, 60)). 빈 값이면 안 그림.
         - display_count: 최근 N개만 캔들로 표시 (None=전부). 이동평균선은 표시 구간만.
+        - show_date_axis/show_price_axis: 확대 팝업 보조축(하단 날짜·우측 가격) 표시 여부.
         """
         self.mode = "candle"
         self.candles = candles
         self.ma_periods = tuple(ma_periods)
         self.display_count = display_count
+        self.show_date_axis = show_date_axis
+        self.show_price_axis = show_price_axis
         self.update()
 
     @staticmethod
@@ -167,12 +177,19 @@ class SparklineWidget(QWidget):
         shown = candles[start:]
 
         painter = QPainter(self)
+        # 종목명 워터마크를 캔들보다 먼저 그려 제일 하단 레이어로 깐다 (확대 팝업 전용)
+        if self.watermark_name:
+            self._draw_watermark_name(painter)
         # 캔들은 픽셀 정렬이 더 선명 — antialias off
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        pad = 3
-        w = self.W - 2 * pad
-        h = self.H - 2 * pad
+        # 보조축이 켜지면 우측(가격)·하단(날짜)에 라벨 자리를 확보하고 플롯을 줄인다.
+        base = 3
+        left = top = base
+        right  = base + (self.PRICE_AXIS_W if self.show_price_axis else 0)
+        bottom = base + (self.DATE_AXIS_H  if self.show_date_axis  else 0)
+        w = self.W - left - right
+        h = self.H - top - bottom
 
         # 이동평균 시계열은 전체 구간 기준으로 계산 (표시 구간 왼쪽 끝에서도 값 존재)
         closes = [c["close"] for c in candles]
@@ -190,7 +207,7 @@ class SparklineWidget(QWidget):
         rng = (mx - mn) if mx > mn else 1.0
 
         def y_of(price: float) -> float:
-            return pad + (1 - (price - mn) / rng) * h
+            return top + (1 - (price - mn) / rng) * h
 
         slot = w / dc
         body_w = max(1.5, slot * 0.7)
@@ -199,7 +216,7 @@ class SparklineWidget(QWidget):
         blue = QColor(C['blue'])
 
         for i, c in enumerate(shown):
-            cx = pad + (i + 0.5) * slot
+            cx = left + (i + 0.5) * slot
             up = c["close"] >= c["open"]
             color = red if up else blue
 
@@ -235,16 +252,109 @@ class SparklineWidget(QWidget):
                     if v is None:
                         started = False
                         continue
-                    pt = QPointF(pad + (i + 0.5) * slot, y_of(v))
+                    pt = QPointF(left + (i + 0.5) * slot, y_of(v))
                     if started:
                         path.lineTo(pt)
                     else:
                         path.moveTo(pt)
                         started = True
                 painter.drawPath(path)
-            self._draw_ma_legend(painter, pad)
+            self._draw_ma_legend(painter, base)
+
+        # ── 보조축 (확대 팝업 전용) — 캔들·이동평균 위에 라벨을 얹는다 ─────────────
+        if self.show_price_axis:
+            self._draw_price_axis(painter, shown, mn, mx, left, top, w, h)
+        if self.show_date_axis:
+            self._draw_date_axis(painter, shown, left, top, w, h, slot)
 
         painter.end()
+
+    # ── 우측 가격 보조축 — 최고가(빨강)·평균(흐림)·최저가(파랑) 눈금 ──────────────
+    @staticmethod
+    def _fmt_axis_price(v: float) -> str:
+        """가격 라벨 — 1,000 이상은 천단위 콤마 정수, 미만(소형 지수 등)은 소수 2자리."""
+        return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:,.2f}"
+
+    def _draw_price_axis(self, painter, shown, mn, mx, left, top, w, h):
+        hi  = max(c["high"] for c in shown)
+        lo  = min(c["low"]  for c in shown)
+        avg = sum(c["close"] for c in shown) / len(shown)
+        rng = (mx - mn) if mx > mn else 1.0
+        plot_right = left + w
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setFont(QFont("Malgun Gothic", 8))
+        fm = painter.fontMetrics()
+        half = fm.height() / 2
+
+        for price, key in ((hi, 'red'), (avg, 'subtext'), (lo, 'blue')):
+            y = top + (1 - (price - mn) / rng) * h
+            color = QColor(C[key])
+            # 눈금 짧은 선
+            painter.setPen(QPen(color, 1.0))
+            painter.drawLine(QPointF(plot_right, y), QPointF(plot_right + 3, y))
+            # 라벨 — 위/아래 끝에서 잘리지 않게 세로 위치를 살짝 가둔다
+            yc = min(max(y, top + half), top + h - half)
+            rect = QRectF(plot_right + 4, yc - half, self.W - (plot_right + 4) - 2, fm.height())
+            painter.setPen(color)
+            painter.drawText(
+                rect,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                self._fmt_axis_price(price),
+            )
+
+    # ── 하단 날짜 보조축 — 표시 구간을 4등분해 대략적 날짜(M/D)를 찍는다 ────────────
+    @staticmethod
+    def _fmt_axis_date(s: str) -> str:
+        """'YYYYMMDD' 또는 'YYYY-MM-DD' → 'M/D'. 파싱 불가하면 빈 문자열."""
+        digits = (s or "").replace("-", "").strip()
+        if len(digits) >= 8 and digits[:8].isdigit():
+            return f"{int(digits[4:6])}/{int(digits[6:8])}"
+        return ""
+
+    def _draw_date_axis(self, painter, shown, left, top, w, h, slot):
+        n = len(shown)
+        if n == 0:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setFont(QFont("Malgun Gothic", 8))
+        fm = painter.fontMetrics()
+        painter.setPen(QColor(C['subtext']))
+        y = top + h + fm.ascent() + 1
+        for i in sorted({0, n // 3, 2 * n // 3, n - 1}):
+            label = self._fmt_axis_date(shown[i].get("date", ""))
+            if not label:
+                continue
+            tw = fm.horizontalAdvance(label)
+            tx = left + (i + 0.5) * slot - tw / 2
+            tx = min(max(tx, left), left + w - tw)   # 좌우 끝 클램프
+            painter.drawText(QPointF(tx, y), label)
+
+    # ── 배경 종목명 워터마크 — 캔들 뒤에 아주 은은하게 반투명으로 ────────────────
+    def _draw_watermark_name(self, painter: QPainter):
+        """확대 차트 중앙에 종목명을 반투명 큰 글씨로 깐다(제일 하단 레이어).
+        위젯 폭을 넘으면 폰트를 줄여 한 줄에 들어오게 한다."""
+        name = (self.watermark_name or "").strip()
+        if not name:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(8, 6, self.W - 16, self.H - 12)
+        px = max(11, int(self.H * 0.16))
+        font = QFont("Malgun Gothic")
+        font.setBold(True)
+        while px > 11:
+            font.setPixelSize(px)
+            if QFontMetricsF(font).horizontalAdvance(name) <= rect.width():
+                break
+            px -= 1
+        font.setPixelSize(px)
+        painter.setFont(font)
+        color = QColor(C['text'])
+        color.setAlpha(42)                 # 아주 은은하게 (다크 배경 위 반투명)
+        painter.setPen(color)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, name)
+        painter.restore()
 
     # ── 이동평균 범례 (좌상단) — 색 숫자 미니멀: 5 · 20 · 60 ──────────────────
     def _draw_ma_legend(self, painter: QPainter, pad: int):
@@ -303,9 +413,12 @@ class ChartPopup(QWidget):
         self.chart.move(self.PAD, self.PAD)
 
     def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
-                  ma_periods=(), display_count: int | None = None):
+                  ma_periods=(), display_count: int | None = None, name: str = "",
+                  show_date_axis: bool = False, show_price_axis: bool = False):
         """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
-        self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count)
+        self.chart.watermark_name = name or ""   # 배경 종목명 (빈 값이면 안 그림)
+        self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count,
+                               show_date_axis=show_date_axis, show_price_axis=show_price_axis)
         self._position(anchor_tl, anchor_size)
         self.show()
         self.raise_()
