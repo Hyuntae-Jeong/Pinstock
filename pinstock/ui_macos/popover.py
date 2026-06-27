@@ -644,10 +644,14 @@ class WatchRow(QWidget):
                 parent=self,
             )
         s = self._ma_settings or {}
+        # '종목명표시'가 켜져 있으면 확대 차트 배경에 깔 종목명을 넘긴다(꺼져 있으면 빈 값).
+        show_name = bool(s.get("show_name", True))
+        name = (self.data.get("name") or self.data.get("code", "")) if show_name else ""
         self._chart_popup.show_with(
             candles, self.sparkline.mapToGlobal(QPoint(0, 0)), self.sparkline.size(),
             ma_periods=self._active_ma_periods(),
             display_count=self.POPUP_DISPLAY_CANDLES,
+            name=name,
             show_date_axis=bool(s.get("axis_date", False)),
             show_price_axis=bool(s.get("axis_price", False)),
         )

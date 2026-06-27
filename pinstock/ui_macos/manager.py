@@ -182,7 +182,9 @@ class MacAppManager(QObject):
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
         # 확대 일봉 팝업 이동평균선 표시 설정 — 관심 행/hover 팝업이 공유(제자리 갱신).
-        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
+        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True,
+                               "show_name": True, "popup_months": 3,
+                               "axis_date": False, "axis_price": False}
         self.fetchers: dict[str, StockFetcher] = {}
         self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
