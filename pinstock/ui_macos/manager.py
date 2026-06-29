@@ -241,6 +241,7 @@ class MacAppManager(QObject):
         self.menubar.toggle_popover_requested.connect(self._on_toggle_popover)
         self.menubar.context_menu_requested.connect(self._on_tray_context_menu)
         self.popover.toggle_assets_requested.connect(self._toggle_assets_hidden)
+        self.popover.context_menu_requested.connect(self._on_tray_context_menu)
         self.popover.buy_requested.connect(self._on_buy_request)
         self.popover.edit_requested.connect(self._on_edit_request)
         self.popover.memo_requested.connect(self.open_stock_memo_dialog)
@@ -538,6 +539,7 @@ class MacAppManager(QObject):
         """분리 창의 시그널을 매니저 슬롯에 연결한다. buy/edit/delete/assets 는 메인과
         동일(code-keyed/전역), 투명도·필터·고정·지오메트리·도킹은 분리 전용 슬롯."""
         win.toggle_assets_requested.connect(self._toggle_assets_hidden)
+        win.context_menu_requested.connect(self._on_tray_context_menu)
         win.buy_requested.connect(self._on_buy_request)
         win.edit_requested.connect(self._on_edit_request)
         win.memo_requested.connect(self.open_stock_memo_dialog)

@@ -439,6 +439,7 @@ class PortfolioSummary(QWidget):
     MASK = "•••••"
 
     clicked = pyqtSignal()   # 카드 클릭 → 자산 숨김 토글
+    context_menu_requested = pyqtSignal(QPoint)   # 카드 우클릭 → 트레이와 동일 메뉴(전역 좌표)
     drag_started = pyqtSignal(QPoint)
     drag_moved = pyqtSignal(QPoint)
     drag_finished = pyqtSignal()
@@ -499,6 +500,10 @@ class PortfolioSummary(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        # 총 자산 카드 우클릭 → 매니저가 트레이와 동일한 메뉴를 커서 위치에 띄운다.
+        self.context_menu_requested.emit(event.globalPos())
 
     def _make_cell(self, grid: QGridLayout, row: int, col: int,
                    key_text: str, bold: bool = False) -> QLabel:
@@ -898,6 +903,7 @@ class Popover(QWidget):
     RESIZE_MARGIN = 10
 
     toggle_assets_requested  = pyqtSignal()      # 상단 요약 카드 클릭 → 자산 숨김 토글
+    context_menu_requested   = pyqtSignal(QPoint)  # 요약 카드 우클릭 → 트레이와 동일 메뉴(전역 좌표)
     buy_requested            = pyqtSignal(str)   # code
     edit_requested           = pyqtSignal(str)   # code
     memo_requested           = pyqtSignal(str)   # code
@@ -1008,6 +1014,7 @@ class Popover(QWidget):
         # ── 상단: 포트폴리오 요약 ────────────────────────────────────────
         self.summary = PortfolioSummary(self.card)
         self.summary.clicked.connect(self.toggle_assets_requested.emit)
+        self.summary.context_menu_requested.connect(self.context_menu_requested.emit)
         self.summary.drag_started.connect(self._start_position_drag)
         self.summary.drag_moved.connect(self._move_position_drag)
         self.summary.drag_finished.connect(self._finish_position_drag)
