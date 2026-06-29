@@ -42,7 +42,7 @@ def _resolve_app_icon() -> QIcon:
     return QIcon()
 
 from ..__version__ import __version__
-from ..core import updater
+from ..core import updater, stock_index
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.api import fetch_usd_krw_rate
 from ..core.portfolio import is_us_stock, portfolio_totals
@@ -136,6 +136,9 @@ class WidgetManager:
         QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_update_completed)
         # 시작 5초 뒤 — 자동 업데이트 체크 (오늘 체크 여부/can_self_update 검사 후 실제 호출)
         QTimer.singleShot(_AUTO_CHECK_STARTUP_DELAY_MS, self._maybe_run_auto_update_check)
+
+        # 종목 검색 중간(substring) 보강용 로컬 인덱스 — 백그라운드 1회 수집
+        stock_index.start_background_refresh()
 
     # ── 전체 위젯 표시/숨김 토글 ─────────────────────────────────────────
     def toggle_visibility(self):

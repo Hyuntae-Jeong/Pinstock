@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, QPoint, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog, QMenu
 
 from ..__version__ import __version__
-from ..core import updater
+from ..core import updater, stock_index
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
@@ -292,6 +292,9 @@ class MacAppManager(QObject):
         # 띄워야 "아이콘 바로 밑" 위치로 정확히 뜬다 (준비 전이면 화면 우상단
         # 추정 위치로 폴백돼 어긋남).
         QTimer.singleShot(300, self._show_popover_initial)
+
+        # 종목 검색 중간(substring) 보강용 로컬 인덱스 — 백그라운드 1회 수집
+        stock_index.start_background_refresh()
 
     # ── 트레이 아이콘 우클릭 컨텍스트 메뉴 ────────────────────────────────
     def _build_tray_menu(self):
