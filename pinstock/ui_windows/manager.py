@@ -61,6 +61,7 @@ from .manage_dialog import (
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
 from ..ui_common.memo_dialog import MemoDialog
+from ..ui_common.stock_memo_list_dialog import StockMemoListDialog
 
 
 # 태그 미지정 관심종목을 묶는 그룹의 키/제목/색
@@ -109,6 +110,8 @@ class WidgetManager:
         self._memo_dialog: MemoDialog | None = None
         # 종목별 메모 — 종목 코드별 모드리스 창. 여러 종목 메모를 동시에 띄울 수 있다.
         self._stock_memo_dialogs: dict[str, MemoDialog] = {}
+        # 종목별 메모 모아보기 — 메모 있는 종목을 카드 리스트로. 창은 1개만 띄운다.
+        self._memo_list_dialog: StockMemoListDialog | None = None
 
         # 투명도 슬라이더가 멈춘 뒤에만 click-through 토글 + 설정 저장 — 50% 경계를
         # 지날 때 setWindowFlag 로 윈도우가 재생성되며 발생하던 멈칫을 없앤다.
@@ -455,6 +458,7 @@ class WidgetManager:
         self.autostart_act = QAction("🚀   시작 시 자동 실행", menu)
         self.autostart_act.setCheckable(True)
         memo_act   = QAction("📝   메모장",      menu)
+        memo_list_act = QAction("🗒️   종목별 메모", menu)
         help_act   = QAction("❓   도움말",      menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
@@ -472,6 +476,7 @@ class WidgetManager:
         gather_act.triggered.connect(self.gather_to_master_screen)
         self.autostart_act.triggered.connect(self.toggle_autostart)
         memo_act.triggered.connect(self.open_memo_dialog)
+        memo_list_act.triggered.connect(self.open_stock_memo_list_dialog)
         help_act.triggered.connect(self.open_help_dialog)
         quit_act.triggered.connect(self.app.quit)
 
@@ -510,6 +515,7 @@ class WidgetManager:
 
         # ── 메모 ──
         menu.addAction(memo_act)
+        menu.addAction(memo_list_act)
         menu.addSeparator()
 
         # ── 도움말 · 종료 ──
@@ -1028,6 +1034,8 @@ class WidgetManager:
         for dlg in self._stock_memo_dialogs.values():
             if dlg is not None and dlg.isVisible():
                 dlg.set_opacity(opacity)
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_opacity(opacity)
 
     def _apply_click_through(self, opacity: float):
         """종목 위젯 + 관심 그룹 위젯 + 마스터 카드에 OS-레벨 click-through 토글.
@@ -1252,6 +1260,39 @@ class WidgetManager:
         self._save_config()
 
     # ── 종목별 메모 ────────────────────────────────────────────────────────
+    def _memo_entries(self) -> list:
+        """메모 텍스트가 있는 보유 종목을 최근 수정순으로. 항목: {code,name,text,updated_at}."""
+        items = []
+        for s in self.stocks:
+            memo = normalize_memo(s.get("memo"))
+            if (memo.get("text") or "").strip():
+                items.append({
+                    "code": s.get("code", ""),
+                    "name": s.get("name", s.get("code", "")),
+                    "text": memo.get("text", ""),
+                    "updated_at": memo.get("updated_at"),
+                })
+        items.sort(key=lambda e: e.get("updated_at") or "", reverse=True)
+        return items
+
+    def open_stock_memo_list_dialog(self):
+        """메모가 있는 보유 종목을 카드 리스트로 모아본다. 카드 클릭 시 해당 종목의
+        메모창을 띄운다. 이미 떠 있으면 내용만 갱신하고 앞으로 가져온다."""
+        entries = self._memo_entries()
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_entries(entries)
+            self._memo_list_dialog.raise_()
+            self._memo_list_dialog.activateWindow()
+            return
+        self._memo_list_dialog = StockMemoListDialog(
+            entries=entries,
+            opacity=self.popover_opacity,
+            on_select=self.open_stock_memo_dialog,
+        )
+        self._memo_list_dialog.show()
+        self._memo_list_dialog.raise_()
+        self._memo_list_dialog.activateWindow()
+
     def open_stock_memo_dialog(self, code: str):
         """종목별 메모 — 전역 메모장과 같은 모드리스 항상-위 창을 종목마다 띄운다.
         이미 떠 있으면 새로 만들지 않고 앞으로 가져온다."""

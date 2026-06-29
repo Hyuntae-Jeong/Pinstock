@@ -38,6 +38,7 @@ from ..ui_windows.manage_dialog import (
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
 from ..ui_common.memo_dialog import MemoDialog
+from ..ui_common.stock_memo_list_dialog import StockMemoListDialog
 
 from .popover import Popover
 from .menubar import MenuBarIcon
@@ -222,6 +223,8 @@ class MacAppManager(QObject):
         self._memo_dialog: MemoDialog | None = None
         # 종목별 메모 — 종목 코드별 모드리스 창. 여러 종목 메모를 동시에 띄울 수 있다.
         self._stock_memo_dialogs: dict[str, MemoDialog] = {}
+        # 종목별 메모 모아보기 — 메모 있는 종목을 카드 리스트로. 창은 1개만 띄운다.
+        self._memo_list_dialog: StockMemoListDialog | None = None
         # 자동 업데이트 체크 상태 — 하루 1회 체크(날짜) + 건너뛴 버전 기억
         self.update_last_check_date: date | None = None
         self.update_skipped_version: str | None = None
@@ -325,6 +328,7 @@ class MacAppManager(QObject):
             )
         menu.addSeparator()
         menu.addAction("메모장", self.open_memo_dialog)
+        menu.addAction("종목별 메모", self.open_stock_memo_list_dialog)
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
         menu.addSeparator()
@@ -521,6 +525,8 @@ class MacAppManager(QObject):
         for dlg in self._stock_memo_dialogs.values():
             if dlg is not None and dlg.isVisible():
                 dlg.set_opacity(opacity)
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_opacity(opacity)
         self._save_config()
 
     def _on_height_changed(self, height: int):
@@ -1256,6 +1262,39 @@ class MacAppManager(QObject):
         self._save_config()
 
     # ── 종목별 메모 ────────────────────────────────────────────────────────
+    def _memo_entries(self) -> list:
+        """메모 텍스트가 있는 보유 종목을 최근 수정순으로. 항목: {code,name,text,updated_at}."""
+        items = []
+        for s in self.stocks:
+            memo = normalize_memo(s.get("memo"))
+            if (memo.get("text") or "").strip():
+                items.append({
+                    "code": s.get("code", ""),
+                    "name": s.get("name", s.get("code", "")),
+                    "text": memo.get("text", ""),
+                    "updated_at": memo.get("updated_at"),
+                })
+        items.sort(key=lambda e: e.get("updated_at") or "", reverse=True)
+        return items
+
+    def open_stock_memo_list_dialog(self):
+        """메모가 있는 보유 종목을 카드 리스트로 모아본다. 카드 클릭 시 해당 종목의
+        메모창을 띄운다. 이미 떠 있으면 내용만 갱신하고 앞으로 가져온다."""
+        entries = self._memo_entries()
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_entries(entries)
+            self._memo_list_dialog.raise_()
+            self._memo_list_dialog.activateWindow()
+            return
+        self._memo_list_dialog = StockMemoListDialog(
+            entries=entries,
+            opacity=self.popover_opacity,
+            on_select=self.open_stock_memo_dialog,
+        )
+        self._memo_list_dialog.show()
+        self._memo_list_dialog.raise_()
+        self._memo_list_dialog.activateWindow()
+
     def open_stock_memo_dialog(self, code: str):
         """종목별 메모 — 전역 메모장과 같은 모드리스 항상-위 창을 종목마다 띄운다.
         이미 떠 있으면 새로 만들지 않고 앞으로 가져온다."""
