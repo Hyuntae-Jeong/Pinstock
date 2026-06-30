@@ -18,6 +18,7 @@
 from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton, QPlainTextEdit,
     QSizeGrip, QApplication,
@@ -251,6 +252,21 @@ class MemoDialog(QDialog):
             self.close()
             return
         super().keyPressEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 표시 직후 창 활성화 + 입력칸 포커스를 다음 이벤트 루프 틱에 수행한다.
+        # 우클릭 컨텍스트 메뉴에서 열면 메뉴가 닫히는 도중 show 돼 즉시 activateWindow
+        # 가 먹지 않으므로(메뉴가 키 포커스를 들고 있음), 메뉴가 완전히 닫힌 뒤로
+        # 미뤄야 마우스로 한 번 더 클릭하지 않아도 바로 타이핑할 수 있다.
+        QTimer.singleShot(0, self._focus_editor)
+
+    def _focus_editor(self):
+        self.raise_()
+        self.activateWindow()
+        self.editor.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        # 커서를 기존 메모 맨 끝으로 — 이어서 바로 입력할 수 있게.
+        self.editor.moveCursor(QTextCursor.MoveOperation.End)
 
     def closeEvent(self, event):
         # 닫을 때 마지막으로 한 번 더 저장 (디바운스 대기 중인 변경 포함)
