@@ -1329,6 +1329,12 @@ class WidgetManager:
             updated_at = datetime.now().isoformat(timespec="seconds")
         stock["memo"] = {"text": text, "updated_at": updated_at, "geometry": geometry}
         self._save_config()
+        self._refresh_memo_list_if_open()
+
+    def _refresh_memo_list_if_open(self):
+        """종목별 메모 모아보기 창이 떠 있으면 최신 목록으로 자동 갱신한다."""
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_entries(self._memo_entries())
 
     # ── 도움말 ────────────────────────────────────────────────────────────
     def open_help_dialog(self):
@@ -1654,3 +1660,4 @@ class WidgetManager:
         # 가장 긴 종목이 삭제된 경우 남은 위젯들도 줄어들도록
         self._apply_uniform_width()
         self._recompute_master()
+        self._refresh_memo_list_if_open()

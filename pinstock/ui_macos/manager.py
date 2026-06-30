@@ -1096,6 +1096,7 @@ class MacAppManager(QObject):
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()
+        self._refresh_memo_list_if_open()
 
     # ── Excel 내보내기 ────────────────────────────────────────────────────
     def open_export_dialog(self):
@@ -1331,6 +1332,12 @@ class MacAppManager(QObject):
             updated_at = datetime.now().isoformat(timespec="seconds")
         stock["memo"] = {"text": text, "updated_at": updated_at, "geometry": geometry}
         self._save_config()
+        self._refresh_memo_list_if_open()
+
+    def _refresh_memo_list_if_open(self):
+        """종목별 메모 모아보기 창이 떠 있으면 최신 목록으로 자동 갱신한다."""
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_entries(self._memo_entries())
 
     # ── 도움말 ────────────────────────────────────────────────────────────
     def open_help_dialog(self):
