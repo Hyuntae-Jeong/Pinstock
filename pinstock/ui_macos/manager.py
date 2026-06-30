@@ -313,8 +313,8 @@ class MacAppManager(QObject):
         menu.addAction("관심종목 추가", self.open_add_watch_dialog)
         menu.addAction("관심종목 관리", self.open_manage_watch_dialog)
         menu.addSeparator()
-        menu.addAction("Excel 내보내기", self.open_export_dialog)
-        menu.addAction("Excel 가져오기", self.open_import_dialog)
+        menu.addAction("메모장", self.open_memo_dialog)
+        menu.addAction("종목별 메모", self.open_stock_memo_list_dialog)
         menu.addSeparator()
         self.tray_assets_action = menu.addAction(
             _LABEL_ASSETS_HIDDEN, self._toggle_assets_hidden
@@ -328,8 +328,8 @@ class MacAppManager(QObject):
                 self.toggle_autostart,
             )
         menu.addSeparator()
-        menu.addAction("메모장", self.open_memo_dialog)
-        menu.addAction("종목별 메모", self.open_stock_memo_list_dialog)
+        menu.addAction("Excel 내보내기", self.open_export_dialog)
+        menu.addAction("Excel 가져오기", self.open_import_dialog)
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
         menu.addSeparator()
