@@ -603,6 +603,8 @@ class WatchRow(QWidget):
     (StockRow)과 달리 확장 패널·연장거래 표시가 없다.
     """
 
+    manage_requested = pyqtSignal()   # 우클릭 → 관심종목 관리
+
     COMPACT_H = 52
     POPUP_SCALE = 6.0            # hover 확대 팝업 배율 (sparkline 크기 기준)
     POPUP_BASE_MONTHS = 3        # 기준 기간(이 기간에서 팝업 가로폭 = sparkline*POPUP_SCALE)
@@ -632,6 +634,15 @@ class WatchRow(QWidget):
             elif event.type() == QEvent.Type.Leave:
                 self._hide_chart_popup()
         return super().eventFilter(obj, event)
+
+    def contextMenuEvent(self, event):
+        # 관심종목 행 우클릭 → 관심종목 관리. 관리 다이얼로그가 목록을 재구성하며 이
+        # 행을 파괴할 수 있어, contextMenu 처리 중이 아니라 이벤트 루프로 넘겨 연다.
+        menu = QMenu(self)
+        menu.setStyleSheet(TRAY_MENU_STYLE)
+        manage_act = menu.addAction("⭐   관심종목 관리")
+        if menu.exec(event.globalPos()) == manage_act:
+            QTimer.singleShot(0, self.manage_requested.emit)
 
     def _active_ma_periods(self) -> tuple:
         """관리창 체크 상태에 따라 표시할 이동평균 기간들 (예: (5, 20, 60))."""
@@ -920,6 +931,7 @@ class Popover(QWidget):
     edit_requested           = pyqtSignal(str)   # code
     memo_requested           = pyqtSignal(str)   # code
     delete_requested         = pyqtSignal(str)   # code
+    manage_watch_requested   = pyqtSignal()      # 관심종목 행 우클릭 → 관심종목 관리
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
     opacity_changed          = pyqtSignal(float)   # 0.1 ~ 1.0
     height_changed           = pyqtSignal(int)     # px
@@ -1476,6 +1488,7 @@ class Popover(QWidget):
                 continue
             for w in g["members"]:
                 row = WatchRow(w, ma_settings=self._watch_ma)
+                row.manage_requested.connect(self.manage_watch_requested.emit)
                 self.watch_rows[w["code"]] = row
                 self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
                 self._apply_cached(w["code"], row)
