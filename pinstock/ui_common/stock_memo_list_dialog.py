@@ -162,12 +162,15 @@ class StockMemoListDialog(QDialog):
         outer.addWidget(self.card)
 
         root = QVBoxLayout(self.card)
-        root.setContentsMargins(12, 8, 12, 12)
+        # 오른쪽 여백은 작게(4) — 스크롤바를 창 오른쪽 가장자리에 붙인다. 제목/X 줄과
+        # 카드 목록은 각자 오른쪽 여백을 따로 줘서 원래 위치를 유지한다.
+        root.setContentsMargins(12, 8, 4, 12)
         root.setSpacing(8)
 
-        # 상단: 제목 + X 닫기. 이 줄을 드래그해 창을 옮긴다.
+        # 상단: 제목 + X 닫기. 이 줄을 드래그해 창을 옮긴다. (root 오른쪽 여백을 줄였으므로
+        # X 가 가장자리에 너무 붙지 않도록 이 줄만 오른쪽 여백 8 을 보충한다.)
         top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setContentsMargins(0, 0, 8, 0)
         title_lbl = QLabel("종목별 메모")
         title_lbl.setStyleSheet(
             f"color: {C['subtext']}; font-size: 12px; font-weight: bold; padding-left: 2px;"
@@ -191,13 +194,37 @@ class StockMemoListDialog(QDialog):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet("QScrollArea { background: transparent; } QScrollArea > QWidget > QWidget { background: transparent; }")
+        # 플로팅 필 스크롤바 — 화살표 버튼 제거, 가장자리에서 살짝 띄운 둥근 캡슐 핸들.
+        # 12px 트랙 안에서 좌우 마진으로 핸들을 6px 폭으로 좁히고 오른쪽에 여백을 둔다.
+        self.scroll.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: transparent; }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 12px;
+                margin: 6px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {C['surface2']};
+                min-height: 30px;
+                border-radius: 3px;
+                margin: 0 2px 0 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {C['subtext']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0; background: none; border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+        """)
         self.scroll.viewport().setStyleSheet("background: transparent;")
 
         self.list_host = QWidget()
         self.list_host.setStyleSheet("background: transparent;")
         self.list_layout = QVBoxLayout(self.list_host)
-        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        # 오른쪽 4 — 카드와 스크롤바 사이 간격(스크롤바는 가장자리, 카드는 그보다 안쪽).
+        self.list_layout.setContentsMargins(0, 0, 4, 0)
         self.list_layout.setSpacing(8)
         self.scroll.setWidget(self.list_host)
         root.addWidget(self.scroll, 1)
