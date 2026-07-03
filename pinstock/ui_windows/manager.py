@@ -49,6 +49,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
+    normalize_stock_schema,
     normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
 )
 from .theme import C, TRAY_MENU_STYLE
@@ -610,7 +611,14 @@ class WidgetManager:
                 self.update_skipped_version = skipped
 
     def _save_config(self):
-        self.stocks = normalize_stocks_schema(self.stocks)
+        # normalize_stock_schema 는 새 dict 를 반환하므로 self.stocks 를 통째로
+        # 재대입하면 위젯의 data 객체와 identity 가 끊긴다 → 이후 우클릭 수정이
+        # 옛 객체(widget.data)에만 반영되고, 여기서 저장되는 self.stocks(새 객체)에는
+        # 반영되지 않아 재시작 시 유실된다. 각 dict 를 제자리 갱신해 동일 객체를 유지.
+        for s in self.stocks:
+            norm = normalize_stock_schema(s)
+            s.clear()
+            s.update(norm)
         self.watchlist = normalize_watchlist_schema(self.watchlist)
         self.watch_tags = normalize_tags(self.watch_tags)
         self.memo = normalize_memo(self.memo)
@@ -1412,7 +1420,10 @@ class WidgetManager:
             code = s["code"]
             if code in old_map and code in self.widgets:
                 w = self.widgets[code]
-                w.data.update(s)
+                # self.stocks 항목(s)과 위젯 data 객체를 같은 객체로 재연결.
+                # (in-place update 로는 self.stocks = new_stocks 이후 위젯 data 가
+                #  옛 객체로 분리되어, 이후 개별 수정이 마스터/저장에 반영되지 않음)
+                w.data = s
                 if w.current_price:
                     w._update_detail(w.current_price)
                 # hidden 상태와 현재 시장 필터를 함께 반영
