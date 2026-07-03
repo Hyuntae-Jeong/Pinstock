@@ -20,6 +20,7 @@ from ..core.api import (
     search_us_stocks, search_korean_stocks,
 )
 from ..core.indices import index_by_code, search_indices, index_exact_match
+from ..core import stock_index
 from ..core.portfolio import buy_preview, is_us_stock, stock_metrics
 from ..core.storage import (
     MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD,
@@ -940,6 +941,14 @@ class StockDialog(QDialog):
             matches = search_us_stocks(query, limit=10)
         else:
             matches = search_korean_stocks(query, limit=10)
+            # 네이버 자동완성은 접두/토큰 기반이라 이름 중간(substring) 검색이
+            # 약하다(예: 'S&P500'). 로컬 전체 종목·ETF 인덱스의 부분일치 결과를
+            # 뒤에 덧붙여 보강한다(코드 중복 제거, 자동완성 순위는 그대로 유지).
+            seen_codes = {str(m.get("code") or "").upper() for m in matches}
+            for m in stock_index.search(query, limit=15):
+                if m["code"] not in seen_codes:
+                    matches.append(m)
+                    seen_codes.add(m["code"])
         # 관심종목 모드: 현재 시장의 지수도 후보 맨 앞에 더한다 (보유엔 지수 없음)
         if self.watch_mode:
             matches = search_indices(query, market=market) + matches

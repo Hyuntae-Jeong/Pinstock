@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, QPoint, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog, QMenu
 
 from ..__version__ import __version__
-from ..core import updater
+from ..core import updater, stock_index
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
@@ -38,6 +38,7 @@ from ..ui_windows.manage_dialog import (
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
 from ..ui_common.memo_dialog import MemoDialog
+from ..ui_common.stock_memo_list_dialog import StockMemoListDialog
 
 from .popover import Popover
 from .menubar import MenuBarIcon
@@ -182,7 +183,9 @@ class MacAppManager(QObject):
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
         # 확대 일봉 팝업 이동평균선 표시 설정 — 관심 행/hover 팝업이 공유(제자리 갱신).
-        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
+        self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True,
+                               "show_name": True, "popup_months": 3,
+                               "axis_date": False, "axis_price": False}
         self.fetchers: dict[str, StockFetcher] = {}
         self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
@@ -220,6 +223,8 @@ class MacAppManager(QObject):
         self._memo_dialog: MemoDialog | None = None
         # 종목별 메모 — 종목 코드별 모드리스 창. 여러 종목 메모를 동시에 띄울 수 있다.
         self._stock_memo_dialogs: dict[str, MemoDialog] = {}
+        # 종목별 메모 모아보기 — 메모 있는 종목을 카드 리스트로. 창은 1개만 띄운다.
+        self._memo_list_dialog: StockMemoListDialog | None = None
         # 자동 업데이트 체크 상태 — 하루 1회 체크(날짜) + 건너뛴 버전 기억
         self.update_last_check_date: date | None = None
         self.update_skipped_version: str | None = None
@@ -239,10 +244,12 @@ class MacAppManager(QObject):
         self.menubar.toggle_popover_requested.connect(self._on_toggle_popover)
         self.menubar.context_menu_requested.connect(self._on_tray_context_menu)
         self.popover.toggle_assets_requested.connect(self._toggle_assets_hidden)
+        self.popover.context_menu_requested.connect(self._on_tray_context_menu)
         self.popover.buy_requested.connect(self._on_buy_request)
         self.popover.edit_requested.connect(self._on_edit_request)
         self.popover.memo_requested.connect(self.open_stock_memo_dialog)
         self.popover.delete_requested.connect(self._on_delete_request)
+        self.popover.manage_watch_requested.connect(self.open_manage_watch_dialog)
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
         self.popover.opacity_changed.connect(self._on_opacity_changed)
         self.popover.height_changed.connect(self._on_height_changed)
@@ -290,6 +297,9 @@ class MacAppManager(QObject):
         # 추정 위치로 폴백돼 어긋남).
         QTimer.singleShot(300, self._show_popover_initial)
 
+        # 종목 검색 중간(substring) 보강용 로컬 인덱스 — 백그라운드 1회 수집
+        stock_index.start_background_refresh()
+
     # ── 트레이 아이콘 우클릭 컨텍스트 메뉴 ────────────────────────────────
     def _build_tray_menu(self):
         """메뉴바 아이콘 우클릭 컨텍스트 메뉴 — 종목 추가/관리, Excel,
@@ -303,8 +313,8 @@ class MacAppManager(QObject):
         menu.addAction("관심종목 추가", self.open_add_watch_dialog)
         menu.addAction("관심종목 관리", self.open_manage_watch_dialog)
         menu.addSeparator()
-        menu.addAction("Excel 내보내기", self.open_export_dialog)
-        menu.addAction("Excel 가져오기", self.open_import_dialog)
+        menu.addAction("메모장", self.open_memo_dialog)
+        menu.addAction("종목별 메모", self.open_stock_memo_list_dialog)
         menu.addSeparator()
         self.tray_assets_action = menu.addAction(
             _LABEL_ASSETS_HIDDEN, self._toggle_assets_hidden
@@ -318,7 +328,8 @@ class MacAppManager(QObject):
                 self.toggle_autostart,
             )
         menu.addSeparator()
-        menu.addAction("메모장", self.open_memo_dialog)
+        menu.addAction("Excel 내보내기", self.open_export_dialog)
+        menu.addAction("Excel 가져오기", self.open_import_dialog)
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
         menu.addSeparator()
@@ -515,6 +526,8 @@ class MacAppManager(QObject):
         for dlg in self._stock_memo_dialogs.values():
             if dlg is not None and dlg.isVisible():
                 dlg.set_opacity(opacity)
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_opacity(opacity)
         self._save_config()
 
     def _on_height_changed(self, height: int):
@@ -536,10 +549,12 @@ class MacAppManager(QObject):
         """분리 창의 시그널을 매니저 슬롯에 연결한다. buy/edit/delete/assets 는 메인과
         동일(code-keyed/전역), 투명도·필터·고정·지오메트리·도킹은 분리 전용 슬롯."""
         win.toggle_assets_requested.connect(self._toggle_assets_hidden)
+        win.context_menu_requested.connect(self._on_tray_context_menu)
         win.buy_requested.connect(self._on_buy_request)
         win.edit_requested.connect(self._on_edit_request)
         win.memo_requested.connect(self.open_stock_memo_dialog)
         win.delete_requested.connect(self._on_delete_request)
+        win.manage_watch_requested.connect(self.open_manage_watch_dialog)
         win.market_filter_changed.connect(self._on_detached_market_filter_changed)
         win.opacity_changed.connect(self._on_detached_opacity_changed)
         win.height_changed.connect(self._on_detached_height_changed)
@@ -768,12 +783,16 @@ class MacAppManager(QObject):
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
             prune_watch_tags(self.watchlist, self.watch_tags)
-            # 이동평균선 표시 설정 — 공유 dict 를 제자리 갱신(참조 유지)
+            # 이동평균선 등 표시 설정 — 공유 dict 를 제자리 갱신(참조 유지).
+            # popup_months 만 정수(1~6)로, 나머지 키는 불리언으로 받는다.
             ma = data.get("watch_ma")
             if isinstance(ma, dict):
-                for k in self.watch_ma:
+                for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
                     if k in ma:
                         self.watch_ma[k] = bool(ma[k])
+                pm = ma.get("popup_months")
+                if isinstance(pm, (int, float)):
+                    self.watch_ma["popup_months"] = max(1, min(6, int(pm)))
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -1083,6 +1102,7 @@ class MacAppManager(QObject):
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()
+        self._refresh_memo_list_if_open()
 
     # ── Excel 내보내기 ────────────────────────────────────────────────────
     def open_export_dialog(self):
@@ -1249,6 +1269,39 @@ class MacAppManager(QObject):
         self._save_config()
 
     # ── 종목별 메모 ────────────────────────────────────────────────────────
+    def _memo_entries(self) -> list:
+        """메모 텍스트가 있는 보유 종목을 최근 수정순으로. 항목: {code,name,text,updated_at}."""
+        items = []
+        for s in self.stocks:
+            memo = normalize_memo(s.get("memo"))
+            if (memo.get("text") or "").strip():
+                items.append({
+                    "code": s.get("code", ""),
+                    "name": s.get("name", s.get("code", "")),
+                    "text": memo.get("text", ""),
+                    "updated_at": memo.get("updated_at"),
+                })
+        items.sort(key=lambda e: e.get("updated_at") or "", reverse=True)
+        return items
+
+    def open_stock_memo_list_dialog(self):
+        """메모가 있는 보유 종목을 카드 리스트로 모아본다. 카드 클릭 시 해당 종목의
+        메모창을 띄운다. 이미 떠 있으면 내용만 갱신하고 앞으로 가져온다."""
+        entries = self._memo_entries()
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_entries(entries)
+            self._memo_list_dialog.raise_()
+            self._memo_list_dialog.activateWindow()
+            return
+        self._memo_list_dialog = StockMemoListDialog(
+            entries=entries,
+            opacity=self.popover_opacity,
+            on_select=self.open_stock_memo_dialog,
+        )
+        self._memo_list_dialog.show()
+        self._memo_list_dialog.raise_()
+        self._memo_list_dialog.activateWindow()
+
     def open_stock_memo_dialog(self, code: str):
         """종목별 메모 — 전역 메모장과 같은 모드리스 항상-위 창을 종목마다 띄운다.
         이미 떠 있으면 새로 만들지 않고 앞으로 가져온다."""
@@ -1285,6 +1338,12 @@ class MacAppManager(QObject):
             updated_at = datetime.now().isoformat(timespec="seconds")
         stock["memo"] = {"text": text, "updated_at": updated_at, "geometry": geometry}
         self._save_config()
+        self._refresh_memo_list_if_open()
+
+    def _refresh_memo_list_if_open(self):
+        """종목별 메모 모아보기 창이 떠 있으면 최신 목록으로 자동 갱신한다."""
+        if self._memo_list_dialog is not None and self._memo_list_dialog.isVisible():
+            self._memo_list_dialog.set_entries(self._memo_entries())
 
     # ── 도움말 ────────────────────────────────────────────────────────────
     def open_help_dialog(self):
