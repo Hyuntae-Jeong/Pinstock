@@ -1,10 +1,54 @@
 """미니 가격 차트 (sparkline) — 분봉 라인 + 일봉 캔들 두 모드."""
 
+from datetime import datetime
+
 from PyQt6.QtWidgets import QWidget, QFrame, QApplication
 from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont, QFontMetricsF
 
 from .theme import C, MA_COLORS
+
+
+# ─── 일봉 → 주봉/월봉 집계 ────────────────────────────────────────────────────
+def _period_key(date_str: str, unit: str):
+    """캔들 날짜를 주/월 묶음 키로 변환. 주: ISO (연, 주차) / 월: 'YYYYMM'.
+    'YYYYMMDD'·'YYYY-MM-DD' 모두 허용. 파싱 실패 시 8자리 원본으로 폴백."""
+    digits = (date_str or "").replace("-", "")[:8]
+    if unit == "month":
+        return digits[:6] or date_str
+    try:
+        dt = datetime.strptime(digits, "%Y%m%d")
+        y, w, _ = dt.isocalendar()
+        return (y, w)
+    except ValueError:
+        return digits
+
+
+def aggregate_candles(daily: list[dict], unit: str) -> list[dict]:
+    """일봉 리스트(과거→최근)를 주봉/월봉으로 집계한다. unit='day'면 그대로 반환.
+    시가=구간 첫날, 종가=끝날, 고=최대, 저=최소, 거래량=합산. 새 네트워크 호출 없음."""
+    if unit == "day" or not daily:
+        return daily
+    groups: dict = {}
+    order: list = []
+    for c in daily:
+        k = _period_key(c.get("date", ""), unit)
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(c)
+    out: list[dict] = []
+    for k in order:
+        g = groups[k]
+        out.append({
+            "date":   g[-1].get("date", ""),
+            "open":   g[0]["open"],
+            "high":   max(c["high"] for c in g),
+            "low":    min(c["low"]  for c in g),
+            "close":  g[-1]["close"],
+            "volume": sum((c.get("volume") or 0) for c in g),
+        })
+    return out
 
 
 # ─── 가격 미니 차트 (sparkline) ───────────────────────────────────────────────
@@ -41,6 +85,7 @@ class SparklineWidget(QWidget):
         self.show_date_axis: bool = False
         self.show_price_axis: bool = False
         self.show_volume: bool = False    # 하단 거래량 패널 표시 (확대 팝업 전용)
+        self.candle_unit: str = "day"     # 봉주기(day/week/month) — 이동평균 범례 라벨용
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -52,13 +97,14 @@ class SparklineWidget(QWidget):
 
     def set_candles(self, candles: list[dict], ma_periods=(), display_count: int | None = None,
                     show_date_axis: bool = False, show_price_axis: bool = False,
-                    show_volume: bool = False):
+                    show_volume: bool = False, candle_unit: str = "day"):
         """일봉 캔들 표시.
         - candles: 전체 OHLC 이력 (이동평균은 표시 구간 밖 데이터까지 평균에 사용)
         - ma_periods: 그릴 이동평균 기간들 (예: (5, 20, 60)). 빈 값이면 안 그림.
         - display_count: 최근 N개만 캔들로 표시 (None=전부). 이동평균선은 표시 구간만.
         - show_date_axis/show_price_axis: 확대 팝업 보조축(하단 날짜·우측 가격) 표시 여부.
         - show_volume: 하단 거래량 패널 표시 여부(색은 캔들과 동일 — 종가≥시가 빨강, 아니면 파랑).
+        - candle_unit: 봉주기(day/week/month) — 이동평균 범례 앞에 D/W/M 라벨로 표시.
         """
         self.mode = "candle"
         self.candles = candles
@@ -67,6 +113,7 @@ class SparklineWidget(QWidget):
         self.show_date_axis = show_date_axis
         self.show_price_axis = show_price_axis
         self.show_volume = show_volume
+        self.candle_unit = candle_unit
         self.update()
 
     @staticmethod
@@ -398,6 +445,12 @@ class SparklineWidget(QWidget):
         fm = painter.fontMetrics()
         x = pad + 4
         y = pad + 2 + fm.ascent()
+        # 봉주기 라벨(D/W/M)을 범례 앞에 한 번 — 5·20·60 이 어느 단위(일/주/월봉)인지 알려준다.
+        unit_label = {"day": "D", "week": "W", "month": "M"}.get(self.candle_unit, "")
+        if unit_label:
+            painter.setPen(QColor(C['subtext']))
+            painter.drawText(int(x), int(y), unit_label)
+            x += fm.horizontalAdvance(unit_label + "  ")
         sep = QColor("#6c7086")            # 기간 사이 점(·) — 흐린 회보라
         for i, p in enumerate(self.ma_periods):
             if i > 0:
@@ -451,12 +504,12 @@ class ChartPopup(QWidget):
     def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
                   ma_periods=(), display_count: int | None = None, name: str = "",
                   show_date_axis: bool = False, show_price_axis: bool = False,
-                  show_volume: bool = False):
+                  show_volume: bool = False, candle_unit: str = "day"):
         """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
         self.chart.watermark_name = name or ""   # 배경 종목명 (빈 값이면 안 그림)
         self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count,
                                show_date_axis=show_date_axis, show_price_axis=show_price_axis,
-                               show_volume=show_volume)
+                               show_volume=show_volume, candle_unit=candle_unit)
         self._position(anchor_tl, anchor_size)
         self.show()
         self.raise_()

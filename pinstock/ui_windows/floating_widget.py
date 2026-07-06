@@ -11,11 +11,11 @@ from datetime import datetime
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
-    fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES,
+    fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES, WATCH_POPUP_CANDLES_LONG,
 )
 from ..core.portfolio import is_us_stock, is_index, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
-from .chart_widget import SparklineWidget, ChartPopup
+from .chart_widget import SparklineWidget, ChartPopup, aggregate_candles
 from .manage_dialog import StockDialog
 
 
@@ -660,6 +660,8 @@ class CompactWatchRow(QWidget):
     POPUP_BASE_MONTHS = 3        # 기준 기간(이 기간에서 팝업 가로폭 = SPARK_W*POPUP_SCALE)
     TRADING_DAYS_PER_MONTH = 21  # 1개월 ≈ 21 거래일 (표시 캔들 수 환산)
     MINI_CANDLES = 30            # 행에 박힌 미니 차트에 표시할 일봉 수
+    POPUP_WEEK_BARS  = 40        # 확대 팝업 주봉 표시 개수(고정)
+    POPUP_MONTH_BARS = 24        # 확대 팝업 월봉 표시 개수(고정)
 
     def __init__(self, item: dict, stagger_idx: int = 0, parent=None, ma_settings: dict | None = None):
         super().__init__(parent)
@@ -706,15 +708,25 @@ class CompactWatchRow(QWidget):
         s = self._ma_settings or {}
         return max(1, min(6, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
 
+    def _candle_unit(self) -> str:
+        """봉주기 설정(day/week/month). 잘못된 값이면 day."""
+        u = (self._ma_settings or {}).get("candle_unit", "day")
+        return u if u in ("day", "week", "month") else "day"
+
     def _show_chart_popup(self):
         # 미니 차트가 보유한 전체 일봉 이력을 재사용 — 새 네트워크 호출은 하지 않는다
         candles = getattr(self.sparkline, "candles", None)
         if not candles or self.sparkline.mode != "candle":
             return
-        # 기간이 늘수록 캔들 크기(밀도)·세로 높이는 그대로 두고 가로 폭만 비례해 넓힌다.
-        months = self._popup_months()
-        display_count = months * self.TRADING_DAYS_PER_MONTH
-        chart_w = round(self.SPARK_W * self.POPUP_SCALE * months / self.POPUP_BASE_MONTHS)
+        # 일봉은 기간(개월)이 늘수록 가로 폭만 비례 확장. 주/월봉은 고정 개수 + 3개월 기준 고정 폭.
+        unit = self._candle_unit()
+        if unit == "day":
+            months = self._popup_months()
+            display_count = months * self.TRADING_DAYS_PER_MONTH
+            chart_w = round(self.SPARK_W * self.POPUP_SCALE * months / self.POPUP_BASE_MONTHS)
+        else:
+            display_count = self.POPUP_WEEK_BARS if unit == "week" else self.POPUP_MONTH_BARS
+            chart_w = round(self.SPARK_W * self.POPUP_SCALE)
         chart_h = round(self.SPARK_H * self.POPUP_SCALE)
         # 기간 변경 시 폭이 달라지므로(ChartPopup 은 고정 크기) 필요하면 새로 만든다.
         if self._chart_popup is None or self._chart_popup.chart.W != chart_w:
@@ -734,6 +746,7 @@ class CompactWatchRow(QWidget):
             show_date_axis=bool(s.get("axis_date", False)),
             show_price_axis=bool(s.get("axis_price", False)),
             show_volume=bool(s.get("show_volume", False)),
+            candle_unit=unit,
         )
 
     def _hide_chart_popup(self):
@@ -774,11 +787,14 @@ class CompactWatchRow(QWidget):
         result = fetch_watch_quote(self.data)
         if result:
             self._apply_price(result)
-        # 확대 팝업의 3개월·이동평균선까지 그릴 수 있게 긴 이력을 받되,
-        # 미니 차트에는 최근 일부(MINI_CANDLES)만 표시한다.
-        daily = fetch_watch_daily(self.data, max_candles=WATCH_POPUP_CANDLES)
+        # 확대 팝업의 이동평균선까지 그릴 수 있게 긴 이력을 받되, 미니 차트에는 최근
+        # 일부(MINI_CANDLES)만 표시한다. 주/월봉이면 더 긴 이력을 받아 집계한다.
+        unit = self._candle_unit()
+        max_c = WATCH_POPUP_CANDLES_LONG if unit != "day" else WATCH_POPUP_CANDLES
+        daily = fetch_watch_daily(self.data, max_candles=max_c)
         if daily and daily.get("candles"):
-            self.sparkline.set_candles(daily["candles"], display_count=self.MINI_CANDLES)
+            candles = aggregate_candles(daily["candles"], unit)
+            self.sparkline.set_candles(candles, display_count=self.MINI_CANDLES)
 
     def _apply_price(self, result: dict):
         self.data["name"] = result["name"]

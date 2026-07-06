@@ -795,6 +795,9 @@ def fetch_index(code: str, market: str | None = None) -> dict | None:
 # 관심종목 hover 확대 팝업용 일봉 개수 — 최대 6개월(약 126거래일) 표시 + 60일선 lookback 여유
 WATCH_POPUP_CANDLES = 190
 
+# 주봉·월봉 표시용 — 더 긴 일봉 이력(약 2년). 봉주기가 주/월일 때만 이 길이로 조회한다.
+WATCH_POPUP_CANDLES_LONG = 500
+
 
 def _days_for_candles(max_candles: int) -> int:
     """필요 거래일 수 → 조회 달력일 수(주말·공휴일 고려 약 1.5배), 최소 45일."""

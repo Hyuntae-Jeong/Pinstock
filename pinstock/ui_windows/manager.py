@@ -83,7 +83,7 @@ class WidgetManager:
         self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True,
                                "show_name": True, "popup_months": 3,
                                "axis_date": False, "axis_price": False,
-                               "show_volume": False}
+                               "show_volume": False, "candle_unit": "day"}
         self.widgets: dict[str, StockWidget] = {}
         # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
         self.watch_groups: dict[str, TagGroupWidget] = {}
@@ -594,6 +594,9 @@ class WidgetManager:
                 pm = ma.get("popup_months")
                 if isinstance(pm, (int, float)):
                     self.watch_ma["popup_months"] = max(1, min(6, int(pm)))
+                cu = ma.get("candle_unit")
+                if cu in ("day", "week", "month"):
+                    self.watch_ma["candle_unit"] = cu
             self.watch_group_state = self._parse_watch_group_state(data.get("watch_group_state"))
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
@@ -1257,12 +1260,19 @@ class WidgetManager:
         )
         if not dlg.exec():
             return
+        old_unit = self.watch_ma.get("candle_unit", "day")
         self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
         self.watch_tags = normalize_tags(dlg.get_tags())
         # 공유 dict 를 제자리 갱신 → 이미 떠 있는 관심 그룹 팝업도 다음 hover 부터 즉시 반영
         self.watch_ma.update(dlg.get_ma_settings())
         prune_watch_tags(self.watchlist, self.watch_tags)
         self._save_config()
+        # 봉주기가 바뀌면 캔들 데이터 자체가 달라지므로 관심 그룹을 모두 재생성(재조회)한다.
+        if self.watch_ma.get("candle_unit", "day") != old_unit:
+            for _key in list(self.watch_groups):
+                _w = self.watch_groups.pop(_key)
+                _w.close()
+                _w.deleteLater()
         self._sync_watch_groups()
 
         # 숨김 상태에서 변경한 경우 자동으로 표시 상태로 전환
