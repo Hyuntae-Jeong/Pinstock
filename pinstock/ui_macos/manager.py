@@ -185,7 +185,8 @@ class MacAppManager(QObject):
         # 확대 일봉 팝업 이동평균선 표시 설정 — 관심 행/hover 팝업이 공유(제자리 갱신).
         self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True,
                                "show_name": True, "popup_months": 3,
-                               "axis_date": False, "axis_price": False}
+                               "axis_date": False, "axis_price": False,
+                               "show_volume": False}
         self.fetchers: dict[str, StockFetcher] = {}
         self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
@@ -791,7 +792,7 @@ class MacAppManager(QObject):
             # popup_months 만 정수(1~6)로, 나머지 키는 불리언으로 받는다.
             ma = data.get("watch_ma")
             if isinstance(ma, dict):
-                for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
+                for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price", "show_volume"):
                     if k in ma:
                         self.watch_ma[k] = bool(ma[k])
                 pm = ma.get("popup_months")

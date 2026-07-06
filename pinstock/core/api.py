@@ -278,7 +278,7 @@ def fetch_minute_chart(code: str) -> dict | None:
 def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict | None:
     """최근 N 캘린더일 일봉 OHLC 시계열 조회.
     분봉이 비어있는 장 외 시간/주말/공휴일에 캔들 차트로 표시할 용도.
-    반환: {'candles': [{'open','high','low','close'}, ...]} or None"""
+    반환: {'candles': [{'open','high','low','close','volume'}, ...]} or None"""
     end = datetime.now()
     start = end - timedelta(days=days)
     url = (
@@ -300,6 +300,7 @@ def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict 
                 "high":  float(d["highPrice"]),
                 "low":   float(d["lowPrice"]),
                 "close": float(d["closePrice"]),
+                "volume": _to_float(d.get("accumulatedTradingVolume")),
             }
             for d in data
         ]
@@ -522,7 +523,7 @@ def fetch_us_minute_chart(symbol: str) -> dict | None:
 
 def fetch_us_daily_chart(symbol: str, range_: str = "3mo", max_candles: int = 30) -> dict | None:
     """Yahoo Finance 일봉 OHLC 시계열 조회.
-    반환: {'candles': [{'open','high','low','close'}, ...]} or None"""
+    반환: {'candles': [{'open','high','low','close','volume'}, ...]} or None"""
     symbol = _normalize_us_symbol(symbol)
     if not symbol:
         return None
@@ -534,6 +535,7 @@ def fetch_us_daily_chart(symbol: str, range_: str = "3mo", max_candles: int = 30
         quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
         timestamps = result.get("timestamp") or []
         candles = []
+        volumes = quote_data.get("volume") or []
         for i, (open_, high, low, close) in enumerate(zip(
             quote_data.get("open") or [],
             quote_data.get("high") or [],
@@ -548,6 +550,7 @@ def fetch_us_daily_chart(symbol: str, range_: str = "3mo", max_candles: int = 30
                 "high":  _to_float(high),
                 "low":   _to_float(low),
                 "close": _to_float(close),
+                "volume": _to_float(volumes[i]) if i < len(volumes) else 0.0,
             }
             if candle["open"] > 0 and candle["high"] > 0 and candle["low"] > 0 and candle["close"] > 0:
                 candles.append(candle)
@@ -684,6 +687,7 @@ def _fetch_us_daily_chart_naver(symbol: str, days: int = 90, max_candles: int = 
                         "high":  _to_float(d.get("highPrice")),
                         "low":   _to_float(d.get("lowPrice")),
                         "close": _to_float(d.get("closePrice") or d.get("currentPrice")),
+                        "volume": _to_float(d.get("accumulatedTradingVolume")),
                     }
                     if candle["open"] > 0 and candle["high"] > 0 and candle["low"] > 0 and candle["close"] > 0:
                         candles.append(candle)
@@ -751,6 +755,7 @@ def _fetch_kr_index_daily(code: str, days: int = 45, max_candles: int = 30) -> d
                 "high":  _to_float(d.get("highPrice")),
                 "low":   _to_float(d.get("lowPrice")),
                 "close": _to_float(d.get("closePrice")),
+                "volume": _to_float(d.get("accumulatedTradingVolume")),
             }
             for d in data
         ]

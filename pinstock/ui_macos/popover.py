@@ -682,6 +682,7 @@ class WatchRow(QWidget):
             name=name,
             show_date_axis=bool(s.get("axis_date", False)),
             show_price_axis=bool(s.get("axis_price", False)),
+            show_volume=bool(s.get("show_volume", False)),
         )
 
     def _hide_chart_popup(self):

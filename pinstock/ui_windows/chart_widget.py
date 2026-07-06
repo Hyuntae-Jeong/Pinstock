@@ -17,6 +17,8 @@ class SparklineWidget(QWidget):
     H = 40    # 차트 높이
     PRICE_AXIS_W = 40   # 우측 가격 보조축 라벨 폭 (확대 팝업, 가격축 ON 시)
     DATE_AXIS_H  = 14   # 하단 날짜 보조축 라벨 높이 (확대 팝업, 날짜축 ON 시)
+    VOL_PANEL_RATIO = 0.24   # 거래량 패널이 차지하는 플롯 높이 비율 (거래량 표시 ON 시)
+    VOL_GAP = 4              # 가격/거래량 패널 사이 여백(px)
 
     def __init__(self, parent=None, width: int | None = None, height: int | None = None):
         super().__init__(parent)
@@ -38,6 +40,7 @@ class SparklineWidget(QWidget):
         # 확대 팝업 보조축 — 우측 가격(최고·평균·최저)·하단 날짜 눈금. 미니 차트는 항상 꺼짐.
         self.show_date_axis: bool = False
         self.show_price_axis: bool = False
+        self.show_volume: bool = False    # 하단 거래량 패널 표시 (확대 팝업 전용)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -48,12 +51,14 @@ class SparklineWidget(QWidget):
         self.update()
 
     def set_candles(self, candles: list[dict], ma_periods=(), display_count: int | None = None,
-                    show_date_axis: bool = False, show_price_axis: bool = False):
+                    show_date_axis: bool = False, show_price_axis: bool = False,
+                    show_volume: bool = False):
         """일봉 캔들 표시.
         - candles: 전체 OHLC 이력 (이동평균은 표시 구간 밖 데이터까지 평균에 사용)
         - ma_periods: 그릴 이동평균 기간들 (예: (5, 20, 60)). 빈 값이면 안 그림.
         - display_count: 최근 N개만 캔들로 표시 (None=전부). 이동평균선은 표시 구간만.
         - show_date_axis/show_price_axis: 확대 팝업 보조축(하단 날짜·우측 가격) 표시 여부.
+        - show_volume: 하단 거래량 패널 표시 여부(색은 캔들과 동일 — 종가≥시가 빨강, 아니면 파랑).
         """
         self.mode = "candle"
         self.candles = candles
@@ -61,6 +66,7 @@ class SparklineWidget(QWidget):
         self.display_count = display_count
         self.show_date_axis = show_date_axis
         self.show_price_axis = show_price_axis
+        self.show_volume = show_volume
         self.update()
 
     @staticmethod
@@ -191,6 +197,17 @@ class SparklineWidget(QWidget):
         w = self.W - left - right
         h = self.H - top - bottom
 
+        # 거래량 패널 — 켜져 있고 거래량 데이터가 있으면 하단 일부 높이를 떼어 준다.
+        # 가격 캔들·이동평균은 남은 위쪽(price_h)에만 그려 서로 겹치지 않게 한다.
+        vols = [(c.get("volume") or 0) for c in shown]
+        draw_vol = self.show_volume and any(v > 0 for v in vols)
+        if draw_vol:
+            vol_h = max(12, round(h * self.VOL_PANEL_RATIO))
+            price_h = h - vol_h - self.VOL_GAP
+        else:
+            vol_h = 0
+            price_h = h
+
         # 이동평균 시계열은 전체 구간 기준으로 계산 (표시 구간 왼쪽 끝에서도 값 존재)
         closes = [c["close"] for c in candles]
         ma_series = {p: self._sma(closes, p) for p in self.ma_periods}
@@ -207,7 +224,7 @@ class SparklineWidget(QWidget):
         rng = (mx - mn) if mx > mn else 1.0
 
         def y_of(price: float) -> float:
-            return top + (1 - (price - mn) / rng) * h
+            return top + (1 - (price - mn) / rng) * price_h
 
         slot = w / dc
         body_w = max(1.5, slot * 0.7)
@@ -236,6 +253,25 @@ class SparklineWidget(QWidget):
             painter.setBrush(QBrush(color))
             painter.drawRect(QRectF(cx - body_w / 2, body_top, body_w, body_h))
 
+        # ── 거래량 막대 (하단 패널) — 색은 캔들과 동일(종가≥시가 빨강, 아니면 파랑) ──
+        if draw_vol:
+            vmax = max(vols) or 1.0
+            vol_bottom = top + h
+            # 가격·거래량 경계 옅은 구분선
+            painter.setPen(QPen(QColor(C['border']), 1))
+            sep_y = top + price_h + self.VOL_GAP / 2
+            painter.drawLine(QPointF(left, sep_y), QPointF(left + w, sep_y))
+            painter.setPen(Qt.PenStyle.NoPen)
+            for i, c in enumerate(shown):
+                v = vols[i]
+                if v <= 0:
+                    continue
+                cx = left + (i + 0.5) * slot
+                color = red if c["close"] >= c["open"] else blue
+                bar_h = max(1.0, (v / vmax) * vol_h)
+                painter.setBrush(QBrush(color))
+                painter.drawRect(QRectF(cx - body_w / 2, vol_bottom - bar_h, body_w, bar_h))
+
         # ── 이동평균선 (표시 구간만, 부드럽게) ──────────────────────────────
         if self.ma_periods:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -263,7 +299,7 @@ class SparklineWidget(QWidget):
 
         # ── 보조축 (확대 팝업 전용) — 캔들·이동평균 위에 라벨을 얹는다 ─────────────
         if self.show_price_axis:
-            self._draw_price_axis(painter, shown, mn, mx, left, top, w, h)
+            self._draw_price_axis(painter, shown, mn, mx, left, top, w, price_h)
         if self.show_date_axis:
             self._draw_date_axis(painter, shown, left, top, w, h, slot)
 
@@ -414,11 +450,13 @@ class ChartPopup(QWidget):
 
     def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
                   ma_periods=(), display_count: int | None = None, name: str = "",
-                  show_date_axis: bool = False, show_price_axis: bool = False):
+                  show_date_axis: bool = False, show_price_axis: bool = False,
+                  show_volume: bool = False):
         """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
         self.chart.watermark_name = name or ""   # 배경 종목명 (빈 값이면 안 그림)
         self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count,
-                               show_date_axis=show_date_axis, show_price_axis=show_price_axis)
+                               show_date_axis=show_date_axis, show_price_axis=show_price_axis,
+                               show_volume=show_volume)
         self._position(anchor_tl, anchor_size)
         self.show()
         self.raise_()

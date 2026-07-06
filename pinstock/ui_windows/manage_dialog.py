@@ -2028,9 +2028,10 @@ class ManageWatchlistDialog(QDialog):
         # popup_months 만 정수(1~6), 나머지는 on/off 불리언이다.
         self._ma_settings = {"ma5": True, "ma20": True, "ma60": True,
                              "show_name": True, "popup_months": 3,
-                             "axis_date": False, "axis_price": False}
+                             "axis_date": False, "axis_price": False,
+                             "show_volume": False}
         if isinstance(ma_settings, dict):
-            for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
+            for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price", "show_volume"):
                 if k in ma_settings:
                     self._ma_settings[k] = bool(ma_settings[k])
             pm = ma_settings.get("popup_months")
@@ -2176,6 +2177,16 @@ class ManageWatchlistDialog(QDialog):
             )
             self._axis_checks[key] = cb
             axis_row.addWidget(cb)
+        # 거래량 패널 토글 — 확대 차트 하단에 거래량 막대(상승 빨강·하락 파랑)를 표시
+        axis_row.addSpacing(8)
+        self._volume_check = QCheckBox("거래량")
+        self._volume_check.setChecked(bool(self._ma_settings.get("show_volume", False)))
+        self._volume_check.setToolTip("차트 하단에 거래량 막대를 표시합니다 (상승 빨강·하락 파랑)")
+        self._volume_check.setStyleSheet(
+            f"QCheckBox {{ color: {C['text']}; font-size: 12px; spacing: 6px; }}"
+            f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+        )
+        axis_row.addWidget(self._volume_check)
         axis_row.addStretch()
         root.addLayout(axis_row)
 
@@ -2635,4 +2646,5 @@ class ManageWatchlistDialog(QDialog):
         out["popup_months"] = int(self._period_combo.currentData() or 3)
         for key, cb in self._axis_checks.items():
             out[key] = cb.isChecked()
+        out["show_volume"] = self._volume_check.isChecked()
         return out
