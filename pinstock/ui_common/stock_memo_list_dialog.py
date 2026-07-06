@@ -44,11 +44,16 @@ def _first_line(text: str, limit: int = 34) -> str:
 
 
 class _MemoCard(QFrame):
-    """클릭 가능한 메모 요약 카드 — 종목명 + 수정일 + 첫 줄 미리보기."""
+    """클릭 가능한 메모 요약 카드 — 종목명 + 수정일 + 첫 줄 미리보기.
+
+    deleted=True 면 현재 보유목록에 없는(삭제된) 종목의 메모다. 이 경우 종목명을
+    빨간색으로 칠해 삭제된 종목임을 표시한다.
+    """
 
     clicked = pyqtSignal(str)   # code
 
-    def __init__(self, code: str, name: str, preview: str, date_text: str, parent=None):
+    def __init__(self, code: str, name: str, preview: str, date_text: str,
+                 deleted: bool = False, parent=None):
         super().__init__(parent)
         self._code = code
         self.setObjectName("memo_summary_card")
@@ -70,7 +75,8 @@ class _MemoCard(QFrame):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(6)
         name_lbl = QLabel(name or code)
-        name_lbl.setStyleSheet(f"color: {C['text']}; font-size: 13px; font-weight: bold; background: transparent;")
+        name_color = C['red'] if deleted else C['text']
+        name_lbl.setStyleSheet(f"color: {name_color}; font-size: 13px; font-weight: bold; background: transparent;")
         top.addWidget(name_lbl)
         top.addStretch(1)
         if date_text:
@@ -239,7 +245,9 @@ class StockMemoListDialog(QDialog):
 
     # ── 내용 갱신 ───────────────────────────────────────────────────────────
     def set_entries(self, entries: list):
-        """카드 목록을 다시 채운다. entries 항목: {code, name, text, updated_at}."""
+        """카드 목록을 다시 채운다. entries 항목: {code, name, text, updated_at, deleted}.
+
+        deleted=True 인 항목(삭제된 종목의 메모)은 종목명이 빨간색으로 표시된다."""
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             w = item.widget()
@@ -259,6 +267,7 @@ class StockMemoListDialog(QDialog):
                 name=str(e.get("name", "")),
                 preview=_first_line(e.get("text", "")),
                 date_text=_format_date(e.get("updated_at")),
+                deleted=bool(e.get("deleted")),
             )
             card.clicked.connect(self._on_card_clicked)
             self.list_layout.addWidget(card)

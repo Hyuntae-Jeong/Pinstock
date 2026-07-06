@@ -94,6 +94,32 @@ def normalize_memo(raw) -> dict:
     return {"text": text, "updated_at": updated, "geometry": geometry}
 
 
+# ─── 종목별 메모 저장소 스키마 ────────────────────────────────────────────────
+# 종목 코드로 keyed 된 별도 저장소 {code: {text, updated_at, geometry, name}}.
+# 메모를 종목 dict 안이 아니라 여기 따로 두므로, 종목을 삭제해도 메모는 남고
+# 같은 코드의 종목을 다시 추가하면 코드 매칭으로 자동으로 다시 연결된다.
+# name 은 종목이 삭제된 뒤에도 목록에 이름을 보여주기 위한 마지막 종목명이다.
+def normalize_stock_memos(raw) -> dict:
+    """종목별 메모 저장소를 {code: {text, updated_at, geometry, name}} 로 정규화.
+
+    텍스트가 빈 항목은 '메모 없음'으로 보고 버린다(메모창에서 텍스트를 다 지우면
+    삭제되는 동작과 일치). code/형식이 이상한 항목도 안전하게 걸러 낸다.
+    """
+    out: dict[str, dict] = {}
+    if not isinstance(raw, dict):
+        return out
+    for code, m in raw.items():
+        if not isinstance(code, str) or not code:
+            continue
+        base = normalize_memo(m)   # {text, updated_at, geometry}
+        if not (base.get("text") or "").strip():
+            continue
+        name = m.get("name") if isinstance(m, dict) else None
+        base["name"] = name.strip() if isinstance(name, str) else ""
+        out[code] = base
+    return out
+
+
 # ─── 분리(detach) 창 상태 스키마 (macOS 전용) ─────────────────────────────────
 # 보유/관심 중 한 뷰를 독립 창으로 분리한 상태. 어느 뷰가 분리됐는지(view)와 그
 # 창의 위치/높이/고정/투명도/시장필터를 저장해 재시작 후 복원한다. 형식이 깨졌거나

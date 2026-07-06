@@ -51,6 +51,7 @@ from ..core.storage import (
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_stock_schema,
     normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
+    normalize_stock_memos,
 )
 from .theme import C, TRAY_MENU_STYLE
 from .floating_widget import StockWidget, TagGroupWidget
@@ -111,6 +112,10 @@ class WidgetManager:
         self._memo_dialog: MemoDialog | None = None
         # 종목별 메모 — 종목 코드별 모드리스 창. 여러 종목 메모를 동시에 띄울 수 있다.
         self._stock_memo_dialogs: dict[str, MemoDialog] = {}
+        # 종목별 메모 저장소 — {code: {text, updated_at, geometry, name}}. 종목 dict 와
+        # 분리돼 있어 종목을 삭제해도 메모가 남고, 같은 코드 종목을 다시 추가하면
+        # 자동으로 다시 붙는다. 삭제된 종목의 메모는 목록에 빨간색으로 표시한다.
+        self.stock_memos: dict[str, dict] = {}
         # 종목별 메모 모아보기 — 메모 있는 종목을 카드 리스트로. 창은 1개만 띄운다.
         self._memo_list_dialog: StockMemoListDialog | None = None
 
@@ -601,6 +606,7 @@ class WidgetManager:
             self.watch_visible = bool(data.get("watch_visible", True))
             self.us_return_basis = "usd" if data.get("us_return_basis") == "usd" else "krw"
             self.memo = normalize_memo(data.get("memo"))
+            self.stock_memos = normalize_stock_memos(data.get("stock_memos"))
             try:
                 opacity = float(data.get("popover_opacity", 1.0))
                 # Windows 는 10–100% 까지 허용 (macOS 는 자체적으로 60% 미만은 60% 로 clamp).
@@ -618,6 +624,26 @@ class WidgetManager:
             skipped = upd.get("skipped_version")
             if isinstance(skipped, str) and skipped:
                 self.update_skipped_version = skipped
+        self._migrate_legacy_stock_memos()
+
+    def _migrate_legacy_stock_memos(self):
+        """구버전: 종목 dict 안(stock["memo"])에 있던 메모를 코드별 저장소로 1회 이전.
+
+        이전 후 종목 dict 에서 memo 키를 제거해 이중 저장을 막는다. 저장소에 이미
+        같은 코드 항목이 있으면(신버전 우선) 건너뛴다. 마이그레이션 후 저장되면
+        stocks.json 에는 더 이상 종목 안에 memo 가 남지 않는다."""
+        for s in self.stocks:
+            legacy = s.pop("memo", None)
+            if legacy is None:
+                continue
+            code = s.get("code")
+            if not code or code in self.stock_memos:
+                continue
+            base = normalize_memo(legacy)
+            if not (base.get("text") or "").strip():
+                continue
+            base["name"] = s.get("name", "") or ""
+            self.stock_memos[code] = base
 
     def _save_config(self):
         # normalize_stock_schema 는 새 dict 를 반환하므로 self.stocks 를 통째로
@@ -631,6 +657,7 @@ class WidgetManager:
         self.watchlist = normalize_watchlist_schema(self.watchlist)
         self.watch_tags = normalize_tags(self.watch_tags)
         self.memo = normalize_memo(self.memo)
+        self.stock_memos = normalize_stock_memos(self.stock_memos)
         self._snapshot_watch_group_state()   # 현재 그룹 위치/고정 상태 반영
         data = {
             "stocks": self.stocks,
@@ -647,6 +674,7 @@ class WidgetManager:
             "us_return_basis": self.us_return_basis,
             "popover_opacity": self.popover_opacity,
             "memo": self.memo,
+            "stock_memos": self.stock_memos,
         }
         upd: dict = {}
         if self.update_last_check_date is not None:
@@ -1269,17 +1297,25 @@ class WidgetManager:
 
     # ── 종목별 메모 ────────────────────────────────────────────────────────
     def _memo_entries(self) -> list:
-        """메모 텍스트가 있는 보유 종목을 최근 수정순으로. 항목: {code,name,text,updated_at}."""
+        """메모가 있는 종목을 최근 수정순으로. 항목: {code,name,text,updated_at,deleted}.
+
+        보유목록에 없는(삭제된) 종목의 메모도 포함하며 deleted=True 로 표시한다.
+        이름은 종목이 살아 있으면 현재 종목명, 삭제됐으면 저장소에 남은 마지막 이름."""
+        live = {s.get("code"): s for s in self.stocks}
         items = []
-        for s in self.stocks:
-            memo = normalize_memo(s.get("memo"))
-            if (memo.get("text") or "").strip():
-                items.append({
-                    "code": s.get("code", ""),
-                    "name": s.get("name", s.get("code", "")),
-                    "text": memo.get("text", ""),
-                    "updated_at": memo.get("updated_at"),
-                })
+        for code, m in self.stock_memos.items():
+            text = m.get("text", "")
+            if not (text or "").strip():
+                continue
+            stock = live.get(code)
+            name = (stock.get("name") if stock else None) or m.get("name") or code
+            items.append({
+                "code": code,
+                "name": name,
+                "text": text,
+                "updated_at": m.get("updated_at"),
+                "deleted": stock is None,
+            })
         items.sort(key=lambda e: e.get("updated_at") or "", reverse=True)
         return items
 
@@ -1302,24 +1338,26 @@ class WidgetManager:
         self._memo_list_dialog.activateWindow()
 
     def open_stock_memo_dialog(self, code: str):
-        """종목별 메모 — 전역 메모장과 같은 모드리스 항상-위 창을 종목마다 띄운다.
-        이미 떠 있으면 새로 만들지 않고 앞으로 가져온다."""
-        stock = next((s for s in self.stocks if s.get("code") == code), None)
-        if stock is None:
+        """종목별 메모 — 모드리스 항상-위 창을 종목마다 띄운다. 코드로 저장소를 조회하므로
+        삭제된 종목의 메모도 열 수 있다(제목이 빨간 '종목명 (미보유)'). 이미 떠 있으면 앞으로 가져온다."""
+        if not code:
             return
         existing = self._stock_memo_dialogs.get(code)
         if existing is not None and existing.isVisible():
             existing.raise_()
             existing.activateWindow()
             return
-        memo = normalize_memo(stock.get("memo"))
-        name = stock.get("name", code)
+        memo = normalize_memo(self.stock_memos.get(code))
+        stock = next((s for s in self.stocks if s.get("code") == code), None)
+        name = (stock.get("name") if stock else None) or (self.stock_memos.get(code) or {}).get("name") or code
+        deleted = stock is None
         dlg = MemoDialog(
             initial_text=memo.get("text", ""),
             initial_geometry=memo.get("geometry"),
             opacity=self.popover_opacity,
             on_change=lambda text, geom, c=code: self._on_stock_memo_changed(c, text, geom),
-            title=f"📝 {name}",
+            title=f"📝 {name} (미보유)" if deleted else f"📝 {name}",
+            deleted=deleted,
         )
         self._stock_memo_dialogs[code] = dlg
         dlg.show()
@@ -1327,15 +1365,22 @@ class WidgetManager:
         dlg.activateWindow()
 
     def _on_stock_memo_changed(self, code: str, text: str, geometry: list):
-        """종목별 메모 콜백 — 해당 종목 dict 의 memo 를 갱신·저장한다(전역 메모와 동일 구조)."""
-        stock = next((s for s in self.stocks if s.get("code") == code), None)
-        if stock is None:
-            return
-        prev = normalize_memo(stock.get("memo"))
+        """종목별 메모 콜백 — 코드별 저장소(stock_memos)를 갱신·저장한다.
+
+        텍스트가 비면 항목을 통째로 지운다(메모창을 비우면 사라지는 동작). 저장소는
+        종목 삭제와 무관하므로, 같은 코드 종목을 다시 추가하면 메모가 자동으로 다시 붙는다."""
+        prev = normalize_memo(self.stock_memos.get(code))
         updated_at = prev.get("updated_at")
         if text != prev.get("text", ""):
             updated_at = datetime.now().isoformat(timespec="seconds")
-        stock["memo"] = {"text": text, "updated_at": updated_at, "geometry": geometry}
+        if (text or "").strip():
+            stock = next((s for s in self.stocks if s.get("code") == code), None)
+            name = (stock.get("name") if stock else None) or (self.stock_memos.get(code) or {}).get("name") or code
+            self.stock_memos[code] = {
+                "text": text, "updated_at": updated_at, "geometry": geometry, "name": name,
+            }
+        else:
+            self.stock_memos.pop(code, None)
         self._save_config()
         self._refresh_memo_list_if_open()
 

@@ -42,11 +42,13 @@ class MemoDialog(QDialog):
         opacity: float = 1.0,
         on_change: Optional[Callable[[str, list], None]] = None,
         title: str = "",
+        deleted: bool = False,
         parent=None,
     ):
         super().__init__(parent)
         self._on_change = on_change
         self._title = title or ""                  # 종목 메모면 종목명, 전역 메모면 빈 문자열
+        self._title_deleted = deleted             # 삭제된 종목의 메모면 제목을 빨간색으로
         self._ready = False                       # 초기 기하 적용 중 발생하는 이벤트 무시용
         self._drag_offset: Optional[QPoint] = None  # 프레임리스 창 드래그 이동용
 
@@ -143,7 +145,8 @@ class MemoDialog(QDialog):
         if self._title:
             title_lbl = QLabel(self._title)
             title_lbl.setStyleSheet(
-                f"color: {C['subtext']}; font-size: 12px; font-weight: bold; padding-left: 2px;"
+                f"color: {C['red'] if self._title_deleted else C['subtext']}; "
+                f"font-size: 12px; font-weight: bold; padding-left: 2px;"
             )
             top_row.addWidget(title_lbl)
         top_row.addStretch(1)
