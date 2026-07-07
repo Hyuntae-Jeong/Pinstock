@@ -457,7 +457,7 @@ class SparklineWidget(QWidget):
         pen = QPen(line_col); pen.setWidthF(0.9)
         painter.setPen(pen)
         painter.drawLine(QPointF(cx, top), QPointF(cx, top + h))
-        # OHLC 박스 — 종/시/고/저
+        # OHLC 박스 — 맨 위 날짜(M/D) + 종/시/고/저
         up = c["close"] >= c["open"]
         rows = [
             ("종", c["close"], C['red'] if up else C['blue']),
@@ -465,14 +465,18 @@ class SparklineWidget(QWidget):
             ("고", c["high"],  C['red']),
             ("저", c["low"],   C['blue']),
         ]
-        painter.setFont(QFont("Malgun Gothic", 8))
+        date_label = self._fmt_axis_date(c.get("date", ""))   # 'M/D' (하단 날짜축과 동일 형식)
+        font = QFont("Malgun Gothic", 8)
+        font_b = QFont("Malgun Gothic", 8, QFont.Weight.Bold)
+        painter.setFont(font)
         fm = painter.fontMetrics()
         line_h = fm.height() + 2
         label_w = fm.horizontalAdvance("종")
         val_w = max(fm.horizontalAdvance(self._fmt_axis_price(v)) for _, v, _ in rows)
+        date_w = QFontMetricsF(font_b).horizontalAdvance(date_label) if date_label else 0
         pad, gap = 6, 8
-        box_w = pad * 2 + label_w + gap + val_w
-        box_h = pad * 2 + line_h * len(rows)
+        box_w = pad * 2 + max(label_w + gap + val_w, date_w)
+        box_h = pad * 2 + line_h * (len(rows) + (1 if date_label else 0))
         # 커서 반대편에 배치 + 위젯 안으로 클램프
         bx = cx + 10 if cx < left + w / 2 else cx - 10 - box_w
         by = top + 4
@@ -483,8 +487,14 @@ class SparklineWidget(QWidget):
         painter.setPen(QPen(QColor(C['border']), 1))
         painter.setBrush(QBrush(bg))
         painter.drawRoundedRect(QRectF(bx, by, box_w, box_h), 5, 5)
-        # 텍스트 행
+        # 텍스트 — 날짜(맨 위, 약간 밝게 볼드) → 종/시/고/저
         ty = by + pad + fm.ascent()
+        if date_label:
+            painter.setFont(font_b)
+            painter.setPen(QColor(C['text']))
+            painter.drawText(QPointF(bx + pad, ty), date_label)
+            painter.setFont(font)
+            ty += line_h
         for label, v, color in rows:
             painter.setPen(QColor(C['subtext']))
             painter.drawText(QPointF(bx + pad, ty), label)
