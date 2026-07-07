@@ -2,9 +2,10 @@
 
 from datetime import datetime
 
-from PyQt6.QtWidgets import QWidget, QFrame, QApplication
-from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize
-from PyQt6.QtGui import QPainter, QColor, QBrush, QPainterPath, QPen, QFont, QFontMetricsF
+from PyQt6.QtWidgets import QWidget, QFrame, QApplication, QPushButton
+from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize, pyqtSignal
+from PyQt6.QtGui import (QPainter, QColor, QBrush, QPainterPath, QPen, QFont, QFontMetricsF,
+                         QShortcut, QKeySequence)
 
 from .theme import C, MA_COLORS
 
@@ -86,6 +87,12 @@ class SparklineWidget(QWidget):
         self.show_price_axis: bool = False
         self.show_volume: bool = False    # 하단 거래량 패널 표시 (확대 팝업 전용)
         self.candle_unit: str = "day"     # 봉주기(day/week/month) — 이동평균 범례 라벨용
+        # 고정 팝업 전용 — 봉 hover 시 세로 십자선 + OHLC 박스
+        self.interactive: bool = False
+        self.hover_index: int | None = None
+        self._hit_left = 0.0     # 마우스 x → 캔들 인덱스 역산용 (paint 시 캐시)
+        self._hit_slot = 0.0
+        self._hit_n = 0
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -114,6 +121,7 @@ class SparklineWidget(QWidget):
         self.show_price_axis = show_price_axis
         self.show_volume = show_volume
         self.candle_unit = candle_unit
+        self.hover_index = None
         self.update()
 
     @staticmethod
@@ -137,6 +145,23 @@ class SparklineWidget(QWidget):
             self._paint_candles()
         else:
             self._paint_line()
+
+    # ── 봉 hover (고정 팝업에서 interactive=True 일 때만 동작) ──────────────────
+    def mouseMoveEvent(self, event):
+        if not self.interactive or self.mode != "candle" or self._hit_n <= 0 or self._hit_slot <= 0:
+            return super().mouseMoveEvent(event)
+        i = int((event.position().x() - self._hit_left) / self._hit_slot)
+        i = max(0, min(self._hit_n - 1, i))
+        if i != self.hover_index:
+            self.hover_index = i
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self.interactive and self.hover_index is not None:
+            self.hover_index = None
+            self.update()
+        super().leaveEvent(event)
 
     # ── 라인 모드 (당일 분봉) ────────────────────────────────────────────
     def _paint_line(self):
@@ -275,6 +300,8 @@ class SparklineWidget(QWidget):
 
         slot = w / dc
         body_w = max(1.5, slot * 0.7)
+        # 마우스 x → 캔들 인덱스 역산에 필요한 값 캐시 (고정 팝업 봉 hover 용)
+        self._hit_left, self._hit_slot, self._hit_n = left, slot, len(shown)
 
         red  = QColor(C['red'])
         blue = QColor(C['blue'])
@@ -350,6 +377,10 @@ class SparklineWidget(QWidget):
         if self.show_date_axis:
             self._draw_date_axis(painter, shown, left, top, w, h, slot)
 
+        # ── 봉 hover 십자선 + OHLC 박스 (고정 팝업 전용) — 최상단 레이어 ──────────
+        if self.interactive and self.hover_index is not None:
+            self._draw_hover_overlay(painter, shown, left, top, w, h, slot)
+
         painter.end()
 
     # ── 우측 가격 보조축 — 최고가(빨강)·평균(흐림)·최저가(파랑) 눈금 ──────────────
@@ -413,6 +444,55 @@ class SparklineWidget(QWidget):
             tx = min(max(tx, left), left + w - tw)   # 좌우 끝 클램프
             painter.drawText(QPointF(tx, y), label)
 
+    # ── 봉 hover 십자선 + OHLC 박스 (고정 팝업 전용) ───────────────────────────
+    def _draw_hover_overlay(self, painter, shown, left, top, w, h, slot):
+        idx = self.hover_index
+        if idx is None or idx < 0 or idx >= len(shown):
+            return
+        c = shown[idx]
+        cx = left + (idx + 0.5) * slot
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 세로 십자선 (플롯 전체 높이)
+        line_col = QColor(C['subtext']); line_col.setAlpha(150)
+        pen = QPen(line_col); pen.setWidthF(0.9)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(cx, top), QPointF(cx, top + h))
+        # OHLC 박스 — 종/시/고/저
+        up = c["close"] >= c["open"]
+        rows = [
+            ("종", c["close"], C['red'] if up else C['blue']),
+            ("시", c["open"],  C['text']),
+            ("고", c["high"],  C['red']),
+            ("저", c["low"],   C['blue']),
+        ]
+        painter.setFont(QFont("Malgun Gothic", 8))
+        fm = painter.fontMetrics()
+        line_h = fm.height() + 2
+        label_w = fm.horizontalAdvance("종")
+        val_w = max(fm.horizontalAdvance(self._fmt_axis_price(v)) for _, v, _ in rows)
+        pad, gap = 6, 8
+        box_w = pad * 2 + label_w + gap + val_w
+        box_h = pad * 2 + line_h * len(rows)
+        # 커서 반대편에 배치 + 위젯 안으로 클램프
+        bx = cx + 10 if cx < left + w / 2 else cx - 10 - box_w
+        by = top + 4
+        bx = max(left + 2, min(bx, left + w - box_w - 2))
+        by = max(top + 2, min(by, top + h - box_h - 2))
+        # 배경 카드
+        bg = QColor(C['bg2']); bg.setAlpha(235)
+        painter.setPen(QPen(QColor(C['border']), 1))
+        painter.setBrush(QBrush(bg))
+        painter.drawRoundedRect(QRectF(bx, by, box_w, box_h), 5, 5)
+        # 텍스트 행
+        ty = by + pad + fm.ascent()
+        for label, v, color in rows:
+            painter.setPen(QColor(C['subtext']))
+            painter.drawText(QPointF(bx + pad, ty), label)
+            val = self._fmt_axis_price(v)
+            painter.setPen(QColor(color))
+            painter.drawText(QPointF(bx + box_w - pad - fm.horizontalAdvance(val), ty), val)
+            ty += line_h
+
     # ── 배경 종목명 워터마크 — 캔들 뒤에 아주 은은하게 반투명으로 ────────────────
     def _draw_watermark_name(self, painter: QPainter):
         """확대 차트 중앙에 종목명을 반투명 큰 글씨로 깐다(제일 하단 레이어).
@@ -474,15 +554,22 @@ class ChartPopup(QWidget):
 
     PAD = 6   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
 
-    def __init__(self, chart_w: int, chart_h: int, parent=None):
+    close_requested = pyqtSignal()   # ✕ 클릭 (고정 모드 전용)
+
+    def __init__(self, chart_w: int, chart_h: int, parent=None, interactive: bool = False):
         super().__init__(parent)
-        self.setWindowFlags(
+        # 고정(interactive) 모드는 입력을 받아 봉 hover·✕ 닫기가 동작한다.
+        # hover 모드는 기존처럼 입력 통과(WindowTransparentForInput)라 hover 가 안 끊긴다.
+        flags = (
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool |
-            Qt.WindowType.WindowTransparentForInput
+            Qt.WindowType.Tool
         )
+        if not interactive:
+            flags |= Qt.WindowType.WindowTransparentForInput
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.interactive = interactive
 
         w = chart_w + 2 * self.PAD
         h = chart_h + 2 * self.PAD
@@ -491,15 +578,38 @@ class ChartPopup(QWidget):
         self.card = QFrame(self)
         self.card.setObjectName("popcard")
         self.card.setGeometry(0, 0, w, h)
+        border_col = C['blue'] if interactive else C['border']   # 고정은 accent 테두리로 구분
         self.card.setStyleSheet(f"""
             QFrame#popcard {{
                 background: {C['bg']};
-                border: 1px solid {C['border']};
+                border: 1px solid {border_col};
                 border-radius: 8px;
             }}
         """)
         self.chart = SparklineWidget(self.card, width=chart_w, height=chart_h)
         self.chart.move(self.PAD, self.PAD)
+
+        # 고정 모드 전용 — 봉 hover 활성 + ✕ 닫기 버튼
+        if interactive:
+            self.chart.interactive = True
+            self.chart.setMouseTracking(True)
+            # Esc 로 닫기 — 앱 어디서 눌러도 (고정 팝업이 떠 있는 동안만 유효, ✕ 와 동일 경로)
+            esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+            esc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            esc.activated.connect(self.close_requested.emit)
+            self.close_btn = QPushButton("✕", self.card)
+            self.close_btn.setFixedSize(18, 18)
+            self.close_btn.move(w - 18 - self.PAD, self.PAD)
+            self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.close_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C['surface']}; color: {C['subtext']};
+                    border: none; border-radius: 9px; font-size: 11px;
+                }}
+                QPushButton:hover {{ background: {C['surface2']}; color: {C['text']}; }}
+            """)
+            self.close_btn.clicked.connect(self.close_requested.emit)
+            self.close_btn.raise_()
 
     def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
                   ma_periods=(), display_count: int | None = None, name: str = "",
@@ -525,3 +635,82 @@ class ChartPopup(QWidget):
             y = ay + ah + 6
         x = max(geo.x() + 4, min(x, geo.x() + geo.width() - self.width() - 4))
         self.move(x, y)
+
+
+# ─── 확대 팝업 고정/hover 조율자 (한 번에 팝업 1개만) ──────────────────────────
+class PinController:
+    """관심종목 확대 팝업의 고정/hover 를 한 곳에서 조율한다 (Windows·macOS 공용).
+
+    팝업은 각 행이 소유하고, 이 컨트롤러는 pin 상태만 들고 규칙을 강제한다:
+    - hover 는 고정이 없을 때만
+    - 고정 중엔 다른 종목 hover 무시
+    - 다른 행 클릭 시 고정 전환, 같은 행 재클릭/✕ 시 해제(→ hover 재개)
+
+    행이 구현해야 하는 인터페이스: show_chart_popup(pinned: bool), hide_chart_popup().
+    """
+
+    def __init__(self):
+        self._pinned = None   # 고정된 행 (or None)
+        self._hover = None    # 현재 hover 로 떠 있는 행 (고정 없을 때만)
+
+    @staticmethod
+    def _alive(row) -> bool:
+        """행(위젯)이 아직 살아있는지 — 파괴된 C++ 객체면 False (dangling 방어)."""
+        if row is None:
+            return False
+        try:
+            row.isVisible()
+            return True
+        except RuntimeError:
+            return False
+
+    def on_enter(self, row):
+        if not self._alive(self._pinned):
+            self._pinned = None
+        if self._pinned is not None:
+            return                                   # 고정 중 → 다른 hover 무시
+        if self._hover is not row and self._alive(self._hover):
+            self._hover.hide_chart_popup()           # 이전 hover 정리 (팝업 1개 보장)
+        self._hover = row
+        row.show_chart_popup(pinned=False)
+
+    def on_leave(self, row):
+        if not self._alive(self._pinned):
+            self._pinned = None
+        if self._pinned is not None:
+            return
+        if self._hover is row:
+            row.hide_chart_popup()
+            self._hover = None
+
+    def on_click(self, row):
+        if not self._alive(self._pinned):
+            self._pinned = None
+        if self._pinned is row:
+            self._unpin()                            # 같은 행 재클릭 → 해제
+        elif self._pinned is not None:
+            self._pinned.hide_chart_popup()          # 다른 행 클릭 → 전환
+            self._pinned = row
+            row.show_chart_popup(pinned=True)
+        else:
+            if self._alive(self._hover):             # 고정 없음 → 이 행 고정
+                self._hover.hide_chart_popup()
+            self._hover = None
+            self._pinned = row
+            row.show_chart_popup(pinned=True)
+
+    def on_close(self, row):
+        if self._pinned is row:                      # ✕ — 그 행이 고정 중일 때만
+            self._unpin()
+
+    def _unpin(self):
+        r, self._pinned = self._pinned, None
+        if self._alive(r):
+            r.hide_chart_popup()
+
+    def forget(self, row):
+        """행이 파괴/정지될 때 호출 — dangling 참조 정리."""
+        if self._pinned is row:
+            self._pinned = None
+        if self._hover is row:
+            self._hover = None

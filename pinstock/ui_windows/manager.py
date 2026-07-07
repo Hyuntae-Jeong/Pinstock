@@ -55,6 +55,7 @@ from ..core.storage import (
 )
 from .theme import C, TRAY_MENU_STYLE
 from .floating_widget import StockWidget, TagGroupWidget
+from .chart_widget import PinController
 from .master_widget import MasterWidget
 from .manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
@@ -84,6 +85,8 @@ class WidgetManager:
                                "show_name": True, "popup_months": 3,
                                "axis_date": False, "axis_price": False,
                                "show_volume": False, "candle_unit": "day"}
+        # 확대 팝업 고정/hover 조율자 — 모든 관심 그룹·행이 공유 (팝업 한 번에 1개만)
+        self.watch_pin_controller = PinController()
         self.widgets: dict[str, StockWidget] = {}
         # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
         self.watch_groups: dict[str, TagGroupWidget] = {}
@@ -780,6 +783,7 @@ class WidgetManager:
             pinned=bool(st.get("pinned", False)),
             stagger_base=stagger_base,
             ma_settings=self.watch_ma,
+            pin_controller=self.watch_pin_controller,
         )
         w.pin_toggled.connect(self._on_watch_group_pin_toggled)
         w.manage_requested.connect(self.open_manage_watch_dialog)

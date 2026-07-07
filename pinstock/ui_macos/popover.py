@@ -613,12 +613,14 @@ class WatchRow(QWidget):
     POPUP_WEEK_BARS  = 40        # 확대 팝업 주봉 표시 개수(고정)
     POPUP_MONTH_BARS = 24        # 확대 팝업 월봉 표시 개수(고정)
 
-    def __init__(self, watch_data: dict, parent=None, ma_settings: dict | None = None):
+    def __init__(self, watch_data: dict, parent=None, ma_settings: dict | None = None,
+                 pin_controller=None):
         super().__init__(parent)
         self.data = watch_data
         self.current_price: float = 0
         self._prev_close: float = 0.0
         self._chart_popup: ChartPopup | None = None
+        self._pin = pin_controller   # 확대 팝업 고정/hover 조율자 (공유, 매니저가 주입)
         # 확대 팝업 이동평균선 표시 설정 — 매니저가 넘긴 공유 dict 참조(제자리 갱신).
         self._ma_settings = ma_settings if ma_settings is not None else {
             "ma5": True, "ma20": True, "ma60": True,
@@ -630,12 +632,20 @@ class WatchRow(QWidget):
 
     # ── 일봉 차트 hover 확대 팝업 (기존 캔들 재사용, 네트워크 X) ──────────────
     def eventFilter(self, obj, event):
-        if obj is self.sparkline:
+        if obj is self.sparkline and self._pin is not None:
             if event.type() == QEvent.Type.Enter:
-                self._show_chart_popup()
+                self._pin.on_enter(self)
             elif event.type() == QEvent.Type.Leave:
-                self._hide_chart_popup()
+                self._pin.on_leave(self)
         return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event):
+        # 행 좌클릭 → 확대 팝업 고정/해제/전환 (우클릭은 contextMenuEvent 가 처리)
+        if self._pin is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._pin.on_click(self)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
         # 관심종목 행 우클릭 → 관심종목 관리. 관리 다이얼로그가 목록을 재구성하며 이
@@ -661,8 +671,8 @@ class WatchRow(QWidget):
         u = (self._ma_settings or {}).get("candle_unit", "day")
         return u if u in ("day", "week", "month") else "day"
 
-    def _show_chart_popup(self):
-        # 미니 차트가 보유한 전체 일봉 이력을 재사용 — 새 네트워크 호출은 하지 않는다
+    def show_chart_popup(self, pinned: bool = False):
+        # 미니 차트가 보유한 (이미 집계된) 캔들을 재사용 — 새 네트워크 호출은 하지 않는다
         candles = getattr(self.sparkline, "candles", None)
         if not candles or self.sparkline.mode != "candle":
             return
@@ -676,12 +686,15 @@ class WatchRow(QWidget):
             display_count = self.POPUP_WEEK_BARS if unit == "week" else self.POPUP_MONTH_BARS
             chart_w = round(self.sparkline.width() * self.POPUP_SCALE)
         chart_h = round(self.sparkline.height() * self.POPUP_SCALE)
-        # 기간 변경 시 폭이 달라지므로(ChartPopup 은 고정 크기) 필요하면 새로 만든다.
-        if self._chart_popup is None or self._chart_popup.chart.W != chart_w:
+        # 폭이 다르거나 고정/hover 모드(입력 수신 여부)가 바뀌면 새로 만든다.
+        if (self._chart_popup is None or self._chart_popup.chart.W != chart_w
+                or self._chart_popup.interactive != pinned):
             if self._chart_popup is not None:
                 self._chart_popup.hide()
                 self._chart_popup.deleteLater()
-            self._chart_popup = ChartPopup(chart_w, chart_h, parent=self)
+            self._chart_popup = ChartPopup(chart_w, chart_h, parent=self, interactive=pinned)
+            if pinned:
+                self._chart_popup.close_requested.connect(self._on_popup_close)
         s = self._ma_settings or {}
         # '종목명표시'가 켜져 있으면 확대 차트 배경에 깔 종목명을 넘긴다(꺼져 있으면 빈 값).
         show_name = bool(s.get("show_name", True))
@@ -697,9 +710,14 @@ class WatchRow(QWidget):
             candle_unit=unit,
         )
 
-    def _hide_chart_popup(self):
+    def hide_chart_popup(self):
         if self._chart_popup is not None:
             self._chart_popup.hide()
+
+    def _on_popup_close(self):
+        # 고정 팝업 ✕ 클릭 → 컨트롤러에 해제 요청 (→ hover 재개)
+        if self._pin is not None:
+            self._pin.on_close(self)
 
     def _build_ui(self):
         self.setStyleSheet(f"""
@@ -982,6 +1000,7 @@ class Popover(QWidget):
         self._watch_tags: list[dict] = []    # 관심 태그 레지스트리 (그룹 헤더용)
         # 확대 팝업 이동평균선 설정 — 매니저 watch_ma 공유 dict 참조 (set_watch_ma 로 주입)
         self._watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True}
+        self._watch_pin_controller = None   # 확대 팝업 고정/hover 조율자 (매니저가 주입)
         self._watch_expanded: dict[str, bool] = {}   # 태그 그룹 key → 펼침 여부
         self._view: str = self._hosted_views[0]   # "holdings" | "watch"
         self._price_cache: dict[str, dict] = {}    # code → 마지막 apply_price 결과
@@ -1410,6 +1429,10 @@ class Popover(QWidget):
         (dict 를 제자리 갱신하면 다음 hover 부터 새 설정이 반영된다.)"""
         self._watch_ma = ma
 
+    def set_pin_controller(self, controller):
+        """확대 팝업 고정/hover 조율자 주입 (모든 관심 행이 공유)."""
+        self._watch_pin_controller = controller
+
     def _compute_watch_groups(self, visible_items: list[dict]) -> list[dict]:
         """visible 관심종목을 태그 등록 순서로 그룹화. 멤버가 있는 태그만,
         마지막에 '태그 없음' 그룹 (Windows manager._compute_watch_groups 와 동일 규칙)."""
@@ -1500,7 +1523,8 @@ class Popover(QWidget):
             if not expanded:
                 continue
             for w in g["members"]:
-                row = WatchRow(w, ma_settings=self._watch_ma)
+                row = WatchRow(w, ma_settings=self._watch_ma,
+                               pin_controller=self._watch_pin_controller)
                 row.manage_requested.connect(self.manage_watch_requested.emit)
                 self.watch_rows[w["code"]] = row
                 self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)

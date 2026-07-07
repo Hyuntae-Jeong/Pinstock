@@ -663,11 +663,13 @@ class CompactWatchRow(QWidget):
     POPUP_WEEK_BARS  = 40        # 확대 팝업 주봉 표시 개수(고정)
     POPUP_MONTH_BARS = 24        # 확대 팝업 월봉 표시 개수(고정)
 
-    def __init__(self, item: dict, stagger_idx: int = 0, parent=None, ma_settings: dict | None = None):
+    def __init__(self, item: dict, stagger_idx: int = 0, parent=None, ma_settings: dict | None = None,
+                 pin_controller=None):
         super().__init__(parent)
         self.data = item
         self.current_price: float = 0.0
         self._chart_popup: ChartPopup | None = None
+        self._pin = pin_controller   # 확대 팝업 고정/hover 조율자 (공유, 매니저가 주입)
         # 확대 팝업 표시 설정(이동평균선·종목명·표시 기간) — 매니저가 넘긴 공유 dict 참조(제자리 갱신).
         self._ma_settings = ma_settings if ma_settings is not None else {
             "ma5": True, "ma20": True, "ma60": True, "show_name": True, "popup_months": 3,
@@ -687,16 +689,26 @@ class CompactWatchRow(QWidget):
 
     def stop(self):
         self.poll_timer.stop()
-        self._hide_chart_popup()
+        if self._pin is not None:
+            self._pin.forget(self)
+        self.hide_chart_popup()
 
-    # ── 일봉 차트 hover 확대 팝업 (기존 캔들 재사용, 네트워크 X) ──────────────
+    # ── 일봉 차트 hover/클릭 → 컨트롤러가 고정/hover 조율 (팝업 1개만) ──────────
     def eventFilter(self, obj, event):
-        if obj is self.sparkline:
+        if obj is self.sparkline and self._pin is not None:
             if event.type() == QEvent.Type.Enter:
-                self._show_chart_popup()
+                self._pin.on_enter(self)
             elif event.type() == QEvent.Type.Leave:
-                self._hide_chart_popup()
+                self._pin.on_leave(self)
         return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event):
+        # 행 아무 곳이나 클릭 → 확대 팝업 고정/해제/전환 (자식 위젯 클릭도 전파됨)
+        if self._pin is not None:
+            self._pin.on_click(self)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def _active_ma_periods(self) -> tuple:
         """관리창 체크 상태에 따라 표시할 이동평균 기간들 (예: (5, 20, 60))."""
@@ -713,8 +725,8 @@ class CompactWatchRow(QWidget):
         u = (self._ma_settings or {}).get("candle_unit", "day")
         return u if u in ("day", "week", "month") else "day"
 
-    def _show_chart_popup(self):
-        # 미니 차트가 보유한 전체 일봉 이력을 재사용 — 새 네트워크 호출은 하지 않는다
+    def show_chart_popup(self, pinned: bool = False):
+        # 미니 차트가 보유한 (이미 집계된) 캔들을 재사용 — 새 네트워크 호출은 하지 않는다
         candles = getattr(self.sparkline, "candles", None)
         if not candles or self.sparkline.mode != "candle":
             return
@@ -728,12 +740,15 @@ class CompactWatchRow(QWidget):
             display_count = self.POPUP_WEEK_BARS if unit == "week" else self.POPUP_MONTH_BARS
             chart_w = round(self.SPARK_W * self.POPUP_SCALE)
         chart_h = round(self.SPARK_H * self.POPUP_SCALE)
-        # 기간 변경 시 폭이 달라지므로(ChartPopup 은 고정 크기) 필요하면 새로 만든다.
-        if self._chart_popup is None or self._chart_popup.chart.W != chart_w:
+        # 폭이 다르거나 고정/hover 모드(입력 수신 여부)가 바뀌면 새로 만든다.
+        if (self._chart_popup is None or self._chart_popup.chart.W != chart_w
+                or self._chart_popup.interactive != pinned):
             if self._chart_popup is not None:
                 self._chart_popup.hide()
                 self._chart_popup.deleteLater()
-            self._chart_popup = ChartPopup(chart_w, chart_h, parent=self)
+            self._chart_popup = ChartPopup(chart_w, chart_h, parent=self, interactive=pinned)
+            if pinned:
+                self._chart_popup.close_requested.connect(self._on_popup_close)
         # '종목명표시'가 켜져 있으면 차트 배경에 깔 종목명을 넘긴다(꺼져 있으면 빈 값).
         s = self._ma_settings or {}
         show_name = bool(s.get("show_name", True))
@@ -749,9 +764,14 @@ class CompactWatchRow(QWidget):
             candle_unit=unit,
         )
 
-    def _hide_chart_popup(self):
+    def hide_chart_popup(self):
         if self._chart_popup is not None:
             self._chart_popup.hide()
+
+    def _on_popup_close(self):
+        # 고정 팝업 ✕ 클릭 → 컨트롤러에 해제 요청 (→ hover 재개)
+        if self._pin is not None:
+            self._pin.on_close(self)
 
     def _build_ui(self):
         hl = QHBoxLayout(self)
@@ -947,13 +967,14 @@ class TagGroupWidget(QWidget):
 
     def __init__(self, group_key: str, title: str, color: str, items: list[dict],
                  width: int | None = None, pinned: bool = False, stagger_base: int = 0,
-                 ma_settings: dict | None = None):
+                 ma_settings: dict | None = None, pin_controller=None):
         super().__init__()
         self.group_key = group_key
         self.title = title
         self.color = color
         self.items = items
         self.ma_settings = ma_settings   # 확대 팝업 이동평균선 표시 설정 (공유 dict)
+        self._pin_controller = pin_controller   # 확대 팝업 고정/hover 조율자 (공유)
         self.pinned = bool(pinned)
         self.is_expanded = self.pinned
         self.W = width or self.WIDTH
@@ -1009,7 +1030,7 @@ class TagGroupWidget(QWidget):
         pv.addSpacing(self.PANEL_TOP - 1)
         for i, item in enumerate(self.items):
             row = CompactWatchRow(item, stagger_idx=stagger_base + i, parent=self.panel,
-                                  ma_settings=self.ma_settings)
+                                  ma_settings=self.ma_settings, pin_controller=self._pin_controller)
             self.rows.append(row)
             pv.addWidget(row)
         self.panel.hide()

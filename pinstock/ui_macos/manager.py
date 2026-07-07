@@ -24,7 +24,7 @@ from ..core.api import (
     fetch_usd_krw_rate, fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES,
     WATCH_POPUP_CANDLES_LONG,
 )
-from ..ui_windows.chart_widget import aggregate_candles
+from ..ui_windows.chart_widget import aggregate_candles, PinController
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
@@ -195,6 +195,8 @@ class MacAppManager(QObject):
                                "show_name": True, "popup_months": 3,
                                "axis_date": False, "axis_price": False,
                                "show_volume": False, "candle_unit": "day"}
+        # 확대 팝업 고정/hover 조율자 — 모든 관심 행이 공유 (팝업 한 번에 1개만)
+        self.watch_pin_controller = PinController()
         self.fetchers: dict[str, StockFetcher] = {}
         self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
@@ -282,6 +284,7 @@ class MacAppManager(QObject):
         self.popover.set_market_filter(self.market_filter)
         # 확대 일봉 팝업 이동평균선 설정 — 공유 dict 참조를 주입(이후 제자리 갱신 반영)
         self.popover.set_watch_ma(self.watch_ma)
+        self.popover.set_pin_controller(self.watch_pin_controller)
 
         # 초기 데이터 푸시
         self._sync_popover_stocks()
@@ -611,6 +614,7 @@ class MacAppManager(QObject):
         win.set_us_return_basis(self.us_return_basis)
         win.set_usd_krw_rate(self.usd_krw_rate)
         win.set_watch_ma(self.watch_ma)
+        win.set_pin_controller(self.watch_pin_controller)
         win.set_market_filter(self.detached_market_filter)
         win.set_opacity(self.detached_opacity)
         if self.detached_height is not None:
