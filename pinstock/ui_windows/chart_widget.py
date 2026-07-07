@@ -64,6 +64,7 @@ class SparklineWidget(QWidget):
     DATE_AXIS_H  = 14   # 하단 날짜 보조축 라벨 높이 (확대 팝업, 날짜축 ON 시)
     VOL_PANEL_RATIO = 0.24   # 거래량 패널이 차지하는 플롯 높이 비율 (거래량 표시 ON 시)
     VOL_GAP = 4              # 가격/거래량 패널 사이 여백(px)
+    TOP_BAR_H = 22           # 확대 팝업 상단바 높이 (봉주기·이동평균 범례 · 종목명 · ✕)
 
     def __init__(self, parent=None, width: int | None = None, height: int | None = None):
         super().__init__(parent)
@@ -255,15 +256,14 @@ class SparklineWidget(QWidget):
         shown = candles[start:]
 
         painter = QPainter(self)
-        # 종목명 워터마크를 캔들보다 먼저 그려 제일 하단 레이어로 깐다 (확대 팝업 전용)
-        if self.watermark_name:
-            self._draw_watermark_name(painter)
         # 캔들은 픽셀 정렬이 더 선명 — antialias off
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        # 보조축이 켜지면 우측(가격)·하단(날짜)에 라벨 자리를 확보하고 플롯을 줄인다.
-        base = 3
-        left = top = base
+        # 확대 팝업은 위에 상단바(범례·종목명·✕) 자리를 떼어 둔다. 미니 차트는 상단바 없음.
+        base = 1
+        bar_h = self.TOP_BAR_H if (self.ma_periods or self.watermark_name or self.interactive) else 0
+        left = base
+        top = base + bar_h
         right  = base + (self.PRICE_AXIS_W if self.show_price_axis else 0)
         bottom = base + (self.DATE_AXIS_H  if self.show_date_axis  else 0)
         w = self.W - left - right
@@ -369,13 +369,16 @@ class SparklineWidget(QWidget):
                         path.moveTo(pt)
                         started = True
                 painter.drawPath(path)
-            self._draw_ma_legend(painter, base)
 
         # ── 보조축 (확대 팝업 전용) — 캔들·이동평균 위에 라벨을 얹는다 ─────────────
         if self.show_price_axis:
             self._draw_price_axis(painter, shown, mn, mx, left, top, w, price_h)
         if self.show_date_axis:
             self._draw_date_axis(painter, shown, left, top, w, h, slot)
+
+        # ── 상단바 (봉주기·이동평균 범례 + 종목명) — 예약된 top strip (✕ 는 팝업이 얹음) ──
+        if bar_h:
+            self._draw_top_bar(painter, base, bar_h)
 
         # ── 봉 hover 십자선 + OHLC 박스 (고정 팝업 전용) — 최상단 레이어 ──────────
         if self.interactive and self.hover_index is not None:
@@ -434,7 +437,7 @@ class SparklineWidget(QWidget):
         painter.setFont(QFont("Malgun Gothic", 8))
         fm = painter.fontMetrics()
         painter.setPen(QColor(C['subtext']))
-        y = top + h + fm.ascent() + 1
+        y = top + h + self.DATE_AXIS_H - 2               # 날짜축 밴드 하단에 밀착
         for i in sorted({0, n // 3, 2 * n // 3, n - 1}):
             label = self._fmt_axis_date(shown[i].get("date", ""))
             if not label:
@@ -504,38 +507,30 @@ class SparklineWidget(QWidget):
             ty += line_h
 
     # ── 배경 종목명 워터마크 — 캔들 뒤에 아주 은은하게 반투명으로 ────────────────
-    def _draw_watermark_name(self, painter: QPainter):
-        """확대 차트 중앙에 종목명을 반투명 큰 글씨로 깐다(제일 하단 레이어).
-        위젯 폭을 넘으면 폰트를 줄여 한 줄에 들어오게 한다."""
-        name = (self.watermark_name or "").strip()
-        if not name:
-            return
-        painter.save()
+    # ── 상단바 (확대 팝업) — 좌: 봉주기·이동평균 범례 / 중: 종목명 / 우: ✕(팝업이 얹음) ──
+    def _draw_top_bar(self, painter: QPainter, base: int, bar_h: int):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(8, 6, self.W - 16, self.H - 12)
-        px = max(11, int(self.H * 0.16))
-        font = QFont("Malgun Gothic")
-        font.setBold(True)
-        while px > 11:
-            font.setPixelSize(px)
-            if QFontMetricsF(font).horizontalAdvance(name) <= rect.width():
-                break
-            px -= 1
-        font.setPixelSize(px)
-        painter.setFont(font)
-        color = QColor(C['text'])
-        color.setAlpha(42)                 # 아주 은은하게 (다크 배경 위 반투명)
-        painter.setPen(color)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, name)
-        painter.restore()
+        y = base + 14                                    # 상단바 baseline (범례·종목명 공통)
+        # 종목명 — 팝업 사각형 정중앙에 고정 + 범례보다 먼저 그려 뒤(behind)에 둔다.
+        # 긴 이름이 범례와 겹치면 범례가 위로 덮는다.
+        name = (self.watermark_name or "").strip()
+        if name:
+            painter.setFont(QFont("Malgun Gothic", 10))
+            fm = painter.fontMetrics()
+            max_w = max(40, self.W - 120)                 # 좌우 여백(범례·✕ 자리)
+            elided = fm.elidedText(name, Qt.TextElideMode.ElideRight, max_w)
+            tw = fm.horizontalAdvance(elided)
+            painter.setPen(QColor(C['subtext']))
+            painter.drawText(QPointF(self.W / 2 - tw / 2, y), elided)   # 팝업 정중앙
+        # 좌: 봉주기·이동평균 범례 (종목명 위에 그림)
+        self._draw_ma_legend(painter, base + 5, y)
 
-    # ── 이동평균 범례 (좌상단) — 색 숫자 미니멀: 5 · 20 · 60 ──────────────────
-    def _draw_ma_legend(self, painter: QPainter, pad: int):
+    # ── 이동평균 범례 — 봉주기(D/W/M) + 5·20·60 (색 숫자). 오른쪽 끝 x 를 반환. ──
+    def _draw_ma_legend(self, painter: QPainter, x0: float, y: float) -> float:
         painter.setFont(QFont("Malgun Gothic", 9, QFont.Weight.DemiBold))
         fm = painter.fontMetrics()
-        x = pad + 4
-        y = pad + 2 + fm.ascent()
-        # 봉주기 라벨(D/W/M)을 범례 앞에 한 번 — 5·20·60 이 어느 단위(일/주/월봉)인지 알려준다.
+        x = x0
+        # 봉주기 라벨(D/W/M) — 5·20·60 이 어느 단위(일/주/월봉)인지 알려준다.
         unit_label = {"day": "D", "week": "W", "month": "M"}.get(self.candle_unit, "")
         if unit_label:
             painter.setPen(QColor(C['subtext']))
@@ -552,6 +547,7 @@ class SparklineWidget(QWidget):
             label = str(p)
             painter.drawText(int(x), int(y), label)
             x += fm.horizontalAdvance(label)
+        return x
 
 
 # ─── 확대 일봉 hover 팝업 (Windows 떠있는 위젯 · macOS 팝오버 공용) ───────────────
@@ -562,7 +558,7 @@ class ChartPopup(QWidget):
     입력 통과(WindowTransparentForInput) 윈도우라 hover 가 끊기지 않는다.
     """
 
-    PAD = 6   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
+    PAD = 2   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
 
     close_requested = pyqtSignal()   # ✕ 클릭 (고정 모드 전용)
 
@@ -613,10 +609,10 @@ class ChartPopup(QWidget):
             self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.close_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {C['surface']}; color: {C['subtext']};
-                    border: none; border-radius: 9px; font-size: 11px;
+                    background: transparent; color: {C['subtext']};
+                    border: none; font-size: 13px;
                 }}
-                QPushButton:hover {{ background: {C['surface2']}; color: {C['text']}; }}
+                QPushButton:hover {{ color: {C['text']}; }}
             """)
             self.close_btn.clicked.connect(self.close_requested.emit)
             self.close_btn.raise_()
