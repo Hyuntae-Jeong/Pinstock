@@ -292,13 +292,45 @@ EXCEL_COLUMNS = [
     ("수량",     "quantity"),
 ]
 
+EXCEL_OPTIONAL_COLUMNS = [
+    ("시장",     "market"),
+    ("통화",     "currency"),
+    ("매수환율", "buy_exchange_rate"),
+]
+
+_US_TICKER_RE = re.compile(r"^\^?[A-Z][A-Z0-9.-]{0,14}$")
+
+
+def _display_market(market: str) -> str:
+    return MARKET_US if str(market or "").strip().upper() == MARKET_US else MARKET_KR
+
+
+def _normalize_excel_market(value, code: str) -> str:
+    raw = str(value or "").strip().upper()
+    if raw in {MARKET_US, "USA", "US STOCK", "U.S.", "미국", "미장"}:
+        return MARKET_US
+    if raw in {MARKET_KR, "KOR", "KOREA", "한국", "국내", "국장"}:
+        return MARKET_KR
+    if len(code) == 6 and code.isalnum() and any(ch.isdigit() for ch in code):
+        return MARKET_KR
+    if _US_TICKER_RE.match(code):
+        return MARKET_US
+    return MARKET_KR
+
+
+def _normalize_excel_currency(value, market: str) -> str:
+    default = CURRENCY_USD if market == MARKET_US else CURRENCY_KRW
+    currency = str(value or default).strip().upper()
+    return currency or default
+
 
 # ─── Excel import/export ─────────────────────────────────────────────────────
 def export_stocks_to_excel(stocks: list[dict], path: str,
                            current_prices: dict | None = None,
                            usd_krw_rate: float | None = None) -> None:
     """보유 종목을 .xlsx 로 내보내기.
-    - 종목코드는 텍스트 셀로 저장 (선행 0 보존: '005930', '0183J0').
+    - 종목코드는 텍스트 셀로 저장 (선행 0/미국 티커 보존: '005930', 'NVDA').
+    - 시장/통화/매수환율은 선택 컬럼으로 함께 저장해 미국 주식 라운드트립을 보존한다.
     - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음.
     - current_prices ({code: price}) 와 usd_krw_rate 가 주어지면 시트 하단에
       포트폴리오 요약(총 매입금액 / 평가금액 / 평가손익 / 수익률)을 빈 행 한
@@ -314,7 +346,8 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
     # 종목별 수익 금액/수익률은 현재가·환율로 계산되는 값이라 EXCEL_COLUMNS(=import
     # 필수 컬럼)에는 넣지 않고 export 시에만 뒤에 덧붙인다. import 은 추가 컬럼을
     # 무시하므로 라운드트립에 영향 없음.
-    headers = [h for h, _ in EXCEL_COLUMNS] + ["수익금액 (원)", "수익률 (%)"]
+    export_columns = EXCEL_COLUMNS + EXCEL_OPTIONAL_COLUMNS
+    headers = [h for h, _ in export_columns] + ["수익금액 (원)", "수익률 (%)"]
     ws.append(headers)
     bold = Font(bold=True)
     for col_idx in range(1, len(headers) + 1):
@@ -323,23 +356,33 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
     prices = current_prices or {}
     for s in stocks:
         row = []
-        for _, key in EXCEL_COLUMNS:
+        normalized = normalize_stock_schema(s)
+        market = normalized["market"]
+        for _, key in export_columns:
             if key == "code":
-                row.append(str(s.get("code", "")))
+                row.append(str(normalized.get("code", "")))
             elif key == "name":
-                row.append(s.get("name", s.get("code", "")))
+                row.append(normalized.get("name", normalized.get("code", "")))
+            elif key == "market":
+                row.append(_display_market(market))
+            elif key == "currency":
+                row.append(normalized.get("currency", CURRENCY_USD if market == MARKET_US else CURRENCY_KRW))
+            elif key == "buy_exchange_rate":
+                row.append(normalized.get("buy_exchange_rate", ""))
             elif key == "quantity":
-                row.append(float(s.get(key, 0)))
+                row.append(float(normalized.get(key, 0)))
+            elif key == "avg_price" and market == MARKET_US:
+                row.append(float(normalized.get(key, 0)))
             else:
-                row.append(int(s.get(key, 0)))
-        metrics = stock_metrics(s, prices.get(s.get("code")), usd_krw_rate)
+                row.append(int(normalized.get(key, 0)))
+        metrics = stock_metrics(normalized, prices.get(normalized.get("code")), usd_krw_rate)
         row.append(metrics["profit"])
         row.append(round(metrics["profit_rate"], 2))
         ws.append(row)
 
     # 수익금액/수익률 컬럼 숫자 포맷 (헤더 제외)
-    profit_col_idx = len(EXCEL_COLUMNS) + 1
-    rate_col_idx = len(EXCEL_COLUMNS) + 2
+    profit_col_idx = len(export_columns) + 1
+    rate_col_idx = len(export_columns) + 2
     for row_idx in range(2, ws.max_row + 1):
         pc = ws.cell(row=row_idx, column=profit_col_idx)
         pc.number_format = "#,##0"
@@ -349,7 +392,7 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
         rc.alignment = Alignment(horizontal="right")
 
     # 종목코드 컬럼을 텍스트 포맷으로 (선행 0/영문 안전)
-    code_col_idx = next(i for i, (_, k) in enumerate(EXCEL_COLUMNS, 1) if k == "code")
+    code_col_idx = next(i for i, (_, k) in enumerate(export_columns, 1) if k == "code")
     code_letter = ws.cell(row=1, column=code_col_idx).column_letter
     for cell in ws[code_letter][1:]:   # 헤더 제외
         cell.number_format = "@"
@@ -357,6 +400,7 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
 
     # 컬럼 너비 자동 조정 (간단히 헤더+여유)
     widths = {"종목코드": 12, "종목명": 28, "평단가": 12, "수량": 10,
+              "시장": 8, "통화": 8, "매수환율": 12,
               "수익금액 (원)": 14, "수익률 (%)": 12}
     for col_idx, header in enumerate(headers, 1):
         letter = ws.cell(row=1, column=col_idx).column_letter
@@ -417,8 +461,10 @@ def import_stocks_from_excel(path: str) -> list[dict]:
             + f"\n(필요한 헤더: {', '.join(required)})"
         )
 
-    # 헤더명 → 컬럼 인덱스
-    idx_of = {h: header_row.index(h) for h in required}
+    # 헤더명 → 컬럼 인덱스. 시장/통화/매수환율은 새 export 에만 있는 선택 컬럼이다.
+    optional = [h for h, _ in EXCEL_OPTIONAL_COLUMNS]
+    idx_of = {h: header_row.index(h) for h in required if h in header_row}
+    idx_of.update({h: header_row.index(h) for h in optional if h in header_row})
 
     stocks: list[dict] = []
     seen_codes: set[str] = set()
@@ -435,10 +481,13 @@ def import_stocks_from_excel(path: str) -> list[dict]:
 
         raw_code = cell("종목코드")
         raw_name = cell("종목명")
-        raw_avg  = cell("평단가")
-        raw_qty  = cell("수량")
+        raw_avg = cell("평단가")
+        raw_qty = cell("수량")
+        raw_market = cell("시장") if "시장" in idx_of else None
+        raw_currency = cell("통화") if "통화" in idx_of else None
+        raw_buy_rate = cell("매수환율") if "매수환율" in idx_of else None
 
-        # 종목코드: 숫자로 읽혔어도 문자열로 정규화 후 6자 영숫자 검증 + 대문자
+        # 종목코드: 숫자로 읽혔어도 문자열로 정규화 후 시장별로 검증 + 대문자
         if raw_code is None or str(raw_code).strip() == "":
             errors.append(f"{row_num}행: 종목코드가 비어 있습니다.")
             continue
@@ -446,8 +495,13 @@ def import_stocks_from_excel(path: str) -> list[dict]:
         # 엑셀이 숫자로 인식해 선행 0 손실된 경우 6자리로 패딩 (전부 숫자일 때만)
         if code.isdigit() and len(code) < 6:
             code = code.zfill(6)
-        if len(code) != 6 or not code.isalnum():
-            errors.append(f"{row_num}행: 종목코드 '{code}' 가 6자리 영숫자가 아닙니다.")
+        market = _normalize_excel_market(raw_market, code)
+        currency = _normalize_excel_currency(raw_currency, market)
+        if market == MARKET_KR and (len(code) != 6 or not code.isalnum()):
+            errors.append(f"{row_num}행: 한국 종목코드 '{code}' 가 6자리 영숫자가 아닙니다.")
+            continue
+        if market == MARKET_US and not _US_TICKER_RE.match(code):
+            errors.append(f"{row_num}행: 미국 종목코드 '{code}' 가 올바른 티커 형식이 아닙니다.")
             continue
         if code in seen_codes:
             errors.append(f"{row_num}행: 종목코드 '{code}' 가 중복되었습니다.")
@@ -455,7 +509,7 @@ def import_stocks_from_excel(path: str) -> list[dict]:
 
         # 평단가/수량 변환. 수량은 소수점 3자리까지 허용한다.
         try:
-            avg_price = int(float(raw_avg)) if raw_avg is not None and str(raw_avg).strip() != "" else 0
+            avg_price = float(raw_avg) if raw_avg is not None and str(raw_avg).strip() != "" else 0
         except (TypeError, ValueError):
             errors.append(f"{row_num}행: 평단가 '{raw_avg}' 가 숫자가 아닙니다.")
             continue
@@ -472,13 +526,24 @@ def import_stocks_from_excel(path: str) -> list[dict]:
             continue
 
         name = str(raw_name).strip() if raw_name is not None and str(raw_name).strip() else code
-
-        stocks.append(normalize_stock_schema({
+        stock = {
             "code":      code,
             "name":      name,
-            "avg_price": avg_price,
+            "market":    market,
+            "currency":  currency,
+            "avg_price": round(avg_price, 4) if market == MARKET_US else int(round(avg_price)),
             "quantity":  quantity,
-        }))
+        }
+        if market == MARKET_US and raw_buy_rate is not None and str(raw_buy_rate).strip() != "":
+            try:
+                buy_exchange_rate = float(raw_buy_rate)
+            except (TypeError, ValueError):
+                errors.append(f"{row_num}행: 매수환율 '{raw_buy_rate}' 가 숫자가 아닙니다.")
+                continue
+            if buy_exchange_rate > 0:
+                stock["buy_exchange_rate"] = buy_exchange_rate
+
+        stocks.append(normalize_stock_schema(stock))
         seen_codes.add(code)
 
     if errors:
