@@ -662,9 +662,9 @@ class WatchRow(QWidget):
         return tuple(p for p, key in ((5, "ma5"), (20, "ma20"), (60, "ma60")) if s.get(key, True))
 
     def _popup_months(self) -> int:
-        """확대 차트 표시 기간(1~6개월). 관리창 설정(공유 dict)을 따른다."""
+        """일봉 확대 차트 조회 기간(3~12개월). 관리창 설정(공유 dict)을 따른다."""
         s = self._ma_settings or {}
-        return max(1, min(6, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
+        return max(3, min(12, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
 
     def _candle_unit(self) -> str:
         """봉주기 설정(day/week/month). 잘못된 값이면 day."""
@@ -679,12 +679,15 @@ class WatchRow(QWidget):
         # 일봉은 기간(개월)이 늘수록 가로 폭만 비례 확장. 주/월봉은 고정 개수 + 3개월 기준 고정 폭.
         unit = self._candle_unit()
         if unit == "day":
-            months = self._popup_months()
-            display_count = months * self.TRADING_DAYS_PER_MONTH
-            chart_w = round(self.sparkline.width() * self.POPUP_SCALE * months / self.POPUP_BASE_MONTHS)
+            # 일봉: 뷰포트 3개월 고정폭 + 나머지 구간은 드래그로 스크롤(기간=스크롤 범위).
+            months = self._popup_months()                                   # 3~12
+            display_count = self.POPUP_BASE_MONTHS * self.TRADING_DAYS_PER_MONTH   # 3개월 뷰포트
+            chart_w = round(self.sparkline.width() * self.POPUP_SCALE)       # 3개월 고정폭
+            scroll_limit = max(0, months * self.TRADING_DAYS_PER_MONTH - display_count)
         else:
             display_count = self.POPUP_WEEK_BARS if unit == "week" else self.POPUP_MONTH_BARS
             chart_w = round(self.sparkline.width() * self.POPUP_SCALE)
+            scroll_limit = 0
         chart_h = round(self.sparkline.height() * self.POPUP_SCALE)
         # 폭이 다르거나 고정/hover 모드(입력 수신 여부)가 바뀌면 새로 만든다.
         if (self._chart_popup is None or self._chart_popup.chart.W != chart_w
@@ -708,6 +711,7 @@ class WatchRow(QWidget):
             show_price_axis=bool(s.get("axis_price", False)),
             show_volume=bool(s.get("show_volume", False)),
             candle_unit=unit,
+            scroll_limit=scroll_limit,
         )
 
     def hide_chart_popup(self):

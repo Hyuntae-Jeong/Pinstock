@@ -596,7 +596,7 @@ class WidgetManager:
                         self.watch_ma[k] = bool(ma[k])
                 pm = ma.get("popup_months")
                 if isinstance(pm, (int, float)):
-                    self.watch_ma["popup_months"] = max(1, min(6, int(pm)))
+                    self.watch_ma["popup_months"] = max(3, min(12, int(pm)))
                 cu = ma.get("candle_unit")
                 if cu in ("day", "week", "month"):
                     self.watch_ma["candle_unit"] = cu

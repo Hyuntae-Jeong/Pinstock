@@ -94,6 +94,14 @@ class SparklineWidget(QWidget):
         self._hit_left = 0.0     # 마우스 x → 캔들 인덱스 역산용 (paint 시 캐시)
         self._hit_slot = 0.0
         self._hit_n = 0
+        self._hit_n_all = 0      # 전체 캔들 수 (paint 시 캐시 — 스크롤 클램프용)
+        # 가로 스크롤(드래그 팬) — 일봉 고정 팝업 전용. scroll_limit>0 이면 활성.
+        self.scroll_limit: int = 0          # 최신→과거로 스크롤 가능한 최대 캔들 수
+        self.scroll_offset: int = 0         # 현재 스크롤 위치(0=최신 뷰)
+        self._dragging: bool = False
+        self._drag_x: float = 0.0
+        self._drag_start_offset: int = 0
+        self._wheel_accum: float = 0.0      # 트랙패드 가로 스크롤 픽셀 누적(부드러운 팬)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -105,7 +113,7 @@ class SparklineWidget(QWidget):
 
     def set_candles(self, candles: list[dict], ma_periods=(), display_count: int | None = None,
                     show_date_axis: bool = False, show_price_axis: bool = False,
-                    show_volume: bool = False, candle_unit: str = "day"):
+                    show_volume: bool = False, candle_unit: str = "day", scroll_limit: int = 0):
         """일봉 캔들 표시.
         - candles: 전체 OHLC 이력 (이동평균은 표시 구간 밖 데이터까지 평균에 사용)
         - ma_periods: 그릴 이동평균 기간들 (예: (5, 20, 60)). 빈 값이면 안 그림.
@@ -122,6 +130,10 @@ class SparklineWidget(QWidget):
         self.show_price_axis = show_price_axis
         self.show_volume = show_volume
         self.candle_unit = candle_unit
+        self.scroll_limit = max(0, scroll_limit)
+        self.scroll_offset = 0
+        self.setCursor(Qt.CursorShape.OpenHandCursor if scroll_limit > 0
+                       else Qt.CursorShape.ArrowCursor)
         self.hover_index = None
         self.update()
 
@@ -147,8 +159,60 @@ class SparklineWidget(QWidget):
         else:
             self._paint_line()
 
-    # ── 봉 hover (고정 팝업에서 interactive=True 일 때만 동작) ──────────────────
+    # ── 가로 스크롤(드래그 팬) — scroll_limit>0 인 일봉 고정 팝업 전용 ─────────────
+    def mousePressEvent(self, event):
+        if self.scroll_limit > 0 and self._hit_slot > 0:
+            self._dragging = True
+            self._drag_x = event.position().x()
+            self._drag_start_offset = self.scroll_offset
+            self.hover_index = None                      # 드래그 중엔 OHLC 숨김
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.update()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging:
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    # ── 가로 스크롤 (트랙패드 옆스와이프 · Shift+휠 · 가로 휠) — 드래그와 방향 동일 ──
+    def wheelEvent(self, event):
+        if self.scroll_limit <= 0 or self._hit_slot <= 0:
+            return super().wheelEvent(event)
+        px = event.pixelDelta().x()          # 트랙패드(부드러운 픽셀 델타)
+        ax = event.angleDelta().x()          # 휠 notch(가로 성분)
+        if px == 0 and ax == 0:              # 가로 성분 없음(세로 스크롤) → 무시
+            return super().wheelEvent(event)
+        if px != 0:
+            self._wheel_accum += px          # 픽셀 누적 → 봉 단위로 환산(부드럽게)
+            step = int(self._wheel_accum / self._hit_slot)
+            self._wheel_accum -= step * self._hit_slot
+        else:
+            step = int(round(ax / 120)) * 3  # 가로 휠: notch당 3봉
+        if step != 0:
+            off = self.scroll_offset + step  # 우로 스와이프(+) → 과거(왼쪽) 열람 (드래그와 동일)
+            off = max(0, min(off, min(self._hit_n_all - self._hit_n, self.scroll_limit)))
+            if off != self.scroll_offset:
+                self.scroll_offset = off
+                self.hover_index = None
+                self.update()
+        event.accept()
+
+    # ── 마우스 이동: 드래그 중이면 가로 팬, 아니면 봉 hover(interactive) ──────────
     def mouseMoveEvent(self, event):
+        if self._dragging and self._hit_slot > 0:
+            delta = event.position().x() - self._drag_x   # 우로 끌면 과거(왼쪽) 열람
+            off = self._drag_start_offset + round(delta / self._hit_slot)
+            off = max(0, min(off, min(self._hit_n_all - self._hit_n, self.scroll_limit)))
+            if off != self.scroll_offset:
+                self.scroll_offset = off
+                self.update()
+            return
         if not self.interactive or self.mode != "candle" or self._hit_n <= 0 or self._hit_slot <= 0:
             return super().mouseMoveEvent(event)
         i = int((event.position().x() - self._hit_left) / self._hit_slot)
@@ -252,8 +316,11 @@ class SparklineWidget(QWidget):
         n_all = len(candles)
         dc = self.display_count or n_all
         dc = max(1, min(dc, n_all))
-        start = n_all - dc                 # 표시 시작 글로벌 인덱스
-        shown = candles[start:]
+        # 가로 스크롤: 최신에서 scroll_offset 만큼 과거로 밀린 dc개 윈도우를 그린다.
+        max_off = min(n_all - dc, self.scroll_limit)
+        self.scroll_offset = max(0, min(self.scroll_offset, max_off))
+        start = (n_all - dc) - self.scroll_offset   # 표시 시작 글로벌 인덱스
+        shown = candles[start:start + dc]
 
         painter = QPainter(self)
         # 캔들은 픽셀 정렬이 더 선명 — antialias off
@@ -288,7 +355,7 @@ class SparklineWidget(QWidget):
         mn = min(c["low"]  for c in shown)
         mx = max(c["high"] for c in shown)
         for series in ma_series.values():
-            for gi in range(start, n_all):
+            for gi in range(start, start + dc):        # 보이는 윈도우만 (스크롤 반영)
                 v = series[gi]
                 if v is not None:
                     mn = min(mn, v)
@@ -302,6 +369,7 @@ class SparklineWidget(QWidget):
         body_w = max(1.5, slot * 0.7)
         # 마우스 x → 캔들 인덱스 역산에 필요한 값 캐시 (고정 팝업 봉 hover 용)
         self._hit_left, self._hit_slot, self._hit_n = left, slot, len(shown)
+        self._hit_n_all = n_all
 
         red  = QColor(C['red'])
         blue = QColor(C['blue'])
@@ -620,12 +688,13 @@ class ChartPopup(QWidget):
     def show_with(self, candles: list, anchor_tl: QPoint, anchor_size: QSize,
                   ma_periods=(), display_count: int | None = None, name: str = "",
                   show_date_axis: bool = False, show_price_axis: bool = False,
-                  show_volume: bool = False, candle_unit: str = "day"):
+                  show_volume: bool = False, candle_unit: str = "day", scroll_limit: int = 0):
         """기존 캔들로 확대 차트를 그리고 소스 차트(anchor) 위쪽에 띄운다."""
         self.chart.watermark_name = name or ""   # 배경 종목명 (빈 값이면 안 그림)
         self.chart.set_candles(candles, ma_periods=ma_periods, display_count=display_count,
                                show_date_axis=show_date_axis, show_price_axis=show_price_axis,
-                               show_volume=show_volume, candle_unit=candle_unit)
+                               show_volume=show_volume, candle_unit=candle_unit,
+                               scroll_limit=scroll_limit)
         self._position(anchor_tl, anchor_size)
         self.show()
         self.raise_()
