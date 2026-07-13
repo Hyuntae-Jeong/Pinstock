@@ -783,6 +783,13 @@ class PinController:
         if self._alive(r):
             r.hide_chart_popup()
 
+    def dismiss(self):
+        """고정·hover 팝업을 모두 닫고 상태 초기화 (예: 맥 팝오버가 숨겨질 때)."""
+        if self._alive(self._hover):
+            self._hover.hide_chart_popup()
+        self._hover = None
+        self._unpin()
+
     def forget(self, row):
         """행이 파괴/정지될 때 호출 — dangling 참조 정리."""
         if self._pinned is row:

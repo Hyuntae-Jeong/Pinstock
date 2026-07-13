@@ -1437,6 +1437,12 @@ class Popover(QWidget):
         """확대 팝업 고정/hover 조율자 주입 (모든 관심 행이 공유)."""
         self._watch_pin_controller = controller
 
+    def hideEvent(self, event):
+        # 팝오버가 숨겨지면 고정된 확대 팝업도 함께 해제한다 (맥: 다시 열 때 핀 잔존 방지).
+        if self._watch_pin_controller is not None:
+            self._watch_pin_controller.dismiss()
+        super().hideEvent(event)
+
     def _compute_watch_groups(self, visible_items: list[dict]) -> list[dict]:
         """visible 관심종목을 태그 등록 순서로 그룹화. 멤버가 있는 태그만,
         마지막에 '태그 없음' 그룹 (Windows manager._compute_watch_groups 와 동일 규칙)."""
