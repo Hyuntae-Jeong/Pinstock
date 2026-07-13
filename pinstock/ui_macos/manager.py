@@ -22,7 +22,9 @@ from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
     fetch_usd_krw_rate, fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES,
+    WATCH_POPUP_CANDLES_LONG,
 )
+from ..ui_windows.chart_widget import aggregate_candles, PinController
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
@@ -133,10 +135,12 @@ class WatchFetcher(QObject):
     STAGGER_MS = 600
     INTERVAL_MS = 60_000
 
-    def __init__(self, item: dict, stagger_idx: int = 0, parent: QObject | None = None):
+    def __init__(self, item: dict, stagger_idx: int = 0, parent: QObject | None = None,
+                 ma_settings: dict | None = None):
         super().__init__(parent)
         self.item = item
         self.code = item["code"]
+        self._ma_settings = ma_settings if ma_settings is not None else {}
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._fetch)
         QTimer.singleShot(stagger_idx * self.STAGGER_MS, self._start)
@@ -150,11 +154,15 @@ class WatchFetcher(QObject):
         result = fetch_watch_quote(self.item)
         if result:
             self.price_updated.emit(self.code, result)
-        # 확대 팝업의 3개월·이동평균선까지 그릴 수 있게 긴 이력을 받는다.
-        # (미니 차트에는 행/팝업이 최근 일부만 표시)
-        daily = fetch_watch_daily(self.item, max_candles=WATCH_POPUP_CANDLES)
+        # 확대 팝업의 이동평균선까지 그릴 수 있게 긴 이력을 받는다. 주/월봉이면 더 긴
+        # 이력을 받아 집계 후 넘긴다. (미니·팝업은 최근 일부만 표시)
+        unit = self._ma_settings.get("candle_unit", "day")
+        if unit not in ("day", "week", "month"):
+            unit = "day"
+        max_c = WATCH_POPUP_CANDLES_LONG if unit != "day" else WATCH_POPUP_CANDLES
+        daily = fetch_watch_daily(self.item, max_candles=max_c)
         if daily and daily.get("candles"):
-            self.daily_updated.emit(self.code, daily["candles"])
+            self.daily_updated.emit(self.code, aggregate_candles(daily["candles"], unit))
 
     def stop(self):
         self.timer.stop()
@@ -185,7 +193,10 @@ class MacAppManager(QObject):
         # 확대 일봉 팝업 이동평균선 표시 설정 — 관심 행/hover 팝업이 공유(제자리 갱신).
         self.watch_ma: dict = {"ma5": True, "ma20": True, "ma60": True,
                                "show_name": True, "popup_months": 3,
-                               "axis_date": False, "axis_price": False}
+                               "axis_date": False, "axis_price": False,
+                               "show_volume": False, "candle_unit": "day"}
+        # 확대 팝업 고정/hover 조율자 — 모든 관심 행이 공유 (팝업 한 번에 1개만)
+        self.watch_pin_controller = PinController()
         self.fetchers: dict[str, StockFetcher] = {}
         self.watch_fetchers: dict[str, WatchFetcher] = {}   # 관심종목 일봉 폴러
         self.current_prices: dict[str, float] = {}
@@ -273,6 +284,7 @@ class MacAppManager(QObject):
         self.popover.set_market_filter(self.market_filter)
         # 확대 일봉 팝업 이동평균선 설정 — 공유 dict 참조를 주입(이후 제자리 갱신 반영)
         self.popover.set_watch_ma(self.watch_ma)
+        self.popover.set_pin_controller(self.watch_pin_controller)
 
         # 초기 데이터 푸시
         self._sync_popover_stocks()
@@ -472,7 +484,7 @@ class MacAppManager(QObject):
     # ── 관심종목 폴링 워커 관리 ─────────────────────────────────────────────
     def _spawn_watch_fetcher(self, item: dict, stagger_idx: int = 0):
         code = item["code"]
-        f = WatchFetcher(item, stagger_idx, parent=self)
+        f = WatchFetcher(item, stagger_idx, parent=self, ma_settings=self.watch_ma)
         f.price_updated.connect(self._on_watch_price_updated)
         f.daily_updated.connect(self._on_watch_daily_updated)
         self.watch_fetchers[code] = f
@@ -602,6 +614,7 @@ class MacAppManager(QObject):
         win.set_us_return_basis(self.us_return_basis)
         win.set_usd_krw_rate(self.usd_krw_rate)
         win.set_watch_ma(self.watch_ma)
+        win.set_pin_controller(self.watch_pin_controller)
         win.set_market_filter(self.detached_market_filter)
         win.set_opacity(self.detached_opacity)
         if self.detached_height is not None:
@@ -791,12 +804,15 @@ class MacAppManager(QObject):
             # popup_months 만 정수(1~6)로, 나머지 키는 불리언으로 받는다.
             ma = data.get("watch_ma")
             if isinstance(ma, dict):
-                for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
+                for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price", "show_volume"):
                     if k in ma:
                         self.watch_ma[k] = bool(ma[k])
                 pm = ma.get("popup_months")
                 if isinstance(pm, (int, float)):
-                    self.watch_ma["popup_months"] = max(1, min(6, int(pm)))
+                    self.watch_ma["popup_months"] = max(3, min(12, int(pm)))
+                cu = ma.get("candle_unit")
+                if cu in ("day", "week", "month"):
+                    self.watch_ma["candle_unit"] = cu
             master = data.get("master") or {}
             self.master_visible = bool(master.get("visible", True))
             pos = master.get("pos")
@@ -990,19 +1006,27 @@ class MacAppManager(QObject):
         if not dlg.exec():
             return
         old_codes = {w["code"] for w in self.watchlist}
+        old_unit = self.watch_ma.get("candle_unit", "day")
         self.watchlist = normalize_watchlist_schema(dlg.get_watchlist())
         self.watch_tags = normalize_tags(dlg.get_tags())
         self.watch_ma.update(dlg.get_ma_settings())
         prune_watch_tags(self.watchlist, self.watch_tags)
         new_codes = {w["code"] for w in self.watchlist}
-        # 삭제된 관심종목: 폴러 정지 / 추가된 관심종목: 폴러 시작
-        for code in old_codes - new_codes:
-            self._kill_watch_fetcher(code)
-        added_idx = 0
-        for w in self.watchlist:
-            if w["code"] not in old_codes:
-                self._spawn_watch_fetcher(w, stagger_idx=added_idx)
-                added_idx += 1
+        if self.watch_ma.get("candle_unit", "day") != old_unit:
+            # 봉주기 변경 → 모든 폴러를 새 단위·이력 길이로 재시작(캔들 데이터가 달라짐)
+            for code in list(self.watch_fetchers):
+                self._kill_watch_fetcher(code)
+            for i, w in enumerate(self.watchlist):
+                self._spawn_watch_fetcher(w, stagger_idx=i)
+        else:
+            # 삭제된 관심종목: 폴러 정지 / 추가된 관심종목: 폴러 시작
+            for code in old_codes - new_codes:
+                self._kill_watch_fetcher(code)
+            added_idx = 0
+            for w in self.watchlist:
+                if w["code"] not in old_codes:
+                    self._spawn_watch_fetcher(w, stagger_idx=added_idx)
+                    added_idx += 1
         self._save_config()
         self._sync_popover_watchlist()
 

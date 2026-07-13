@@ -2028,14 +2028,18 @@ class ManageWatchlistDialog(QDialog):
         # popup_months 만 정수(1~6), 나머지는 on/off 불리언이다.
         self._ma_settings = {"ma5": True, "ma20": True, "ma60": True,
                              "show_name": True, "popup_months": 3,
-                             "axis_date": False, "axis_price": False}
+                             "axis_date": False, "axis_price": False,
+                             "show_volume": False, "candle_unit": "day"}
         if isinstance(ma_settings, dict):
-            for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price"):
+            for k in ("ma5", "ma20", "ma60", "show_name", "axis_date", "axis_price", "show_volume"):
                 if k in ma_settings:
                     self._ma_settings[k] = bool(ma_settings[k])
             pm = ma_settings.get("popup_months")
             if isinstance(pm, (int, float)):
-                self._ma_settings["popup_months"] = max(1, min(6, int(pm)))
+                self._ma_settings["popup_months"] = max(3, min(12, int(pm)))
+            cu = ma_settings.get("candle_unit")
+            if cu in ("day", "week", "month"):
+                self._ma_settings["candle_unit"] = cu
 
         self.setWindowTitle("관심종목 관리")
         # 긴 종목명(예: State Street SPDR S&P …)이 잘리지 않게 기본 폭을 넉넉히.
@@ -2138,22 +2142,44 @@ class ManageWatchlistDialog(QDialog):
         )
         ma_row.addWidget(self._show_name_check)
 
-        # 확대 차트 표시 기간 (1~6개월) — 캔들 크기·세로는 그대로, 가로 폭만 비례 확장.
+        # 봉주기 (일봉/주봉/월봉) — 주·월봉은 일봉을 묶어 표시(기간 콤보는 일봉 전용).
         ma_row.addSpacing(8)
-        period_lbl = QLabel("기간")
-        period_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
-        ma_row.addWidget(period_lbl)
+        unit_lbl = QLabel("봉주기")
+        unit_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        ma_row.addWidget(unit_lbl)
+        self._unit_combo = _NoScrollComboBox()
+        self._unit_combo.setToolTip("일봉/주봉/월봉 — 주·월봉은 일봉을 묶어 표시합니다")
+        for _label, _val in (("일봉", "day"), ("주봉", "week"), ("월봉", "month")):
+            self._unit_combo.addItem(_label, _val)
+        _ui = self._unit_combo.findData(self._ma_settings.get("candle_unit", "day"))
+        self._unit_combo.setCurrentIndex(_ui if _ui >= 0 else 0)
+        self._unit_combo.setFixedWidth(72)
+        ma_row.addWidget(self._unit_combo)
+
+        # 확대 차트 조회 기간 (일봉 전용, 3~12개월) — 뷰포트는 3개월 고정, 나머지는 드래그로 스크롤.
+        # 주·월봉은 고정 범위라 기간 콤보 대신 안내 문구를 보여준다.
+        ma_row.addSpacing(8)
+        self._period_lbl = QLabel("기간")
+        self._period_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        ma_row.addWidget(self._period_lbl)
         self._period_combo = _NoScrollComboBox()
-        self._period_combo.setToolTip("확대 차트에 표시할 기간 — 길수록 차트가 가로로 넓어집니다")
-        for m in range(1, 7):
+        self._period_combo.setToolTip("일봉 조회 기간(3~12개월) — 뷰포트는 3개월, 나머지는 드래그로 스크롤")
+        for m in (3, 6, 9, 12):
             self._period_combo.addItem(f"{m}개월", m)
         cur = int(self._ma_settings.get("popup_months", 3))
         idx = self._period_combo.findData(cur)
-        self._period_combo.setCurrentIndex(idx if idx >= 0 else 2)
+        self._period_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._period_combo.setFixedWidth(84)
         ma_row.addWidget(self._period_combo)
+        # 주·월봉일 때 기간 콤보 대신 뜨는 안내 (일봉일 땐 숨김)
+        self._period_note = QLabel("주·월봉은 고정 범위")
+        self._period_note.setStyleSheet(f"color: {C['subtext']}; font-size: 11px; font-style: italic;")
+        ma_row.addWidget(self._period_note)
         ma_row.addStretch()
         root.addLayout(ma_row)
+        # 봉주기에 따라 기간 콤보 / 안내 문구 토글 (일봉만 기간 콤보)
+        self._unit_combo.currentIndexChanged.connect(self._sync_period_visibility)
+        self._sync_period_visibility()
 
         # ── 확대 차트 보조축 (하단 날짜 · 우측 가격) 표시 토글 ──────────────────
         # 날짜축: 표시 구간을 4등분한 대략적 날짜(M/D). 가격축: 최고·평균·최저가 눈금.
@@ -2176,6 +2202,16 @@ class ManageWatchlistDialog(QDialog):
             )
             self._axis_checks[key] = cb
             axis_row.addWidget(cb)
+        # 거래량 패널 토글 — 확대 차트 하단에 거래량 막대(상승 빨강·하락 파랑)를 표시
+        axis_row.addSpacing(8)
+        self._volume_check = QCheckBox("거래량")
+        self._volume_check.setChecked(bool(self._ma_settings.get("show_volume", False)))
+        self._volume_check.setToolTip("차트 하단에 거래량 막대를 표시합니다 (상승 빨강·하락 파랑)")
+        self._volume_check.setStyleSheet(
+            f"QCheckBox {{ color: {C['text']}; font-size: 12px; spacing: 6px; }}"
+            f"QCheckBox::indicator {{ width: 15px; height: 15px; }}"
+        )
+        axis_row.addWidget(self._volume_check)
         axis_row.addStretch()
         root.addLayout(axis_row)
 
@@ -2627,6 +2663,13 @@ class ManageWatchlistDialog(QDialog):
     def get_tags(self) -> list[dict]:
         return self._tags
 
+    def _sync_period_visibility(self):
+        """봉주기=일봉이면 기간 콤보 표시, 주·월봉이면 숨기고 '고정 범위' 안내 표시."""
+        is_day = (self._unit_combo.currentData() == "day")
+        self._period_lbl.setVisible(is_day)
+        self._period_combo.setVisible(is_day)
+        self._period_note.setVisible(not is_day)
+
     def get_ma_settings(self) -> dict:
         """확대 일봉 팝업 표시 설정
         {'ma5','ma20','ma60','show_name','axis_date','axis_price': bool, 'popup_months': int}."""
@@ -2635,4 +2678,6 @@ class ManageWatchlistDialog(QDialog):
         out["popup_months"] = int(self._period_combo.currentData() or 3)
         for key, cb in self._axis_checks.items():
             out[key] = cb.isChecked()
+        out["show_volume"] = self._volume_check.isChecked()
+        out["candle_unit"] = self._unit_combo.currentData() or "day"
         return out
