@@ -732,6 +732,11 @@ class StockDialog(QDialog):
         self.avg_spin.setDecimals(0)
         self.avg_spin.setSuffix("  원")
         layout.addRow(self.avg_label, self.avg_spin)
+        # 신규 추가 시 종목을 확정하면 평단가를 현재가로 기본 채운다. 단, 사용자가
+        # 평단가를 직접 입력한 뒤에는 덮어쓰지 않는다. textEdited 는 사용자의 직접
+        # 입력에만 발생(프로그램적 setValue 는 제외)하므로 touch 판별에 쓴다.
+        self._avg_touched = False
+        self.avg_spin.lineEdit().textEdited.connect(self._on_avg_edited)
 
         # 미국 주식 매수 기준: 증권사마다 보유 화면에 보여주는 값이 달라(원화 단가가
         # 아예 안 보이는 곳도 있음), 무엇을 입력하든 매수 환율(buy_exchange_rate)
@@ -895,8 +900,28 @@ class StockDialog(QDialog):
             self._set_preview_found(result["name"])
             if self._preview_result is None:
                 self._preview_result = result
+            self._maybe_prefill_avg(result)
         else:
             self._set_preview_error("찾을 수 없는 종목")
+
+    def _on_avg_edited(self, _text: str = ""):
+        """사용자가 평단가를 직접 편집하면 현재가 자동 채움을 더 이상 하지 않는다."""
+        self._avg_touched = True
+
+    def _maybe_prefill_avg(self, result: dict):
+        """신규 추가 모드에서 종목이 확정되면 평단가를 현재가로 기본 채운다.
+        수정/관심종목 모드이거나 사용자가 평단가를 직접 건드린 경우엔 채우지 않는다.
+        현재가 통화는 시장(원/USD)과 일치하므로 그대로 넣는다."""
+        if self.is_edit or self.watch_mode or self._avg_touched:
+            return
+        try:
+            price = float(result.get("price") or 0)
+        except (TypeError, ValueError):
+            return
+        if price <= 0:
+            return
+        # setValue 는 textEdited 를 발생시키지 않아 _avg_touched 를 건드리지 않는다.
+        self.avg_spin.setValue(price)
 
     # ── 종목 이름/티커 자동완성 (KR·US 공용) ─────────────────────────────
     def _on_code_text_edited(self):
