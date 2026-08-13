@@ -3,8 +3,11 @@
 import os
 import re
 import sys
+import json
+import time
 import uuid
 import shutil
+from datetime import date
 from pathlib import Path
 
 from .portfolio import portfolio_totals, stock_metrics
@@ -24,7 +27,12 @@ def _config_dir() -> Path:
 
 
 CONFIG_FILE = str(_config_dir() / "stocks.json")
+# Excel 가져오기 직전 스냅샷 — 사용자에게 이 경로를 안내하므로 다른 용도로 덮지 않는다.
 BACKUP_FILE = CONFIG_FILE + ".bak"
+# 매 저장 직전에 남기는 직전 정상본. 본 파일이 깨졌을 때의 1차 폴백.
+PREV_FILE = CONFIG_FILE + ".prev"
+# 하루 1회 세대 백업 (stocks.YYYY-MM-DD.json) 보관 개수
+DAILY_BACKUP_KEEP = 7
 
 
 # ─── 종목 스키마 기본값 ─────────────────────────────────────────────────────
@@ -281,6 +289,122 @@ def migrate_legacy_config() -> None:
             except Exception as e:
                 print(f"[migrate] 오류: {e}")
             return
+
+
+# ─── 설정 파일 읽기/쓰기 (원자적 저장 + 손상 복구) ──────────────────────────
+# 배경: 예전에는 저장이 `open(CONFIG_FILE, "w")` 였고 로드는 `except: return` 이었다.
+# "w" 는 여는 순간 파일을 0바이트로 만들기 때문에, OS 강제 종료(윈도우 업데이트
+# 재시작 등)가 truncate 와 flush 사이를 끊으면 파일이 빈 채로 남는다. 그다음 실행에서
+# 로드가 조용히 실패해 종목 0개로 시작하고, 자동 업데이트 체크가 부르는 저장 한 번이
+# 그 빈 상태를 원본에 확정시켜 데이터가 영구 유실됐다. 아래 세 장치로 그 사슬을 끊는다.
+#   1) write_config_atomic — 임시파일 → fsync → os.replace. 원본은 항상 완전본.
+#   2) read_config        — 손상 시 .prev 폴백, 그래도 실패하면 ConfigLoadError.
+#   3) 호출측(매니저)      — ConfigLoadError 세션은 저장을 통째로 건너뛴다.
+class ConfigLoadError(Exception):
+    """설정 파일이 존재하는데 읽지 못했다.
+
+    이 예외를 받은 세션은 메모리 상태가 '빈 기본값'이므로, 절대 저장하면 안 된다.
+    호출측은 플래그를 세워 그 세션의 저장을 전부 막아야 한다."""
+
+
+def write_config_atomic(data: dict) -> None:
+    """stocks.json 을 원자적으로 저장한다.
+
+    같은 디렉토리의 임시파일에 전부 쓰고 fsync 한 뒤 os.replace 로 갈아끼운다.
+    os.replace 는 Windows/POSIX 모두 원자적이라, 중간에 프로세스가 죽어도 원본은
+    '이전 완전본' 또는 '새 완전본' 둘 중 하나다. fsync 를 빼면 메타데이터만 내려가고
+    내용은 캐시에 남은 채 전원이 끊길 수 있어 반드시 필요하다.
+    """
+    path = Path(CONFIG_FILE)
+
+    # 직전 정상본을 .prev 로 보존. 빈 파일은 백업 가치가 없으니 건너뛴다.
+    try:
+        if path.is_file() and path.stat().st_size > 0:
+            shutil.copy2(path, PREV_FILE)
+    except OSError as e:
+        print(f"[save] .prev 백업 실패(무시): {e}")
+
+    # 임시파일명에 PID 를 붙여 두 인스턴스가 동시에 저장해도 서로 밟지 않게 한다.
+    tmp = Path(f"{CONFIG_FILE}.tmp{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        # Windows 는 백신/OneDrive/인덱서가 대상 파일을 열고 있으면 replace 가
+        # PermissionError 로 튄다. 짧게 재시도하면 대부분 통과한다.
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.1)
+    finally:
+        # 성공 시 os.replace 가 이미 tmp 를 소비했으므로 보통 남지 않는다.
+        # 실패해서 남은 임시파일만 정리한다.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def read_config() -> tuple[dict | list | None, str | None]:
+    """설정을 읽어 (data, warning) 을 돌려준다.
+
+    반환:
+      (data, None)     — 정상 로드. data 는 v1(list) 또는 v2(dict).
+      (None, None)     — 파일이 아직 없음(최초 실행). 실패가 아니므로 저장을 막지 않는다.
+      (data, "안내문") — 본 파일이 깨져 .prev 로 복구함. 호출측이 사용자에게 알린다.
+    예외:
+      ConfigLoadError  — 본 파일도 .prev 도 못 읽음. 이 세션은 저장 금지.
+    """
+    if not os.path.exists(CONFIG_FILE):
+        return None, None
+
+    # Python 3 는 except 블록을 벗어날 때 `as` 변수를 삭제하므로 밖으로 옮겨 담는다.
+    primary_err: str
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f), None
+    except Exception as e:
+        primary_err = str(e)
+
+    if os.path.exists(PREV_FILE):
+        try:
+            with open(PREV_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data, (
+                f"설정 파일이 손상되어 직전 백업(.prev)에서 복구했습니다.\n"
+                f"손상 원인: {primary_err}"
+            )
+        except Exception as e:
+            print(f"[load] .prev 폴백도 실패: {e}")
+
+    raise ConfigLoadError(primary_err)
+
+
+def rotate_daily_backup() -> None:
+    """로드 성공 직후 1회 호출. stocks.YYYY-MM-DD.json 세대 백업을 남긴다.
+
+    원자적 저장은 '깨진 파일'은 막아주지만 논리 버그로 잘못된 내용이 정상 저장되는
+    경우는 못 막는다. 하루 1개씩 남겨 최근 DAILY_BACKUP_KEEP 개를 보관한다.
+    """
+    try:
+        if not os.path.exists(CONFIG_FILE):
+            return
+        d = _config_dir()
+        dst = d / f"stocks.{date.today().isoformat()}.json"
+        if dst.exists():   # 오늘 것은 이미 있음 — 첫 로드본을 유지한다
+            return
+        shutil.copy2(CONFIG_FILE, dst)
+        # 파일명이 ISO 날짜라 사전순 정렬 = 시간순 정렬
+        olds = sorted(d.glob("stocks.20*.json"))
+        for p in olds[:-DAILY_BACKUP_KEEP]:
+            p.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"[backup] 일일 백업 실패(무시): {e}")
 
 
 # ─── Excel import/export 컬럼 정의 ────────────────────────────────────────────

@@ -2,7 +2,6 @@
 
 import os
 import sys
-import json
 import copy
 import shutil
 import threading
@@ -48,6 +47,7 @@ from ..core.api import fetch_usd_krw_rate
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
+    ConfigLoadError, read_config, write_config_atomic, rotate_daily_backup,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_stock_schema,
     normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
@@ -138,12 +138,19 @@ class WidgetManager:
         self._update_signals = _UpdateCheckSignals()
         self._update_signals.done.connect(self._on_auto_check_done)
 
+        # 설정 로드 실패 세션 표시. True 면 _save_config 이 저장을 통째로 거부한다.
+        # (로드 실패 = 메모리가 빈 기본값 → 저장하면 원본을 빈 상태로 덮어쓴다)
+        self.config_load_failed: bool = False
+        self._config_warning: str | None = None   # 시작 직후 사용자에게 띄울 안내문
+
         self._load_config()
         self._setup_tray()
         self._spawn_all()
         self._sync_watch_groups()
         self._sync_fx_timer()
 
+        # 시작 직후 — 설정 로드 문제 안내 (있을 때만)
+        QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._show_config_warning)
         # 시작 직후 — 이전 업데이트 실패 로그 / 직전 업데이트 완료 여부 안내
         QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_previous_update_error)
         QTimer.singleShot(_PREV_ERROR_CHECK_DELAY_MS, self._check_update_completed)
@@ -571,13 +578,30 @@ class WidgetManager:
     #   v2 (현재):   JSON 루트가 dict — {"stocks": [...], "master": {"visible": bool, "pos": [x,y]|null}}
     # 로드는 둘 다 받아주고, 저장은 항상 v2 로 한다 (한 번 저장되면 자동 마이그레이트).
     def _load_config(self):
-        if not os.path.exists(CONFIG_FILE):
-            return
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+            data, warning = read_config()
+        except ConfigLoadError as e:
+            # 파일은 있는데 못 읽었다 → 이 세션은 저장 금지. 그냥 진행하면 5초 뒤
+            # 자동 업데이트 체크의 저장이 빈 상태를 원본에 확정시켜 버린다.
+            self.config_load_failed = True
+            self._config_warning = (
+                "보유 종목 설정을 읽지 못했습니다.\n\n"
+                f"원인: {e}\n\n"
+                "데이터 보호를 위해 이번 실행에서는 아무것도 저장하지 않습니다.\n"
+                "앱을 종료한 뒤 아래 파일을 확인해주세요.\n\n"
+                f"{CONFIG_FILE}"
+            )
+            # 한국어 Windows 콘솔은 cp949 라 em-dash 같은 문자는 UnicodeEncodeError 를
+            # 낸다. 하필 보호 경로라 로그 한 줄 때문에 가드가 깨지면 안 된다 — ASCII 만.
+            print(f"[load] config load failed, skipping all saves this session: {e}")
             return
+        if warning:
+            self._config_warning = warning
+            print(f"[load] {warning}")
+        if data is None:
+            return          # 최초 실행 — 실패가 아니므로 저장은 정상 동작해야 한다
+        # 정상 로드된 내용만 세대 백업 대상이다 (빈 상태를 백업하면 안전망이 무의미)
+        rotate_daily_backup()
 
         if isinstance(data, list):
             # v1 → 종목만 있음, 마스터 설정은 기본값
@@ -652,7 +676,19 @@ class WidgetManager:
             base["name"] = s.get("name", "") or ""
             self.stock_memos[code] = base
 
+    def _show_config_warning(self):
+        """설정 로드에 문제가 있었으면 시작 직후 한 번 알린다."""
+        if not self._config_warning:
+            return
+        msg, self._config_warning = self._config_warning, None
+        show_topmost_message(QMessageBox.Icon.Warning, "설정 파일 오류", msg)
+
     def _save_config(self):
+        # 로드에 실패한 세션은 메모리가 '빈 기본값'이다. 여기서 저장하면 원본이
+        # 그 빈 상태로 덮여 영구 유실된다 — 위젯 위치를 잃는 편이 훨씬 낫다.
+        if self.config_load_failed:
+            print("[save] skipped: config load failed this session (protecting original file)")
+            return
         # normalize_stock_schema 는 새 dict 를 반환하므로 self.stocks 를 통째로
         # 재대입하면 위젯의 data 객체와 identity 가 끊긴다 → 이후 우클릭 수정이
         # 옛 객체(widget.data)에만 반영되고, 여기서 저장되는 self.stocks(새 객체)에는
@@ -691,8 +727,7 @@ class WidgetManager:
         if upd:
             data["update"] = upd
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            write_config_atomic(data)
         except Exception as e:
             print(f"[save] 오류: {e}")
 
