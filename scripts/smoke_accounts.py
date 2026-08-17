@@ -398,8 +398,45 @@ def _run(log_fp):
     edit_dlg.deleteLater()
     log("[ok] 15. 종목 창 계좌 선택 — 1개면 숨김 / 추가 기본값 / 수정 시 계좌 이동")
 
+    # ── 16. 종목 관리 다이얼로그 — 계좌 컬럼 / 계좌 필터 ────────────────────
+    table_stocks = [dict(s) for s in mixed]
+    dlg = md.ManageStocksDialog(table_stocks, accounts=accounts3)
+    assert not dlg.table.isColumnHidden(dlg.COL_ACCOUNT), "계좌 3개인데 계좌 컬럼이 숨겨졌다"
+    assert dlg.account_filter_combo is not None, "계좌 필터 콤보가 없다"
+    assert dlg.table.rowCount() == 3, dlg.table.rowCount()
+    INTERNAL = md.QAbstractItemView.DragDropMode.InternalMove
+    assert dlg.table.dragDropMode() == INTERNAL, "필터가 없는데 순서 드래그가 막혔다"
+
+    # 표에서 계좌 이동 — acc1 의 NVDA 를 acc3 로
+    row = next(r for r in range(dlg.table.rowCount())
+               if dlg.table.item(r, dlg.COL_CODE).text() == "NVDA")
+    combo = dlg.table.cellWidget(row, dlg.COL_ACCOUNT)
+    assert combo.currentData() == "acc1", combo.currentData()
+    # 콤보는 activated(사용자 선택)에만 반응한다 — 사용자가 고른 것과 같게 흉내 낸다
+    combo.setCurrentIndex(2)                                  # acc3
+    combo.activated.emit(2)
+    moved = next(s for s in dlg.get_stocks() if s["code"] == "NVDA")
+    assert moved["account_id"] == "acc3", f"표에서 계좌 이동이 반영 안 됨: {moved['account_id']}"
+
+    # 계좌 필터 → 그 계좌 행만, 순서 드래그는 잠근다
+    dlg.account_filter_combo.setCurrentIndex(
+        dlg.account_filter_combo.findData("acc3"))
+    assert [dlg.table.item(r, dlg.COL_CODE).text() for r in range(dlg.table.rowCount())] \
+        == ["NVDA"], "계좌 필터가 안 걸렸다"
+    assert dlg.table.dragDropMode() != INTERNAL, "걸러진 표인데 순서 드래그가 열려 있다"
+    dlg.account_filter_combo.setCurrentIndex(0)               # 전체
+    assert dlg.table.dragDropMode() == INTERNAL, "전체로 돌아왔는데 드래그가 안 열렸다"
+    dlg.deleteLater()
+
+    # 계좌가 1개면 컬럼·필터를 통째로 감춘다
+    solo_table = md.ManageStocksDialog([dict(s) for s in mixed], accounts=accounts3[:1])
+    assert solo_table.table.isColumnHidden(solo_table.COL_ACCOUNT), "계좌 1개인데 컬럼이 보인다"
+    assert solo_table.account_filter_combo is None, "계좌 1개인데 필터 콤보가 있다"
+    solo_table.deleteLater()
+    log("[ok] 16. 종목 관리 — 계좌 컬럼으로 이동 / 계좌 필터 / 걸러진 표는 순서 드래그 잠금")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 15개 케이스 전부 통과")
+    log("\n[PASS] 16개 케이스 전부 통과")
 
 
 def main() -> int:

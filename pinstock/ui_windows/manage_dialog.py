@@ -25,7 +25,8 @@ from ..core.portfolio import buy_preview, is_us_stock, stock_metrics
 from ..core.storage import (
     MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD,
     DEFAULT_TAG_COLOR, new_tag_id, normalize_tags, prune_watch_tags,
-    DEFAULT_ACCOUNT_COLOR, ACCOUNT_NAME_MAX, new_account_id, normalize_accounts,
+    DEFAULT_ACCOUNT_COLOR, ACCOUNT_NAME_MAX, ACCOUNT_FILTER_ALL,
+    new_account_id, normalize_accounts, stock_in_account,
 )
 from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE, TAG_PALETTE, MA_COLORS
 from .form_widgets import (
@@ -1240,16 +1241,23 @@ class WideEditorDelegate(QStyledItemDelegate):
 class ManageStocksDialog(QDialog):
     """현재 보유 종목들을 표 형태로 일괄 관리하는 다이얼로그."""
 
-    COLS = ["종목명", "종목코드", "매입단가", "수량", "평가손익", "표시"]
+    COLS = ["종목명", "종목코드", "계좌", "매입단가", "수량", "평가손익", "표시"]
+    # 컬럼이 늘어나도 인덱스를 손으로 세지 않도록 이름을 붙여 둔다.
+    COL_NAME, COL_CODE, COL_ACCOUNT, COL_AVG, COL_QTY, COL_PROFIT, COL_SHOW = range(7)
 
     def __init__(self, stocks: list[dict], current_prices: dict | None = None,
-                 usd_krw_rate: float | None = None, parent=None):
+                 usd_krw_rate: float | None = None, accounts: list[dict] | None = None,
+                 account_filter: str = ACCOUNT_FILTER_ALL, parent=None):
         super().__init__(parent)
         self._stocks: list[dict] = stocks   # 호출측에서 deepcopy 해서 전달
         self._current_prices: dict = current_prices or {}   # {code: 현재가}
         self._usd_krw_rate = usd_krw_rate
         self._suppress_change: bool = False   # itemChanged 재귀 차단용
         self._market_filter: str = "ALL"
+        self._accounts: list[dict] = accounts or []
+        self._account_filter: str = account_filter or ACCOUNT_FILTER_ALL
+        # 계좌가 1개면 고르고 옮길 대상이 없다 — 컬럼과 필터를 통째로 감춘다.
+        self._accounts_enabled: bool = len(self._accounts) > 1
         self._row_stock_indexes: list[int] = []
 
         self.setWindowTitle("종목 관리")
@@ -1266,6 +1274,25 @@ class ManageStocksDialog(QDialog):
         filter_row.addWidget(self._make_filter_btn("한국", MARKET_KR))
         filter_row.addWidget(self._make_filter_btn("미국", MARKET_US))
         filter_row.addStretch()
+        # 계좌 필터는 버튼이 아니라 콤보다 — 계좌 수에 상한이 없어서 버튼으로 늘어놓으면
+        # 창 폭을 밀어낸다 (팝오버는 가로 스크롤로 풀지만 여기는 표가 주인공).
+        self.account_filter_combo = None
+        if self._accounts_enabled:
+            acc_lbl = QLabel("계좌")
+            acc_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+            filter_row.addWidget(acc_lbl)
+            self.account_filter_combo = _NoScrollComboBox()
+            self.account_filter_combo.setMinimumWidth(120)
+            self.account_filter_combo.addItem("전체", ACCOUNT_FILTER_ALL)
+            for a in self._accounts:
+                self.account_filter_combo.addItem(
+                    _color_icon(a.get("color", DEFAULT_ACCOUNT_COLOR)), a.get("name", ""), a["id"]
+                )
+            self.account_filter_combo.setIconSize(QSize(12, 12))
+            idx = self.account_filter_combo.findData(self._account_filter)
+            self.account_filter_combo.setCurrentIndex(max(0, idx))
+            self.account_filter_combo.currentIndexChanged.connect(self._on_account_filter_changed)
+            filter_row.addWidget(self.account_filter_combo)
         root.addLayout(filter_row)
         self._update_filter_button_styles()
 
@@ -1294,24 +1321,29 @@ class ManageStocksDialog(QDialog):
 
         # 컬럼 너비 정책
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)         # 종목명
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        # 표시 컬럼은 ToggleSwitch 가 잘리지 않게 고정 폭
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(5, 64)
+        hdr.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
+        for col in (self.COL_CODE, self.COL_AVG, self.COL_QTY, self.COL_PROFIT):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        # 계좌 콤보와 표시 토글은 잘리지 않게 고정 폭. 계좌 컬럼의 실제 폭은 표를
+        # 채운 뒤 _sync_account_col_width() 가 콤보에 맞춰 다시 잡는다.
+        hdr.setSectionResizeMode(self.COL_ACCOUNT, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(self.COL_ACCOUNT, 110)
+        hdr.setSectionResizeMode(self.COL_SHOW, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(self.COL_SHOW, 64)
         hdr.setStretchLastSection(False)
+        # 계좌가 1개면 컬럼 자체를 감춘다 (인덱스는 그대로 둬 코드가 흔들리지 않게)
+        self.table.setColumnHidden(self.COL_ACCOUNT, not self._accounts_enabled)
 
         # 헤더 클릭 자동 정렬은 사용하지 않음 (명시적 "정렬" 버튼으로 대체)
         hdr.setSectionsClickable(False)
         hdr.setSortIndicatorShown(False)
 
-        # 평단가/수량 인라인 편집 시 editor 폭을 키워서 입력값이 잘리지 않게
+        # 평단가/수량 인라인 편집 시 editor 폭을 키워서 입력값이 잘리지 않게.
+        # 컬럼 번호를 직접 쓰면 컬럼이 하나 끼어들 때 조용히 엉뚱한 칸에 붙는다
+        # (계좌 컬럼이 생겼을 때 실제로 그래서 콤보가 옆 칸을 15px 덮었다).
         self._wide_delegate = WideEditorDelegate(self)
-        self.table.setItemDelegateForColumn(2, self._wide_delegate)
-        self.table.setItemDelegateForColumn(3, self._wide_delegate)
+        self.table.setItemDelegateForColumn(self.COL_AVG, self._wide_delegate)
+        self.table.setItemDelegateForColumn(self.COL_QTY, self._wide_delegate)
 
         # 더블클릭: 평단가/수량 셀은 Qt 가 인라인 편집을 처리하므로 패스,
         # 그 외 셀에서는 기존처럼 종목 수정 팝업을 띄움
@@ -1381,7 +1413,18 @@ class ManageStocksDialog(QDialog):
     def _set_market_filter(self, market: str):
         self._market_filter = market
         self._update_filter_button_styles()
-        filtered = market != "ALL"
+        self._sync_drag_enabled()
+        self._rebuild_table()
+
+    def _on_account_filter_changed(self, _index: int):
+        self._account_filter = self.account_filter_combo.currentData() or ACCOUNT_FILTER_ALL
+        self._sync_drag_enabled()
+        self._rebuild_table()
+
+    def _sync_drag_enabled(self):
+        """행 순서 드래그는 표가 전체 목록일 때만 허용한다. 걸러진 표에서 끌면
+        화면에 없는 종목을 건너뛴 자리로 옮겨져 순서가 엉뚱해진다."""
+        filtered = self._market_filter != "ALL" or self._account_filter != ACCOUNT_FILTER_ALL
         self.table.setDragEnabled(not filtered)
         self.table.setAcceptDrops(not filtered)
         self.table.viewport().setAcceptDrops(not filtered)
@@ -1389,7 +1432,6 @@ class ManageStocksDialog(QDialog):
             QAbstractItemView.DragDropMode.NoDragDrop
             if filtered else QAbstractItemView.DragDropMode.InternalMove
         )
-        self._rebuild_table()
 
     def _update_filter_button_styles(self):
         for key, btn in self._filter_buttons.items():
@@ -1423,6 +1465,8 @@ class ManageStocksDialog(QDialog):
                 """)
 
     def _matches_filter(self, stock: dict) -> bool:
+        if not stock_in_account(stock, self._account_filter):
+            return False
         if self._market_filter == "ALL":
             return True
         market = MARKET_US if is_us_stock(stock) else MARKET_KR
@@ -1453,6 +1497,8 @@ class ManageStocksDialog(QDialog):
             self._suppress_change = False
             self.table.model().rowsMoved.connect(self._on_rows_moved)
 
+        self._sync_account_col_width()
+
         if select_row is not None and select_row in self._row_stock_indexes:
             self.table.selectRow(self._row_stock_indexes.index(select_row))
 
@@ -1477,32 +1523,46 @@ class ManageStocksDialog(QDialog):
             profit_text  = "0 원"
             profit_color = None
 
-        cells = [name, code, avg, qty, profit_text]
-        for col, text in enumerate(cells):
+        cells = {
+            self.COL_NAME:   name,
+            self.COL_CODE:   code,
+            self.COL_AVG:    avg,
+            self.COL_QTY:    qty,
+            self.COL_PROFIT: profit_text,
+        }
+        for col, text in cells.items():
             item = QTableWidgetItem(text)
             # 평단가/수량/평가손익은 우측 정렬
-            if col in (2, 3, 4):
+            if col in (self.COL_AVG, self.COL_QTY, self.COL_PROFIT):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             else:
                 item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             # 평가손익 셀에 색상 적용
-            if col == 4 and profit_color is not None:
+            if col == self.COL_PROFIT and profit_color is not None:
                 item.setForeground(QColor(profit_color))
                 f = item.font()
                 f.setBold(True)
                 item.setFont(f)
-            # 평단가(2)/수량(3) 셀은 인라인 편집 가능
+            # 평단가/수량 셀은 인라인 편집 가능
             base_flags = (
                 Qt.ItemFlag.ItemIsSelectable
                 | Qt.ItemFlag.ItemIsEnabled
                 | Qt.ItemFlag.ItemIsDragEnabled
             )
-            if col in (2, 3):
+            if col in (self.COL_AVG, self.COL_QTY):
                 base_flags |= Qt.ItemFlag.ItemIsEditable
             item.setFlags(base_flags)
             self.table.setItem(row, col, item)
 
-        # 6번째: 표시 토글 스위치 (ON=표시, OFF=숨김)
+        # 계좌 셀 — 콤보를 바로 놓아 표에서 계좌 간 이동이 되게 한다.
+        acc_placeholder = QTableWidgetItem("")
+        acc_placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled)
+        self.table.setItem(row, self.COL_ACCOUNT, acc_placeholder)
+        if self._accounts_enabled:
+            self.table.setCellWidget(row, self.COL_ACCOUNT,
+                                     self._make_account_combo(s, stock_idx))
+
+        # 마지막: 표시 토글 스위치 (ON=표시, OFF=숨김)
         # setCellWidget 사용해 셀에 위젯을 직접 배치 — item 이 없으므로
         # 이전 체크박스에서 발생하던 "0" inline-edit 잔영 문제 회피
         hidden = bool(s.get("hidden", False))
@@ -1523,12 +1583,88 @@ class ManageStocksDialog(QDialog):
         placeholder.setFlags(
             Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
         )
-        self.table.setItem(row, 5, placeholder)
-        self.table.setCellWidget(row, 5, container)
+        self.table.setItem(row, self.COL_SHOW, placeholder)
+        self.table.setCellWidget(row, self.COL_SHOW, container)
 
-    # ── 더블클릭: 평단가/수량/표시는 인라인 처리, 그 외는 종목 수정 팝업 ─
+    def _sync_account_col_width(self):
+        """계좌 컬럼을 실제 콤보가 요구하는 폭으로 넓힌다.
+
+        콤보가 셀보다 넓으면 Qt 가 최소 폭을 우선해 셀 밖으로 삐져나오고, 옆
+        컬럼(매입단가)의 숫자를 덮어 버린다. 폭은 계좌명 길이·아이콘·화살표·
+        스타일시트 padding 이 다 걸려 있어 상수로 찍을 수 없다 — 부모에 붙어
+        스타일이 적용된 뒤의 실제 값을 봐야 맞는다.
+        """
+        if not self._accounts_enabled:
+            return
+        # sizeHint 가 '내용이 다 보이는 폭'이다. minimumSizeHint 는 minimumContents
+        # Length 기반의 하한이라 그걸로 잡으면 계좌명이 '주계…' 로 잘린다.
+        need = max(
+            (self.table.cellWidget(r, self.COL_ACCOUNT).sizeHint().width()
+             for r in range(self.table.rowCount())
+             if self.table.cellWidget(r, self.COL_ACCOUNT) is not None),
+            default=0,
+        )
+        if need:
+            self.table.setColumnWidth(self.COL_ACCOUNT, need + 20)
+
+    def _make_account_combo(self, stock: dict, stock_idx: int) -> QComboBox:
+        """셀에 바로 놓는 계좌 선택 콤보 (관심종목 표의 태그 콤보와 같은 모양).
+
+        셀 위젯은 QTableWidget::item 의 padding 만큼 안쪽으로 들어가 높이가 18px
+        남는데, DIALOG_STYLE 의 QComboBox 는 세로 padding 때문에 29px 를 요구해
+        찌그러진다. 그래서 배경·테두리를 지우고 세로 padding 을 0 으로 준다.
+        """
+        combo = _NoScrollComboBox()
+        current = str(stock.get("account_id") or "")
+        for i, a in enumerate(self._accounts):
+            combo.addItem(_color_icon(a.get("color", DEFAULT_ACCOUNT_COLOR)),
+                          a.get("name", ""), a["id"])
+            if a["id"] == current:
+                combo.setCurrentIndex(i)
+        combo.setIconSize(QSize(12, 12))
+        combo.setStyleSheet(f"""
+            QComboBox {{
+                background: transparent;
+                border: none;
+                padding: 0px 6px;
+                color: {C['text']};
+                font-size: 12px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 16px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C['bg']};
+                color: {C['text']};
+                border: 1px solid {C['surface2']};
+                border-radius: 6px;
+                padding: 4px;
+                outline: 0;
+                selection-background-color: {C['surface']};
+                selection-color: {C['text']};
+            }}
+        """)
+        # activated 는 사용자가 고른 경우에만 발화한다 — 표를 다시 그릴 때의
+        # setCurrentIndex 로는 울리지 않아 헛된 이동 처리가 없다.
+        combo.activated.connect(
+            lambda _i, idx=stock_idx, c=combo: self._on_account_changed(idx, c)
+        )
+        return combo
+
+    def _on_account_changed(self, stock_idx: int, combo: QComboBox):
+        if not (0 <= stock_idx < len(self._stocks)):
+            return
+        self._stocks[stock_idx]["account_id"] = combo.currentData()
+        # 특정 계좌만 보는 중이면 옮긴 종목은 이 표에서 빠져야 한다. 콤보 시그널
+        # 안에서 표를 다시 그리면 자기 자신을 지우게 되므로 다음 루프로 미룬다.
+        if self._account_filter != ACCOUNT_FILTER_ALL:
+            QTimer.singleShot(0, self._rebuild_table)
+
+    # ── 더블클릭: 평단가/수량/계좌/표시는 인라인 처리, 그 외는 종목 수정 팝업 ─
     def _on_double_clicked(self, index):
-        if index.column() in (2, 3, 5):   # 5: 표시 체크박스 (Qt 가 토글 처리)
+        if index.column() in (self.COL_AVG, self.COL_QTY,
+                              self.COL_ACCOUNT, self.COL_SHOW):
             return
         self._edit_selected()
 
@@ -1546,26 +1682,26 @@ class ManageStocksDialog(QDialog):
         if stock_idx is None:
             return
 
-        if col not in (2, 3):
+        if col not in (self.COL_AVG, self.COL_QTY):
             return
 
         # 사용자가 입력한 텍스트에서 숫자만 추출
         text = item.text().strip()
         s = self._stocks[stock_idx]
         us_stock = is_us_stock(s)
-        if us_stock and col == 2:
+        if us_stock and col == self.COL_AVG:
             cleaned = "".join(c for c in text if c.isdigit() or c == ".")
         else:
             cleaned = "".join(c for c in text if c.isdigit() or c == ".")
 
         try:
-            value = float(cleaned) if col in (2, 3) else int(cleaned)
+            value = float(cleaned) if col in (self.COL_AVG, self.COL_QTY) else int(cleaned)
         except ValueError:
             value = 0
         if value <= 0:
             # 잘못된 입력 → 원래 값으로 복원
             self._suppress_change = True
-            if col == 2:
+            if col == self.COL_AVG:
                 if us_stock:
                     item.setText(f"{float(s.get('avg_price', 0)):,.4f} USD")
                 else:
@@ -1575,7 +1711,7 @@ class ManageStocksDialog(QDialog):
             self._suppress_change = False
             return
 
-        if col == 2:
+        if col == self.COL_AVG:
             s["avg_price"] = round(value, 4) if us_stock else int(value)
             suffix = "USD" if us_stock else "원"
         else:
@@ -1584,9 +1720,9 @@ class ManageStocksDialog(QDialog):
 
         # 표시 형식 (쉼표 + 단위) 재포맷
         self._suppress_change = True
-        if col == 2 and us_stock:
+        if col == self.COL_AVG and us_stock:
             item.setText(f"{value:,.4f} {suffix}")
-        elif col == 3:
+        elif col == self.COL_QTY:
             item.setText(f"{format_quantity(value)} {suffix}")
         else:
             item.setText(f"{int(value):,} {suffix}")
@@ -1612,7 +1748,7 @@ class ManageStocksDialog(QDialog):
         else:
             text, color = "0 원", None
 
-        item = self.table.item(row, 4)
+        item = self.table.item(row, self.COL_PROFIT)
         if item is None:
             return
         self._suppress_change = True

@@ -1215,6 +1215,8 @@ class MacAppManager(QObject):
             stocks=copy.deepcopy(self.stocks),
             current_prices=current_prices,
             usd_krw_rate=self.usd_krw_rate,
+            accounts=copy.deepcopy(self.accounts),
+            account_filter=self._holdings_account_filter(),
         )
         if not dlg.exec():
             return
@@ -1222,6 +1224,8 @@ class MacAppManager(QObject):
         new_stocks = normalize_stocks_schema(new_stocks)
 
         self.stocks = new_stocks
+        # 표에서 계좌를 옮겼을 수 있으므로 소속을 다시 검증한다.
+        self._reconcile_accounts()
         # 폴러 정리/시작은 '어떤 종목이 추가·삭제됐나'가 아니라 '지금 살아 있는
         # code 가 무엇인가'로 판단한다 — 같은 종목이 여러 계좌에 있을 수 있어서
         # 한쪽이 사라져도 폴러가 필요할 수 있다.
