@@ -32,6 +32,7 @@ from ..core.storage import (
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
     normalize_stock_memos, normalize_detached,
+    ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter,
 )
 from ..ui_windows.manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
@@ -188,6 +189,9 @@ class MacAppManager(QObject):
         app.applicationStateChanged.connect(self._on_app_state_changed)
 
         self.stocks: list[dict] = []
+        # 계좌 레지스트리 {id,name,color} — 보유 종목만 소속을 가진다. 관심종목은
+        # 계좌 개념 없이 전 계좌가 하나의 목록을 공유한다.
+        self.accounts: list[dict] = []
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
         # 확대 일봉 팝업 이동평균선 표시 설정 — 관심 행/hover 팝업이 공유(제자리 갱신).
@@ -220,6 +224,8 @@ class MacAppManager(QObject):
         self.popover_offset: list[int] | None = None
         self.pinned: bool = False
         self.market_filter: str = "ALL"
+        # 계좌 필터 — 'ALL'(전 계좌) 또는 계좌 id 하나. 시장 필터와 AND 로 결합한다.
+        self.account_filter: str = ACCOUNT_FILTER_ALL
         # 분리(detach) 상태 — 보유/관심 중 하나를 독립 창으로 분리(한쪽만 분리 정책).
         # detached_view 가 None 이면 둘 다 메인 팝오버에 탭으로 있다.
         self.detached_view: str | None = None
@@ -229,6 +235,7 @@ class MacAppManager(QObject):
         self.detached_pinned: bool = False
         self.detached_opacity: float = 1.0
         self.detached_market_filter: str = "ALL"
+        self.detached_account_filter: str = ACCOUNT_FILTER_ALL
         # 투자 메모장 — 앱 전체 단일 메모 {text, updated_at}. 모드리스 창은 1개만 띄운다.
         self.memo: dict = {"text": "", "updated_at": None}
         self._memo_dialog: MemoDialog | None = None
@@ -252,6 +259,9 @@ class MacAppManager(QObject):
         self._config_warning: str | None = None   # 시작 직후 사용자에게 띄울 안내문
 
         self._load_config()
+        # 로드 경로가 어디서 끝났든(최초 실행·정상 로드·로드 실패) 계좌 불변식을
+        # 한 번 세운다 — 계좌 최소 1개, 모든 보유분의 소속이 실재하는 계좌, uid 유일.
+        self._reconcile_accounts()
 
         self.fx_timer = QTimer(self)
         self.fx_timer.timeout.connect(self._fetch_usd_krw_rate)
@@ -433,8 +443,13 @@ class MacAppManager(QObject):
             self._show_popover(anchor_pos, anchor_w)
 
     # ── 폴링 워커 관리 ─────────────────────────────────────────────────────
+    # 폴러는 보유 항목이 아니라 code 당 1개다. 시세는 시장 데이터라 계좌와 무관하고,
+    # 계좌마다 폴러를 띄우면 같은 종목을 중복 조회해 API 호출만 늘어난다. 대신
+    # 받은 시세는 팝오버가 code → 행 역인덱스로 모든 보유 행에 뿌린다.
     def _spawn_fetcher(self, stock: dict, stagger_idx: int = 0):
         code = stock["code"]
+        if code in self.fetchers:
+            return          # 다른 계좌가 이미 같은 종목을 폴링 중
         f = StockFetcher(stock, stagger_idx, parent=self)
         f.price_updated.connect(self._on_price_updated)
         f.minute_updated.connect(self._on_minute_updated)
@@ -442,6 +457,8 @@ class MacAppManager(QObject):
         self.fetchers[code] = f
 
     def _kill_fetcher(self, code: str):
+        """폴러를 조건 없이 정지한다 (전체 교체 등 확실히 비울 때만).
+        종목 하나를 지운 뒤라면 _prune_fetchers() 를 써야 한다."""
         f = self.fetchers.pop(code, None)
         if f:
             f.stop()
@@ -449,6 +466,18 @@ class MacAppManager(QObject):
         self.last_price_result.pop(code, None)
         self.last_minute_data.pop(code, None)
         self.last_daily_data.pop(code, None)
+
+    def _prune_fetchers(self):
+        """보유 목록에 더 이상 없는 종목의 폴러를 정지한다.
+
+        계좌1 삼성전자를 지워도 계좌2 가 같은 종목을 들고 있으면 시세는 여전히
+        필요하다 — 그래서 '삭제한 종목의 폴러를 끈다'가 아니라 '아무도 안 쓰는
+        폴러를 끈다'로 판단한다. self.stocks 를 갱신한 뒤에 호출할 것.
+        """
+        live = {s.get("code") for s in self.stocks}
+        for code in [c for c in self.fetchers if c not in live]:
+            self._kill_fetcher(code)
+            self.current_prices.pop(code, None)
 
     # ── 뷰별 대상 창 라우팅 ────────────────────────────────────────────────
     # 보유/관심 데이터는 그 뷰를 호스팅 중인 창(메인 팝오버 또는 분리 창)으로 보낸다.
@@ -469,11 +498,11 @@ class MacAppManager(QObject):
         return wins
 
     def _on_price_updated(self, code: str, result: dict):
-        # stocks 의 name 도 동기화 (네이버에서 이름 받아오면)
+        # stocks 의 name 도 동기화 (네이버에서 이름 받아오면). 같은 종목을 여러
+        # 계좌가 보유할 수 있으므로 첫 항목에서 멈추지 않고 전부 갱신한다.
         for s in self.stocks:
             if s["code"] == code:
                 s["name"] = result["name"]
-                break
         self.current_prices[code] = float(result["price"])
         self.last_price_result[code] = result
         self._holdings_window().update_stock_price(code, result)
@@ -821,6 +850,10 @@ class MacAppManager(QObject):
             self.stocks = normalize_stocks_schema(data)
         elif isinstance(data, dict):
             self.stocks = normalize_stocks_schema(data.get("stocks", []) or [])
+            # 계좌 목록/선택은 원문 그대로 받아 두고, 실재 검증과 기본 계좌 생성은
+            # 로드가 끝난 뒤 _reconcile_accounts() 가 한 번에 처리한다.
+            self.accounts = data.get("accounts") or []
+            self.account_filter = data.get("selected_account") or ACCOUNT_FILTER_ALL
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
             prune_watch_tags(self.watchlist, self.watch_tags)
@@ -877,6 +910,7 @@ class MacAppManager(QObject):
             self.detached_pinned = det["pinned"]
             self.detached_opacity = det["opacity"]
             self.detached_market_filter = det["market_filter"]
+            self.detached_account_filter = det["account_filter"]
             # 자동 업데이트 메타 — 오늘 체크했는지(날짜) + 건너뛴 버전
             upd = data.get("update") or {}
             last_date = upd.get("last_check_date")
@@ -916,7 +950,23 @@ class MacAppManager(QObject):
         msg, self._config_warning = self._config_warning, None
         show_topmost_message(QMessageBox.Icon.Warning, "설정 파일 오류", msg)
 
+    def _reconcile_accounts(self):
+        """계좌 불변식을 다시 세운다 — 보유 목록이 바뀐 뒤/저장 직전에 호출.
+
+        메모리만 만지고 파일은 건드리지 않으므로 저장이 막힌 세션에서도 안전하다.
+        idempotent 라 몇 번을 불러도 계좌 id 나 uid 가 갈리지 않는다.
+        """
+        self.accounts = ensure_accounts(self.stocks, self.accounts)
+        # 계좌가 지워졌으면 필터를 '전체'로 되돌린다 (그대로 두면 빈 화면이 된다).
+        self.account_filter = normalize_account_filter(self.account_filter, self.accounts)
+        self.detached_account_filter = normalize_account_filter(
+            self.detached_account_filter, self.accounts
+        )
+
     def _save_config(self):
+        # 계좌 정합은 저장 가드보다 먼저 — 파일을 만지지 않으므로 보호 대상이 아니고,
+        # 로드 실패 세션에서도 메모리 상태는 일관되게 유지하는 편이 낫다.
+        self._reconcile_accounts()
         # 로드에 실패한 세션은 메모리가 '빈 기본값'이다. 여기서 저장하면 원본이
         # 그 빈 상태로 덮여 영구 유실된다 — 위젯 위치를 잃는 편이 훨씬 낫다.
         if self.config_load_failed:
@@ -930,6 +980,8 @@ class MacAppManager(QObject):
         self.stock_memos = normalize_stock_memos(self.stock_memos)
         data = {
             "stocks": self.stocks,
+            "accounts": self.accounts,
+            "selected_account": self.account_filter,
             "watchlist": self.watchlist,
             "watch_tags": self.watch_tags,
             "watch_ma": self.watch_ma,
@@ -952,6 +1004,7 @@ class MacAppManager(QObject):
                 "pinned": self.detached_pinned,
                 "opacity": self.detached_opacity,
                 "market_filter": self.detached_market_filter,
+                "account_filter": self.detached_account_filter,
             },
         }
         upd: dict = {}
@@ -1078,33 +1131,35 @@ class MacAppManager(QObject):
         new_stocks = dlg.get_stocks()
         new_stocks = normalize_stocks_schema(new_stocks)
 
-        old_codes = {s["code"] for s in self.stocks}
-        new_codes = {s["code"] for s in new_stocks}
-
-        # 삭제된 종목: fetcher 정지
-        for code in old_codes - new_codes:
-            self._kill_fetcher(code)
-            self.current_prices.pop(code, None)
-
-        # 추가된 종목: fetcher 시작 (stagger)
+        self.stocks = new_stocks
+        # 폴러 정리/시작은 '어떤 종목이 추가·삭제됐나'가 아니라 '지금 살아 있는
+        # code 가 무엇인가'로 판단한다 — 같은 종목이 여러 계좌에 있을 수 있어서
+        # 한쪽이 사라져도 폴러가 필요할 수 있다.
+        self._prune_fetchers()
         added_idx = 0
-        for s in new_stocks:
-            if s["code"] not in old_codes:
+        for s in self.stocks:
+            if s["code"] not in self.fetchers:
                 self._spawn_fetcher(s, stagger_idx=added_idx)
                 added_idx += 1
 
-        self.stocks = new_stocks
         self._sync_fx_timer()
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()
 
+    # ── 보유 항목 조회 ────────────────────────────────────────────────────
+    def _holding(self, uid: str) -> dict | None:
+        """uid 로 보유 항목을 찾는다. code 로 찾으면 같은 종목을 가진 다른 계좌의
+        보유분을 집을 수 있어, 행에서 오는 요청은 항상 uid 로 받는다."""
+        return next((s for s in self.stocks if s.get("uid") == uid), None)
+
     # ── 종목 행 우클릭: 추가 매수 ─────────────────────────────────────────
-    def _on_buy_request(self, code: str):
-        target = next((s for s in self.stocks if s["code"] == code), None)
+    def _on_buy_request(self, uid: str):
+        target = self._holding(uid)
         if target is None:
             return
 
+        code = target["code"]
         current_price = self.current_prices.get(code)
         if not current_price:
             result = fetch_quote_for_stock(target)
@@ -1146,8 +1201,8 @@ class MacAppManager(QObject):
         self._recompute_summary()
 
     # ── 종목 행 우클릭: 수정 ──────────────────────────────────────────────
-    def _on_edit_request(self, code: str):
-        target = next((s for s in self.stocks if s["code"] == code), None)
+    def _on_edit_request(self, uid: str):
+        target = self._holding(uid)
         if target is None:
             return
         dlg = StockDialog(data=target)
@@ -1165,10 +1220,11 @@ class MacAppManager(QObject):
         self._recompute_summary()
 
     # ── 종목 행 우클릭: 삭제 ──────────────────────────────────────────────
-    def _on_delete_request(self, code: str):
-        target = next((s for s in self.stocks if s["code"] == code), None)
+    def _on_delete_request(self, uid: str):
+        target = self._holding(uid)
         if target is None:
             return
+        code = target["code"]
         name = target.get("name", code)
         ret = QMessageBox.question(
             None, "삭제 확인",
@@ -1178,12 +1234,13 @@ class MacAppManager(QObject):
         )
         if ret != QMessageBox.StandardButton.Yes:
             return
-        self.stocks = [s for s in self.stocks if s["code"] != code]
-        memo_dlg = self._stock_memo_dialogs.pop(code, None)
-        if memo_dlg is not None:
-            memo_dlg.close()
-        self._kill_fetcher(code)
-        self.current_prices.pop(code, None)
+        self.stocks = [s for s in self.stocks if s.get("uid") != uid]
+        # 메모창은 종목 단위라, 다른 계좌가 같은 종목을 아직 들고 있으면 열어 둔다.
+        if not any(s["code"] == code for s in self.stocks):
+            memo_dlg = self._stock_memo_dialogs.pop(code, None)
+            if memo_dlg is not None:
+                memo_dlg.close()
+        self._prune_fetchers()
         self._sync_fx_timer()
         self._save_config()
         self._sync_popover_stocks()
@@ -1295,8 +1352,14 @@ class MacAppManager(QObject):
             by_code = {s["code"]: s for s in self.stocks}
             new_stocks = []
             for s in imported:
-                base = dict(by_code.get(s["code"], {}))
+                existing = by_code.get(s["code"])
+                base = dict(existing or {})
                 base.update(s)
+                if existing and existing.get("uid"):
+                    # 병합은 기존 보유분의 평단가/수량 갱신이다. Excel 행마다 새로
+                    # 발급된 uid 로 덮으면 같은 보유분이 매번 다른 항목이 돼 위젯
+                    # 위치·계좌 소속이 초기화된다.
+                    base["uid"] = existing["uid"]
                 new_stocks.append(base)
             imported_codes = {s["code"] for s in imported}
             for s in self.stocks:

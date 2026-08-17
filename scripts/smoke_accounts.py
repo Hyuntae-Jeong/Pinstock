@@ -1,13 +1,15 @@
-"""Smoke test — 계좌 레지스트리 스키마 / 보유 uid / 계좌 필터.
+"""Smoke test — 계좌 레지스트리 / 보유 uid / 계좌 필터 / 팝오버 행 매핑.
 
-여러 계좌 기능(#34)의 데이터 모델 회귀 방지용. 지켜야 할 불변식은 셋이다:
+여러 계좌 기능(#34)의 회귀 방지용. 지켜야 할 불변식은 셋이다:
 
   1. 계좌는 항상 1개 이상 — 계좌가 0개면 종목을 둘 곳이 없다
   2. 모든 보유 종목의 account_id 는 실재하는 계좌를 가리킨다
   3. 보유 항목의 uid 는 전역 유일 — 여기가 깨지면 "계좌1 삼성전자"와
      "계좌2 삼성전자"가 같은 행으로 뭉개지고 편집/삭제가 엉뚱한 쪽을 건드린다
 
-구버전(계좌 개념 없음) stocks.json 이 손실 없이 올라오는지도 함께 확인한다.
+구버전(계좌 개념 없음) stocks.json 의 마이그레이션, macOS 매니저의 실제 저장
+경로, 그리고 같은 종목을 두 계좌가 보유할 때 팝오버가 행 2개를 만들고 한 번 들어온
+시세를 양쪽에 뿌리는지까지 확인한다.
 """
 
 import os
@@ -160,8 +162,82 @@ def _run(log_fp):
     assert "account_id" not in watch[0], "관심종목에 계좌가 붙었다"
     log("[ok] 9. 저장→로드 라운드트립 — 계좌/uid/소속 보존, 관심종목은 계좌 무관")
 
+    # ── 10. 실제 macOS 매니저의 저장 경로 ───────────────────────────────────
+    # Qt 인스턴스화 없이 가짜 self 로 _save_config 을 직접 부른다
+    # (smoke_config_io.py 가 Windows 매니저에 쓰는 방식과 같다).
+    from types import SimpleNamespace
+    from pinstock.ui_macos.manager import MacAppManager
+
+    fresh = [
+        {"code": "005930", "name": "삼성전자", "avg_price": 70000, "quantity": 10},
+        {"code": "005930", "name": "삼성전자", "avg_price": 80000, "quantity": 5},
+    ]
+    mgr = SimpleNamespace(
+        config_load_failed=False,
+        stocks=fresh, accounts=[], account_filter="없는계좌",
+        detached_account_filter=storage.ACCOUNT_FILTER_ALL,
+        watchlist=[], watch_tags=[], watch_ma={"ma5": True},
+        master_visible=True, master_pos=[60, 20], assets_hidden=False,
+        us_return_basis="krw", popover_opacity=1.0, popover_height=None,
+        popover_offset=None, pinned=False,
+        memo={"text": "", "updated_at": None}, stock_memos={},
+        detached_view=None, detached_pos=None, detached_height=None,
+        detached_pinned=False, detached_opacity=1.0, detached_market_filter="ALL",
+        update_last_check_date=None, update_skipped_version=None,
+    )
+    mgr._reconcile_accounts = lambda: MacAppManager._reconcile_accounts(mgr)
+    MacAppManager._save_config(mgr)
+
+    saved, warn = storage.read_config()
+    assert warn is None, f"경고가 없어야 하는데 {warn!r}"
+    assert len(saved["accounts"]) == 1, f"기본 계좌가 저장되지 않았다: {saved['accounts']}"
+    acc_id = saved["accounts"][0]["id"]
+    assert saved["selected_account"] == storage.ACCOUNT_FILTER_ALL, \
+        f"없는 계좌 필터가 전체로 폴백되지 않았다: {saved['selected_account']}"
+    assert saved["detached"]["account_filter"] == storage.ACCOUNT_FILTER_ALL
+    assert all(s["account_id"] == acc_id for s in saved["stocks"]), "저장본에 계좌 소속 없음"
+    uids = [s["uid"] for s in saved["stocks"]]
+    assert len(set(uids)) == 2, f"같은 종목 2보유분의 uid 가 겹친다: {uids}"
+    log("[ok] 10. macOS 매니저 _save_config — 계좌/선택/uid 저장 + 없는 필터 폴백")
+
+    # 같은 매니저로 한 번 더 저장해도 계좌·uid 가 그대로여야 한다.
+    # (저장 때마다 갈리면 재시작마다 계좌 소속이 초기화된다)
+    MacAppManager._save_config(mgr)
+    resaved, _ = storage.read_config()
+    assert [a["id"] for a in resaved["accounts"]] == [acc_id], "재저장에 계좌가 재생성됐다"
+    assert [s["uid"] for s in resaved["stocks"]] == uids, "재저장에 uid 가 갈렸다"
+    log("[ok] 11. 재저장 — 계좌 id / uid 불변")
+
+    # ── 12. 팝오버 — 같은 종목 2계좌면 행도 2개, 시세는 양쪽 다 갱신 ─────────
+    # 시세 폴러는 code 당 1개라 갱신도 code 로 한 번만 들어온다. 행이 uid 키가 된
+    # 뒤로는 code → 행 역인덱스로 뿌리지 않으면 한쪽 행만 값이 차고 다른 쪽은
+    # '─' 로 남는다.
+    from PyQt6.QtWidgets import QApplication
+    from pinstock.ui_macos.popover import Popover
+
+    app = QApplication.instance() or QApplication([])
+    pop = Popover()
+    pop.set_stocks(both)                      # 005930 을 acc1/acc2 가 각각 보유
+    assert len(pop.rows) == 2, f"행이 2개여야 하는데 {len(pop.rows)}개 (uid 키가 아님)"
+    assert set(pop.rows) == {a1["uid"], a2["uid"]}, "행 키가 uid 가 아니다"
+
+    pop.update_stock_price("005930", {
+        "name": "삼성전자", "price": 75000, "change_price": 1000, "change_rate": 1.35,
+    })
+    prices = [r.current_price for r in pop.rows.values()]
+    assert prices == [75000, 75000], f"두 행 모두 갱신돼야 하는데 {prices}"
+
+    # 행에서 올라오는 편집/삭제 요청은 uid 여야 한다 — code 면 어느 계좌의 보유분을
+    # 고칠지 결정할 수 없다.
+    got: list[str] = []
+    pop.edit_requested.connect(got.append)
+    pop.rows[a2["uid"]].edit_requested.emit(pop.rows[a2["uid"]].uid)
+    assert got == [a2["uid"]], f"편집 시그널이 uid 가 아니다: {got}"
+    pop.deleteLater()
+    log("[ok] 12. 팝오버 — 같은 종목 2계좌 → 행 2개, 시세 동시 갱신, 시그널은 uid")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 9개 케이스 전부 통과")
+    log("\n[PASS] 12개 케이스 전부 통과")
 
 
 def main() -> int:

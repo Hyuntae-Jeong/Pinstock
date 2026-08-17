@@ -39,11 +39,14 @@ class StockRow(QWidget):
     - 우클릭: 수정/삭제 메뉴
     """
 
-    expanded_toggled = pyqtSignal(str)   # code
-    buy_requested    = pyqtSignal(str)   # code
-    edit_requested   = pyqtSignal(str)   # code
+    # 행을 가리키는 키는 code 가 아니라 uid 다 — 여러 계좌가 같은 종목을 각자
+    # 보유할 수 있어서, code 로는 "계좌1 삼성전자"와 "계좌2 삼성전자"를 구분할 수
+    # 없다. 메모만 예외로 code 를 보낸다 (메모는 종목에 붙지 보유분에 붙지 않는다).
+    expanded_toggled = pyqtSignal(str)   # uid
+    buy_requested    = pyqtSignal(str)   # uid
+    edit_requested   = pyqtSignal(str)   # uid
     memo_requested   = pyqtSignal(str)   # code
-    delete_requested = pyqtSignal(str)   # code
+    delete_requested = pyqtSignal(str)   # uid
 
     COMPACT_H = 52
     EXTENDED_COMPACT_H = 68
@@ -54,6 +57,9 @@ class StockRow(QWidget):
     def __init__(self, stock_data: dict, parent=None):
         super().__init__(parent)
         self.data = stock_data
+        # 정규화를 거치면 uid 는 항상 있지만, 손으로 만든 dict 로도 행을 띄울 수
+        # 있으므로 code 로 폴백해 키가 비는 일이 없게 한다.
+        self.uid: str = stock_data.get("uid") or stock_data.get("code", "")
         self.current_price: float = 0
         self.usd_krw_rate: float | None = None
         self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
@@ -397,7 +403,7 @@ class StockRow(QWidget):
         else:
             self.expand_panel.hide()
             self.setFixedHeight(self._compact_height)
-        self.expanded_toggled.emit(self.data["code"])
+        self.expanded_toggled.emit(self.uid)
 
     # ── 마우스 이벤트 ────────────────────────────────────────────────────
     def mousePressEvent(self, event):
@@ -421,13 +427,13 @@ class StockRow(QWidget):
         del_act  = menu.addAction("🗑️   삭제")
         action = menu.exec(event.globalPos())
         if action == buy_act:
-            self.buy_requested.emit(self.data["code"])
+            self.buy_requested.emit(self.uid)
         elif action == edit_act:
-            self.edit_requested.emit(self.data["code"])
+            self.edit_requested.emit(self.uid)
         elif action == memo_act:
             self.memo_requested.emit(self.data["code"])
         elif action == del_act:
-            self.delete_requested.emit(self.data["code"])
+            self.delete_requested.emit(self.uid)
 
 
 # ─── 포트폴리오 요약 카드 ───────────────────────────────────────────────────
@@ -962,10 +968,10 @@ class Popover(QWidget):
 
     toggle_assets_requested  = pyqtSignal()      # 상단 요약 카드 클릭 → 자산 숨김 토글
     context_menu_requested   = pyqtSignal(QPoint)  # 요약 카드 우클릭 → 트레이와 동일 메뉴(전역 좌표)
-    buy_requested            = pyqtSignal(str)   # code
-    edit_requested           = pyqtSignal(str)   # code
-    memo_requested           = pyqtSignal(str)   # code
-    delete_requested         = pyqtSignal(str)   # code
+    buy_requested            = pyqtSignal(str)   # uid (보유 항목 고유 키)
+    edit_requested           = pyqtSignal(str)   # uid
+    memo_requested           = pyqtSignal(str)   # code (메모는 계좌 무관)
+    delete_requested         = pyqtSignal(str)   # uid
     manage_watch_requested   = pyqtSignal()      # 관심종목 행 우클릭 → 관심종목 관리
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
     opacity_changed          = pyqtSignal(float)   # 0.1 ~ 1.0
@@ -996,7 +1002,12 @@ class Popover(QWidget):
         self._pinned: bool = False
         self.setWindowFlags(self._window_flags())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # 보유 행은 uid 로, 관심 행은 code 로 건다. 보유는 같은 종목을 여러 계좌가
+        # 각자 가질 수 있어 code 가 키가 될 수 없고, 관심은 계좌 개념이 없어 code 로
+        # 충분하다. 시세는 시장 데이터라 code 단위로 오므로, 한 번 받은 값을 같은
+        # 종목의 모든 보유 행에 뿌리기 위해 code → 행 목록 역인덱스를 함께 둔다.
         self.rows: dict[str, StockRow] = {}
+        self._rows_by_code: dict[str, list[StockRow]] = {}
         self.watch_rows: dict[str, WatchRow] = {}
         self.watch_headers: dict[str, _WatchTagHeader] = {}   # 태그 그룹 헤더
         self._stocks: list[dict] = []        # 보유 캐시 (뷰 전환 시 재구성용)
@@ -1477,6 +1488,7 @@ class Popover(QWidget):
             self.rows_layout.removeWidget(h)
             h.deleteLater()
         self.rows.clear()
+        self._rows_by_code.clear()
         self.watch_rows.clear()
         self.watch_headers.clear()
 
@@ -1508,7 +1520,8 @@ class Popover(QWidget):
             row.memo_requested.connect(self.memo_requested.emit)
             row.delete_requested.connect(self.delete_requested.emit)
             row.expanded_toggled.connect(self._on_row_expanded)
-            self.rows[s["code"]] = row
+            self.rows[row.uid] = row
+            self._rows_by_code.setdefault(s["code"], []).append(row)
             self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
             self._apply_cached(s["code"], row)
 
@@ -1558,10 +1571,11 @@ class Popover(QWidget):
         else:
             self.summary.update_metrics(total_invest, total_eval)
 
+    # 시세 갱신은 code 단위로 들어온다. 같은 종목을 여러 계좌가 보유하면 행이
+    # 여러 개이므로 역인덱스로 전부에 뿌린다 (폴러는 여전히 code 당 1개).
     def update_stock_price(self, code: str, result: dict):
         self._price_cache[code] = result
-        row = self.rows.get(code)
-        if row:
+        for row in self._rows_by_code.get(code, ()):
             row.apply_price(result)
 
     def set_usd_krw_rate(self, rate: float | None):
@@ -1576,14 +1590,12 @@ class Popover(QWidget):
 
     def update_stock_minute(self, code: str, prices: list, open_price: float):
         self._minute_cache[code] = (prices, open_price)
-        row = self.rows.get(code)
-        if row:
+        for row in self._rows_by_code.get(code, ()):
             row.apply_minute(prices, open_price)
 
     def update_stock_daily(self, code: str, candles: list):
         self._daily_cache[code] = candles
-        row = self.rows.get(code)
-        if row:
+        for row in self._rows_by_code.get(code, ()):
             row.apply_daily(candles)
 
     # ── 관심종목 시세 (일봉 기준) ─────────────────────────────────────────
@@ -1600,17 +1612,17 @@ class Popover(QWidget):
             row.apply_daily(candles)
 
     # ── 행 확장 시 자동 스크롤 ────────────────────────────────────────────
-    def _on_row_expanded(self, code: str):
+    def _on_row_expanded(self, uid: str):
         """종목 행이 펼쳐지면 펼친 내용이 스크롤 영역 아래로 잘리지 않도록
         해당 행 전체가 보이는 위치까지 자동 스크롤한다 (접을 때는 무시)."""
-        row = self.rows.get(code)
+        row = self.rows.get(uid)
         if row is None or not row.is_expanded:
             return
         # 늘어난 행 높이가 레이아웃에 반영된 다음에 스크롤해야 위치가 맞다.
-        QTimer.singleShot(0, lambda: self._ensure_row_visible(code))
+        QTimer.singleShot(0, lambda: self._ensure_row_visible(uid))
 
-    def _ensure_row_visible(self, code: str):
-        row = self.rows.get(code)
+    def _ensure_row_visible(self, uid: str):
+        row = self.rows.get(uid)
         if row is None or not row.is_expanded:
             return
         self.scroll.ensureWidgetVisible(row, 0, 8)
