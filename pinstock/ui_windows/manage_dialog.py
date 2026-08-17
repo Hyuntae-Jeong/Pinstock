@@ -25,6 +25,7 @@ from ..core.portfolio import buy_preview, is_us_stock, stock_metrics
 from ..core.storage import (
     MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD,
     DEFAULT_TAG_COLOR, new_tag_id, normalize_tags, prune_watch_tags,
+    DEFAULT_ACCOUNT_COLOR, ACCOUNT_NAME_MAX, new_account_id, normalize_accounts,
 )
 from .theme import C, DIALOG_STYLE, SEARCH_POPUP_STYLE, TAG_PALETTE, MA_COLORS
 from .form_widgets import (
@@ -647,16 +648,23 @@ class BuyPreviewDialog(QDialog):
 # ─── 종목 추가 / 수정 다이얼로그 ──────────────────────────────────────────────
 class StockDialog(QDialog):
     def __init__(self, parent=None, data: dict | None = None, watch_mode: bool = False,
-                 tags: list[dict] | None = None):
+                 tags: list[dict] | None = None, accounts: list[dict] | None = None,
+                 default_account: str | None = None):
         super().__init__(parent)
         self.is_edit = data is not None
         self.watch_mode = watch_mode   # 관심종목 모드: 평단가/수량 입력 숨김
         self._tags = tags or []        # 관심종목 태그 레지스트리 (추가/수정 시 태그 지정용)
+        # 계좌 선택은 보유 종목에만 있다 (관심종목은 전 계좌 공유). 계좌가 1개뿐이면
+        # 고를 게 없으므로 행 자체를 넣지 않는다.
+        self._accounts = [] if watch_mode else (accounts or [])
+        self._show_account_row = len(self._accounts) > 1
         if watch_mode:
             self.setWindowTitle("관심종목 수정" if self.is_edit else "관심종목 추가")
         else:
             self.setWindowTitle("종목 수정" if self.is_edit else "종목 추가")
-        self.setFixedSize(380 if watch_mode else 410, 270 if watch_mode else 360)
+        base_h = 270 if watch_mode else 360
+        self.setFixedSize(380 if watch_mode else 410,
+                          base_h + (46 if self._show_account_row else 0))
         self.setStyleSheet(DIALOG_STYLE)
         self._preview_result: dict | None = None
 
@@ -795,6 +803,23 @@ class StockDialog(QDialog):
             self.tag_combo.setCurrentIndex(sel)
             self.tag_combo.setIconSize(QSize(12, 12))
             layout.addRow(self._row_label("태그"), self.tag_combo)
+
+        # 보유 모드: 계좌 선택 — 추가 시엔 지금 보고 있는 계좌, 수정 시엔 그 보유분의
+        # 계좌가 기본값이다. 수정에서 계좌를 바꾸면 그대로 계좌 간 이동이 된다.
+        self.account_combo = None
+        if self._show_account_row:
+            self.account_combo = _NoScrollComboBox()
+            current = str((data or {}).get("account_id") or default_account or "")
+            sel = 0
+            for i, a in enumerate(self._accounts):
+                self.account_combo.addItem(
+                    _color_icon(a.get("color", DEFAULT_ACCOUNT_COLOR)), a.get("name", ""), a["id"]
+                )
+                if a["id"] == current:
+                    sel = i
+            self.account_combo.setCurrentIndex(sel)
+            self.account_combo.setIconSize(QSize(12, 12))
+            layout.addRow(self._row_label("계좌"), self.account_combo)
 
         # 기존 데이터 채우기
         if self.is_edit:
@@ -1192,6 +1217,9 @@ class StockDialog(QDialog):
             rate = self._buy_rate_from_basis(avg_price, quantity)
             if rate is not None:
                 data["buy_exchange_rate"] = rate
+        # 계좌 행이 없으면(계좌 1개) 키를 넣지 않는다 — 호출측이 기본 계좌를 채운다.
+        if self.account_combo is not None:
+            data["account_id"] = self.account_combo.currentData()
         return data
 
 
@@ -2024,6 +2052,349 @@ class TagManagerDialog(QDialog):
     def get_watchlist(self) -> list[dict]:
         """태그 삭제 시 선택(종목 삭제/태그 해제)이 반영된 관심종목 목록."""
         return self._watchlist
+
+
+# ─── 계좌 추가/수정 창 ────────────────────────────────────────────────────────
+class AccountEditDialog(QDialog):
+    """계좌명 + 색상을 입력받는다 (태그 편집창과 같은 구성).
+
+    계좌명은 팝오버의 계좌 버튼 한 줄에 들어가야 해서 ACCOUNT_NAME_MAX 자로 막는다.
+    색은 보유 행의 계좌 뱃지와 계좌 버튼에 그대로 쓰인다.
+    """
+
+    def __init__(self, parent=None, account: dict | None = None):
+        super().__init__(parent)
+        self.is_edit = account is not None
+        self.setWindowTitle("계좌 수정" if self.is_edit else "계좌 추가")
+        self.setFixedSize(340, 190)
+        self.setStyleSheet(DIALOG_STYLE)
+        self._color = (account or {}).get("color", DEFAULT_ACCOUNT_COLOR)
+        if not _is_hex_color(self._color):
+            self._color = DEFAULT_ACCOUNT_COLOR
+
+        layout = QFormLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(24, 24, 24, 18)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.name_edit = AutoSelectLineEdit()
+        self.name_edit.setPlaceholderText(f"예: 주계좌 (최대 {ACCOUNT_NAME_MAX}자)")
+        self.name_edit.setMaxLength(ACCOUNT_NAME_MAX)
+        if self.is_edit:
+            self.name_edit.setText(str(account.get("name", "")))
+        layout.addRow(self._label("계좌명"), self.name_edit)
+
+        self.color_btn = QPushButton()
+        self.color_btn.setFixedHeight(32)
+        self.color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.color_btn.clicked.connect(self._choose_color)
+        layout.addRow(self._label("색상"), self.color_btn)
+        self._update_color_btn()
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self._on_ok)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    @staticmethod
+    def _label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl.setFixedWidth(70)
+        lbl.setMinimumHeight(32)
+        return lbl
+
+    def _choose_color(self):
+        dlg = ColorPickerDialog(self._color, self)
+        if dlg.exec():
+            self._color = dlg.selected_color()
+            self._update_color_btn()
+
+    def _update_color_btn(self):
+        self.color_btn.setText(self._color.upper())
+        self.color_btn.setStyleSheet(
+            f"QPushButton {{ background: {self._color}; color: {_contrast_text(self._color)};"
+            f" border: 1px solid {C['surface2']}; border-radius: 7px; font-weight: bold; }}"
+        )
+
+    def _on_ok(self):
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "입력 오류", "계좌명을 입력하세요.")
+            return
+        self.accept()
+
+    def get_data(self) -> dict:
+        return {"name": self.name_edit.text().strip(), "color": self._color}
+
+
+# ─── 계좌 이동 대상 선택 창 ───────────────────────────────────────────────────
+class AccountPickDialog(QDialog):
+    """보유 종목을 옮길 대상 계좌 하나를 고른다 (계좌 삭제 시)."""
+
+    def __init__(self, accounts: list[dict], count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("계좌 이동")
+        self.setFixedSize(340, 170)
+        self.setStyleSheet(DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 18)
+        root.setSpacing(14)
+
+        msg = QLabel(f"보유 종목 {count}개를 옮길 계좌를 선택하세요.")
+        msg.setWordWrap(True)
+        root.addWidget(msg)
+
+        self.combo = _NoScrollComboBox()
+        for a in accounts:
+            self.combo.addItem(_color_icon(a.get("color", DEFAULT_ACCOUNT_COLOR)),
+                               a.get("name", ""), a.get("id"))
+        root.addWidget(self.combo)
+        root.addStretch()
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("이동")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def selected_id(self) -> str:
+        return self.combo.currentData()
+
+
+# ─── 계좌 관리 창 ─────────────────────────────────────────────────────────────
+class AccountManagerDialog(QDialog):
+    """계좌 추가 / 수정(이름·색상) / 순서 변경 / 삭제.
+
+    표의 순서가 곧 팝오버 계좌 버튼의 순서다. 계좌를 지울 때 그 계좌의 보유 종목을
+    어떻게 할지(다른 계좌로 이동 / 함께 삭제) 물어보고 stocks 를 제자리에서 고친다.
+    계좌가 0개가 되면 종목을 둘 곳이 없으므로 마지막 하나는 지울 수 없다.
+    """
+
+    COLS = ["색상", "계좌명", "종목"]
+
+    def __init__(self, accounts: list[dict], stocks: list[dict] | None = None, parent=None):
+        super().__init__(parent)
+        self._accounts: list[dict] = accounts        # 호출측에서 deepcopy 해서 전달
+        self._stocks: list[dict] = stocks if stocks is not None else []
+
+        self.setWindowTitle("계좌 관리")
+        self.setMinimumSize(380, 400)
+        self.setStyleSheet(DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(12)
+
+        hint = QLabel("표의 순서가 팝오버 계좌 버튼 순서입니다.")
+        hint.setStyleSheet(f"color: {C['subtext']}; font-size: 11px;")
+        root.addWidget(hint)
+
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(False)
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)     # 색상
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)   # 계좌명
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)     # 종목 수
+        self.table.setColumnWidth(0, 64)
+        self.table.setColumnWidth(2, 64)
+        hdr.setStretchLastSection(False)
+        hdr.setSectionsClickable(False)
+        self.table.doubleClicked.connect(lambda _: self._edit_selected())
+        root.addWidget(self.table, 1)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        add_btn = QPushButton("➕  추가")
+        add_btn.clicked.connect(self._add)
+        action_row.addWidget(add_btn)
+        edit_btn = QPushButton("✏  수정")
+        edit_btn.setProperty("flat", "true")
+        edit_btn.clicked.connect(self._edit_selected)
+        action_row.addWidget(edit_btn)
+        del_btn = QPushButton("🗑  삭제")
+        del_btn.setProperty("flat", "true")
+        del_btn.clicked.connect(self._delete_selected)
+        action_row.addWidget(del_btn)
+        action_row.addStretch()
+        # 순서 버튼은 DIALOG_STYLE 의 좌우 padding(20px)을 그대로 두면 글자가 밀려
+        # 나가 빈 버튼처럼 보인다. 폭에 맞춰 padding 을 따로 준다.
+        for glyph, delta, tip in (("▲", -1, "위로"), ("▼", 1, "아래로")):
+            btn = QPushButton(glyph)
+            btn.setProperty("flat", "true")
+            btn.setFixedWidth(38)
+            btn.setToolTip(f"선택한 계좌를 {tip}")
+            btn.setStyleSheet("padding: 8px 0;")
+            btn.clicked.connect(lambda _, d=delta: self._move_selected(d))
+            action_row.addWidget(btn)
+        root.addLayout(action_row)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setProperty("flat", "true")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._rebuild_table()
+
+    # ── 표 ─────────────────────────────────────────────────────────────────
+    def _holding_count(self, account_id: str) -> int:
+        return sum(1 for s in self._stocks if s.get("account_id") == account_id)
+
+    def _rebuild_table(self, select_row: int | None = None):
+        self.table.setRowCount(0)
+        for i, account in enumerate(self._accounts):
+            self.table.insertRow(i)
+            self._fill_row(i, account)
+        if select_row is not None and 0 <= select_row < self.table.rowCount():
+            self.table.selectRow(select_row)
+
+    def _fill_row(self, row: int, account: dict):
+        swatch = QFrame()
+        swatch.setFixedSize(18, 18)
+        swatch.setStyleSheet(
+            f"background: {account.get('color', DEFAULT_ACCOUNT_COLOR)};"
+            f" border-radius: 5px; border: 1px solid {C['surface2']};"
+        )
+        container = QWidget()
+        hl = QHBoxLayout(container)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addStretch()
+        hl.addWidget(swatch)
+        hl.addStretch()
+        placeholder = QTableWidgetItem("")
+        placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 0, placeholder)
+        self.table.setCellWidget(row, 0, container)
+
+        name_item = QTableWidgetItem(str(account.get("name", "")))
+        name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 1, name_item)
+
+        count_item = QTableWidgetItem(str(self._holding_count(account.get("id"))))
+        count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        count_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 2, count_item)
+
+    # ── 편집 동작 ───────────────────────────────────────────────────────────
+    def _add(self):
+        dlg = AccountEditDialog(parent=self)
+        if not dlg.exec():
+            return
+        data = dlg.get_data()
+        self._accounts.append(
+            {"id": new_account_id(), "name": data["name"], "color": data["color"]}
+        )
+        self._rebuild_table(select_row=len(self._accounts) - 1)
+
+    def _edit_selected(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._accounts)):
+            return
+        dlg = AccountEditDialog(parent=self, account=self._accounts[row])
+        if not dlg.exec():
+            return
+        data = dlg.get_data()
+        self._accounts[row]["name"] = data["name"]
+        self._accounts[row]["color"] = data["color"]
+        self._rebuild_table(select_row=row)
+
+    def _move_selected(self, delta: int):
+        row = self.table.currentRow()
+        target = row + delta
+        if not (0 <= row < len(self._accounts) and 0 <= target < len(self._accounts)):
+            return
+        self._accounts[row], self._accounts[target] = self._accounts[target], self._accounts[row]
+        self._rebuild_table(select_row=target)
+
+    def _delete_selected(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._accounts)):
+            return
+        if len(self._accounts) <= 1:
+            QMessageBox.information(
+                self, "계좌 삭제",
+                "계좌는 최소 1개가 필요합니다.\n마지막 계좌는 삭제할 수 없습니다."
+            )
+            return
+
+        account = self._accounts[row]
+        account_id = account.get("id")
+        name = account.get("name", "")
+        members = [s for s in self._stocks if s.get("account_id") == account_id]
+
+        if not members:
+            ret = QMessageBox.question(
+                self, "계좌 삭제",
+                f"계좌 '{name}' 을(를) 삭제할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            # 종목이 남아 있으면 어떻게 할지 반드시 물어본다 — 조용히 지우면
+            # 평단가/수량은 일일 백업에서만 되살릴 수 있다.
+            box = QMessageBox(self)
+            box.setWindowTitle("계좌 삭제")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(f"계좌 '{name}' 을(를) 삭제합니다.")
+            box.setInformativeText(f"이 계좌의 보유 종목 {len(members)}개를 어떻게 할까요?")
+            move_btn = box.addButton("다른 계좌로 이동", QMessageBox.ButtonRole.AcceptRole)
+            del_btn = box.addButton("종목도 함께 삭제", QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(move_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn or clicked is None:
+                return
+            if clicked is del_btn:
+                self._stocks[:] = [
+                    s for s in self._stocks if s.get("account_id") != account_id
+                ]
+            else:
+                others = [a for a in self._accounts if a.get("id") != account_id]
+                if len(others) == 1:
+                    target = others[0]["id"]      # 갈 곳이 하나뿐이면 묻지 않는다
+                else:
+                    pick = AccountPickDialog(others, len(members), self)
+                    if not pick.exec():
+                        return
+                    target = pick.selected_id()
+                for s in members:
+                    s["account_id"] = target
+
+        self._accounts.pop(row)
+        next_sel = min(row, len(self._accounts) - 1) if self._accounts else None
+        self._rebuild_table(select_row=next_sel)
+
+    # ── 결과 ───────────────────────────────────────────────────────────────
+    def get_accounts(self) -> list[dict]:
+        return normalize_accounts(self._accounts)
+
+    def get_stocks(self) -> list[dict]:
+        """계좌 삭제 시 선택(이동/삭제)이 반영된 보유 종목 목록."""
+        return self._stocks
 
 
 # ─── 관심종목 관리 다이얼로그 ─────────────────────────────────────────────────

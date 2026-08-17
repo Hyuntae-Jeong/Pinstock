@@ -294,8 +294,112 @@ def _run(log_fp):
     pop.deleteLater()
     log("[ok] 13. 계좌 줄 표시 조건 / 계좌×시장 AND / 뱃지 / 빈 계좌 안내 / 핀 위치")
 
+    # ── 14. 계좌 관리 다이얼로그 — 순서 변경 / 삭제 시 종목 처리 ─────────────
+    # 삭제는 되돌릴 수 없는 유일한 경로라(평단가/수량은 일일 백업에서만 복구),
+    # '이동'과 '함께 삭제'가 각각 정확히 동작하는지 모달을 흉내 내 확인한다.
+    from pinstock.ui_windows import manage_dialog as md
+
+    _orig_exec = md.QMessageBox.exec
+    _orig_clicked = md.QMessageBox.clickedButton
+    _orig_question = md.QMessageBox.question
+    _orig_info = md.QMessageBox.information
+
+    def _press(label: str):
+        """다음 QMessageBox 에서 label 이 들어간 버튼을 누른 것으로 처리."""
+        md.QMessageBox.exec = lambda self: 0
+        md.QMessageBox.clickedButton = lambda self: next(
+            (b for b in self.buttons() if label in b.text()), None
+        )
+
+    md.QMessageBox.question = classmethod(
+        lambda cls, *a, **k: md.QMessageBox.StandardButton.Yes
+    )
+    info_calls: list[str] = []
+    md.QMessageBox.information = classmethod(
+        lambda cls, _p, _t, text, *a, **k: info_calls.append(text)
+    )
+    try:
+        def fresh_dialog():
+            accounts = [dict(a) for a in accounts3]
+            stocks = [dict(s) for s in mixed]
+            return md.AccountManagerDialog(accounts, stocks), accounts, stocks
+
+        # 순서 변경 = 팝오버 계좌 버튼 순서
+        dlg, _, _ = fresh_dialog()
+        dlg.table.selectRow(2)
+        dlg._move_selected(-1)
+        assert [a["id"] for a in dlg.get_accounts()] == ["acc1", "acc3", "acc2"], \
+            [a["id"] for a in dlg.get_accounts()]
+        assert dlg.table.currentRow() == 1, "이동 후 선택이 따라오지 않았다"
+        dlg.deleteLater()
+
+        # 종목 있는 계좌 삭제 → '다른 계좌로 이동' (남은 계좌가 2개라 대상은 물어본다)
+        dlg, _, _ = fresh_dialog()
+        md.AccountPickDialog.exec = lambda self: 1
+        md.AccountPickDialog.selected_id = lambda self: "acc3"
+        dlg.table.selectRow(0)                      # acc1 — 종목 2개
+        _press("이동")
+        dlg._delete_selected()
+        left = dlg.get_stocks()
+        assert [a["id"] for a in dlg.get_accounts()] == ["acc2", "acc3"], dlg.get_accounts()
+        assert len(left) == 3, f"이동인데 종목이 사라졌다: {len(left)}"
+        assert {s["account_id"] for s in left} == {"acc2", "acc3"}, \
+            {s["account_id"] for s in left}
+        dlg.deleteLater()
+
+        # 같은 상황에서 '종목도 함께 삭제'
+        dlg, _, _ = fresh_dialog()
+        dlg.table.selectRow(0)
+        _press("함께 삭제")
+        dlg._delete_selected()
+        left = dlg.get_stocks()
+        assert len(left) == 1 and left[0]["account_id"] == "acc2", left
+        dlg.deleteLater()
+
+        # 취소하면 계좌도 종목도 그대로
+        dlg, _, _ = fresh_dialog()
+        dlg.table.selectRow(0)
+        _press("취소")
+        dlg._delete_selected()
+        assert len(dlg.get_accounts()) == 3 and len(dlg.get_stocks()) == 3, "취소인데 바뀌었다"
+        dlg.deleteLater()
+
+        # 마지막 한 개는 지울 수 없다 (계좌 0개면 종목을 둘 곳이 없다)
+        solo = md.AccountManagerDialog([dict(accounts3[0])], [])
+        solo.table.selectRow(0)
+        info_calls.clear()
+        solo._delete_selected()
+        assert len(solo.get_accounts()) == 1, "마지막 계좌가 삭제됐다"
+        assert info_calls and "최소 1개" in info_calls[0], info_calls
+        solo.deleteLater()
+    finally:
+        md.QMessageBox.exec = _orig_exec
+        md.QMessageBox.clickedButton = _orig_clicked
+        md.QMessageBox.question = _orig_question
+        md.QMessageBox.information = _orig_info
+    log("[ok] 14. 계좌 관리 — 순서 변경 / 삭제 시 이동·함께삭제·취소 / 마지막 계좌 보호")
+
+    # ── 15. 종목 추가·수정 창의 계좌 선택 ───────────────────────────────────
+    # 계좌가 1개면 고를 게 없으니 행 자체를 넣지 않는다 (그때는 매니저가 채운다).
+    solo_dlg = md.StockDialog(accounts=accounts3[:1], default_account="acc1")
+    assert solo_dlg.account_combo is None, "계좌 1개인데 계좌 행이 생겼다"
+    assert "account_id" not in solo_dlg.get_data(), "계좌 행이 없는데 값을 내보냈다"
+    solo_dlg.deleteLater()
+
+    add_dlg = md.StockDialog(accounts=accounts3, default_account="acc2")
+    assert add_dlg.account_combo is not None, "계좌 3개인데 계좌 행이 없다"
+    assert add_dlg.get_data()["account_id"] == "acc2", "지금 보는 계좌가 기본값이 아니다"
+    add_dlg.deleteLater()
+
+    edit_dlg = md.StockDialog(data=dict(mixed[1]), accounts=accounts3)   # acc2 보유분
+    assert edit_dlg.account_combo.currentData() == "acc2", "수정 창 기본값이 그 보유분의 계좌가 아니다"
+    edit_dlg.account_combo.setCurrentIndex(2)                           # acc3 로 이동
+    assert edit_dlg.get_data()["account_id"] == "acc3", "계좌 이동이 반영되지 않았다"
+    edit_dlg.deleteLater()
+    log("[ok] 15. 종목 창 계좌 선택 — 1개면 숨김 / 추가 기본값 / 수정 시 계좌 이동")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 13개 케이스 전부 통과")
+    log("\n[PASS] 15개 케이스 전부 통과")
 
 
 def main() -> int:

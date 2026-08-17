@@ -36,7 +36,7 @@ from ..core.storage import (
 )
 from ..ui_windows.manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
-    ImportModeDialog, fetch_quote_for_stock,
+    ImportModeDialog, AccountManagerDialog, fetch_quote_for_stock,
 )
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
@@ -283,6 +283,9 @@ class MacAppManager(QObject):
         self.popover.manage_watch_requested.connect(self.open_manage_watch_dialog)
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
         self.popover.account_filter_changed.connect(self._on_account_filter_changed)
+        self.popover.manage_accounts_requested.connect(
+            lambda _pos: self.open_account_dialog()
+        )
         self.popover.opacity_changed.connect(self._on_opacity_changed)
         self.popover.height_changed.connect(self._on_height_changed)
         self.popover.position_offset_changed.connect(self._on_position_offset_changed)
@@ -346,6 +349,7 @@ class MacAppManager(QObject):
         menu = QMenu()
         menu.addAction("종목 추가", self.open_add_dialog)
         menu.addAction("종목 관리", self.open_manage_dialog)
+        menu.addAction("계좌 관리", self.open_account_dialog)
         menu.addSeparator()
         menu.addAction("관심종목 추가", self.open_add_watch_dialog)
         menu.addAction("관심종목 관리", self.open_manage_watch_dialog)
@@ -613,6 +617,7 @@ class MacAppManager(QObject):
         win.manage_watch_requested.connect(self.open_manage_watch_dialog)
         win.market_filter_changed.connect(self._on_detached_market_filter_changed)
         win.account_filter_changed.connect(self._on_detached_account_filter_changed)
+        win.manage_accounts_requested.connect(lambda _pos: self.open_account_dialog())
         win.opacity_changed.connect(self._on_detached_opacity_changed)
         win.height_changed.connect(self._on_detached_height_changed)
         win.pinned_changed.connect(self._on_detached_pinned_changed)
@@ -1059,17 +1064,62 @@ class MacAppManager(QObject):
         except Exception as e:
             print(f"[save] 오류: {e}")
 
+    # ── 계좌 관리 ──────────────────────────────────────────────────────────
+    def open_account_dialog(self):
+        """계좌 추가/수정/순서/삭제. 삭제 시 소속 종목 처리(이동 또는 함께 삭제)까지
+        다이얼로그 안에서 끝나고, 여기서는 그 결과를 그대로 받아 반영한다."""
+        dlg = AccountManagerDialog(
+            accounts=copy.deepcopy(self.accounts),
+            stocks=copy.deepcopy(self.stocks),
+        )
+        if not dlg.exec():
+            return
+        self.accounts = dlg.get_accounts()
+        self.stocks = normalize_stocks_schema(dlg.get_stocks())
+        # 삭제된 계좌를 가리키던 필터를 '전체'로 되돌리고 고아 종목을 회수한다.
+        self._reconcile_accounts()
+        # 종목이 함께 삭제됐으면 아무도 안 쓰는 폴러를 정리한다.
+        self._prune_fetchers()
+        self._sync_fx_timer()
+        self._save_config()
+        self._sync_accounts_to_windows()
+        self._sync_popover_stocks()
+        self._recompute_summary()
+        self._refresh_memo_list_if_open()
+
+    def _default_account_for_add(self) -> str:
+        """새 종목이 들어갈 기본 계좌 — 지금 보고 있는 계좌, '전체'면 첫 계좌."""
+        current = self._holdings_account_filter()
+        if any(a.get("id") == current for a in self.accounts):
+            return current
+        return self.accounts[0]["id"] if self.accounts else ""
+
+    def _account_name(self, account_id: str) -> str:
+        return next(
+            (a.get("name", "") for a in self.accounts if a.get("id") == account_id), ""
+        )
+
     # ── 종목 추가 ──────────────────────────────────────────────────────────
     def open_add_dialog(self):
-        dlg = StockDialog()
+        dlg = StockDialog(accounts=self.accounts,
+                          default_account=self._default_account_for_add())
         if not dlg.exec():
             return
         d = dlg.get_data()
         code = d["code"]
         if not code:
             return
-        if any(s["code"] == code for s in self.stocks):
-            QMessageBox.information(None, "알림", f"'{code}'는 이미 추가되어 있습니다.")
+        # 계좌 행이 없었으면(계좌 1개) 기본 계좌를 여기서 채운다.
+        account_id = d.get("account_id") or self._default_account_for_add()
+        d["account_id"] = account_id
+        # 중복은 계좌 안에서만 막는다 — 다른 계좌가 같은 종목을 각자 다른 평단가로
+        # 들고 있는 것이 이 기능의 요점이다.
+        if any(s["code"] == code and s.get("account_id") == account_id for s in self.stocks):
+            where = ""
+            if len(self.accounts) > 1:
+                name = self._account_name(account_id)
+                where = f" '{name}' 계좌에" if name else ""
+            QMessageBox.information(None, "알림", f"'{code}'는 이미{where} 추가되어 있습니다.")
             return
 
         result = fetch_quote_for_stock(d)
@@ -1245,12 +1295,15 @@ class MacAppManager(QObject):
         target = self._holding(uid)
         if target is None:
             return
-        dlg = StockDialog(data=target)
+        dlg = StockDialog(data=target, accounts=self.accounts)
         if not dlg.exec():
             return
         new = dlg.get_data()
         target["avg_price"] = new["avg_price"]
         target["quantity"]  = new["quantity"]
+        # 계좌를 바꿨으면 그대로 계좌 간 이동이다 (uid 가 유지되므로 메모·설정은 그대로).
+        if new.get("account_id"):
+            target["account_id"] = new["account_id"]
         if "buy_exchange_rate" in new:
             target["buy_exchange_rate"] = new["buy_exchange_rate"]
         else:
