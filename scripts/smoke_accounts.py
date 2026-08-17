@@ -236,8 +236,66 @@ def _run(log_fp):
     pop.deleteLater()
     log("[ok] 12. 팝오버 — 같은 종목 2계좌 → 행 2개, 시세 동시 갱신, 시그널은 uid")
 
+    # ── 13. 계좌 줄 / 계좌 필터 / 뱃지 ──────────────────────────────────────
+    accounts3 = storage.normalize_accounts([
+        {"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+        {"id": "acc2", "name": "연금", "color": "#a6e3a1"},
+        {"id": "acc3", "name": "ISA", "color": "#f9e2af"},
+    ])
+    mixed = storage.normalize_stocks_schema([
+        {"code": "005930", "name": "삼성전자", "avg_price": 70000, "quantity": 10,
+         "account_id": "acc1"},
+        {"code": "005930", "name": "삼성전자", "avg_price": 80000, "quantity": 5,
+         "account_id": "acc2"},
+        {"code": "NVDA", "name": "NVIDIA", "market": "US", "avg_price": 120,
+         "quantity": 3, "account_id": "acc1"},
+    ])
+    storage.ensure_accounts(mixed, accounts3)
+
+    pop = Popover()
+    pop.set_accounts(accounts3)
+    pop.set_stocks(mixed)
+
+    assert pop._account_bar_shown(), "계좌 2개 이상인데 계좌 줄이 안 뜬다"
+    assert set(pop.account_bar.buttons) == {ALL, "acc1", "acc2", "acc3"}, \
+        f"계좌 버튼 구성이 다르다: {sorted(pop.account_bar.buttons)}"
+    assert len(pop.rows) == 3, f"전체 보기 행 3개여야 하는데 {len(pop.rows)}"
+    assert all(not r.account_lbl.isHidden() for r in pop.rows.values()), "전체 보기인데 뱃지가 없다"
+
+    pop._set_account_filter("acc1")
+    assert len(pop.rows) == 2, f"acc1 행 2개여야 하는데 {len(pop.rows)}"
+    assert all(r.account_lbl.isHidden() for r in pop.rows.values()), \
+        "특정 계좌를 보는 중인데 뱃지가 남았다"
+
+    # 계좌 × 시장은 AND — acc1 의 미국 종목만
+    pop.set_market_filter("US")
+    pop._render()
+    assert [r.data["code"] for r in pop.rows.values()] == ["NVDA"], \
+        f"계좌×시장 AND 실패: {[r.data['code'] for r in pop.rows.values()]}"
+    pop.set_market_filter("ALL")
+    pop._render()
+
+    # 빈 계좌는 어느 계좌가 비었는지 알려 준다 (종목을 다 잃은 줄 알면 안 된다)
+    pop._set_account_filter("acc3")
+    assert not pop.rows and not pop.empty_lbl.isHidden(), "빈 계좌인데 행이 남았다"
+    assert "ISA" in pop.empty_lbl.text(), f"빈 계좌 안내에 계좌명이 없다: {pop.empty_lbl.text()!r}"
+
+    # 관심 탭에서는 계좌 줄이 사라지고 핀이 그만큼 위로 붙는다
+    pin_with_bar = pop.pin_btn.y()
+    pop._set_view("watch")
+    assert not pop._account_bar_shown(), "관심 뷰인데 계좌 줄이 남았다"
+    assert pop.pin_btn.y() < pin_with_bar, "계좌 줄이 사라졌는데 핀이 안 올라왔다"
+    pop._set_view("holdings")
+    assert pop.pin_btn.y() == pin_with_bar, "보유로 돌아왔는데 핀 위치가 안 맞다"
+
+    # 계좌가 하나뿐이면 줄 자체를 감춘다 (계좌를 안 나눠 쓰는 사용자에게는 군더더기)
+    pop.set_accounts(accounts3[:1])
+    assert not pop._account_bar_shown(), "계좌 1개인데 계좌 줄이 떴다"
+    pop.deleteLater()
+    log("[ok] 13. 계좌 줄 표시 조건 / 계좌×시장 AND / 뱃지 / 빈 계좌 안내 / 핀 위치")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 12개 케이스 전부 통과")
+    log("\n[PASS] 13개 케이스 전부 통과")
 
 
 def main() -> int:

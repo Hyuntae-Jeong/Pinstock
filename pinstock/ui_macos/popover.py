@@ -16,11 +16,38 @@ from PyQt6.QtGui import QFont, QFontMetrics, QScreen
 from ..ui_windows.theme import C, TRAY_MENU_STYLE
 from ..ui_windows.chart_widget import SparklineWidget, ChartPopup
 from ..core.portfolio import is_us_stock, is_index, stock_metrics
+from ..core.storage import ACCOUNT_FILTER_ALL, stock_in_account
 
 
 # macOS 시스템 한글 폰트 (Malgun Gothic 의 Mac 대체)
 _FONT_FAMILY = "Apple SD Gothic Neo"
 _NUMBER_FONT_FAMILY = "Arial"
+
+
+# ─── 색 유틸 (계좌 버튼/뱃지) ─────────────────────────────────────────────────
+def _rgb(hex_color: str) -> tuple[int, int, int] | None:
+    try:
+        return tuple(int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    except (ValueError, IndexError, TypeError):
+        return None
+
+
+def _contrast_text(hex_color: str) -> str:
+    """배경 위에 얹을 글자색 — 배경 밝기로 흑/백을 고른다."""
+    rgb = _rgb(hex_color)
+    if rgb is None:
+        return C["bg"]
+    r, g, b = rgb
+    return "#11111b" if (r * 299 + g * 587 + b * 114) / 1000 > 150 else "#ffffff"
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    """뱃지 배경처럼 옅게 깔 때 쓰는 반투명 색."""
+    rgb = _rgb(hex_color)
+    if rgb is None:
+        return "transparent"
+    r, g, b = rgb
+    return f"rgba({r}, {g}, {b}, {alpha})"
 
 
 def format_quantity(value) -> str:
@@ -97,10 +124,24 @@ class StockRow(QWidget):
         info.setContentsMargins(0, 0, 0, 0)
         info.setSpacing(1)
 
+        # 종목명 + 계좌 뱃지. 뱃지는 '전체' 계좌를 볼 때만 켠다 — 같은 종목이
+        # 여러 계좌에 있으면 행이 여러 줄로 나오는데, 어느 계좌 것인지는 여기서만
+        # 구분된다. 특정 계좌를 보는 중이면 전 행이 같은 계좌라 뱃지는 군더더기다.
+        name_row = QHBoxLayout()
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.setSpacing(5)
+
         self.name_lbl = QLabel(self.data.get("name", self.data["code"]))
         self.name_lbl.setFont(QFont(_FONT_FAMILY, 12, QFont.Weight.Medium))
         self.name_lbl.setStyleSheet(f"color: {C['subtext']};")
-        info.addWidget(self.name_lbl)
+        name_row.addWidget(self.name_lbl)
+
+        self.account_lbl = QLabel()
+        self.account_lbl.setFont(QFont(_FONT_FAMILY, 9, QFont.Weight.Bold))
+        self.account_lbl.hide()
+        name_row.addWidget(self.account_lbl)
+        name_row.addStretch()
+        info.addLayout(name_row)
 
         price_row = QHBoxLayout()
         price_row.setContentsMargins(0, 0, 0, 0)
@@ -308,6 +349,23 @@ class StockRow(QWidget):
 
     def _expanded_height(self) -> int:
         return self.EXPAND_H + max(0, self._compact_height - self.COMPACT_H)
+
+    def set_account_badge(self, account: dict | None):
+        """행에 계좌 뱃지를 달거나 뗀다. None 이면 감춘다.
+
+        계좌가 삭제돼 레지스트리에서 못 찾는 경우도 None 으로 들어온다 — 뱃지
+        없이 행만 보이는 편이 잘못된 계좌명을 보여주는 것보다 낫다.
+        """
+        if not account:
+            self.account_lbl.hide()
+            return
+        color = account.get("color") or C["blue"]
+        self.account_lbl.setText(account.get("name", ""))
+        self.account_lbl.setStyleSheet(
+            f"color: {color}; background: {_rgba(color, 0.18)};"
+            f" border-radius: 4px; padding: 1px 5px;"
+        )
+        self.account_lbl.show()
 
     def set_usd_krw_rate(self, rate: float | None):
         self.usd_krw_rate = rate
@@ -943,6 +1001,146 @@ class _DragArea(QWidget):
         super().mouseReleaseEvent(event)
 
 
+# ─── 토글 버튼 공용 스타일 (시장 필터 / 뷰 탭 / 계좌 선택) ────────────────────
+def _apply_toggle_btn_style(btn: QPushButton, active: bool, accent: str | None = None):
+    """선택형 작은 버튼의 스타일. accent 를 주면 활성 배경을 그 색으로 칠한다
+    (계좌 버튼 — 행 뱃지와 같은 색이라 어느 계좌인지 눈으로 이어진다)."""
+    if active:
+        bg = accent or C["blue"]
+        fg = _contrast_text(bg)
+        # 기본 파랑은 기존처럼 살짝 밝아지고, 계좌색은 그대로 둔다 (색이 곧 정체).
+        hover = bg if accent else "#b4befe"
+    else:
+        bg = "transparent"
+        fg = C["subtext"]
+        hover = C["surface"]
+    btn.setStyleSheet(f"""
+        QPushButton {{
+            background: {bg};
+            color: {fg};
+            border: none;
+            border-radius: 5px;
+            padding: 3px 7px;
+            font-size: 10px;
+            font-weight: bold;
+        }}
+        QPushButton:hover {{ background: {hover}; }}
+    """)
+
+
+# ─── 계좌 선택 줄 ─────────────────────────────────────────────────────────────
+class _AccountHScroll(QScrollArea):
+    """계좌 버튼을 담는 가로 스크롤 영역.
+
+    스크롤바를 숨겨 두면 Qt 기본 휠 처리가 가로축을 굴려 주지 않으므로, 세로 휠과
+    트랙패드 좌우 스와이프를 모두 가로 스크롤로 직접 받는다.
+    """
+
+    def wheelEvent(self, event):
+        bar = self.horizontalScrollBar()
+        delta = event.angleDelta().x() or event.angleDelta().y()
+        if delta and bar.maximum() > 0:
+            bar.setValue(bar.value() - delta)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
+class _AccountBar(QWidget):
+    """보유 뷰 맨 위의 계좌 선택 줄 — [전체][계좌1][계좌2]… 한 줄.
+
+    계좌가 늘어도 팝오버 폭(360px)을 넘지 않도록 버튼을 가로 스크롤 영역에 담는다.
+    선택은 '전체' 또는 계좌 1개 — 여러 계좌를 동시에 켜는 조합은 상단 요약 숫자가
+    무엇의 합인지 흐려져 넣지 않았다.
+
+    계좌가 1개뿐이면 줄 자체를 감춘다 (Popover._account_bar_shown). 계좌를 나눠
+    쓰지 않는 사용자에게는 [전체][기본 계좌] 가 아무 정보도 주지 않는다.
+    """
+
+    H = 30
+
+    account_selected = pyqtSignal(str)      # 'ALL' 또는 계좌 id
+    manage_requested = pyqtSignal(QPoint)   # 우클릭 → 계좌 관리 (전역 좌표)
+    drag_started  = pyqtSignal(QPoint)
+    drag_moved    = pyqtSignal(QPoint)
+    drag_finished = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self.H)
+        self.setStyleSheet("background: transparent;")
+        self._accounts: list[dict] = []
+        self._selected: str = ACCOUNT_FILTER_ALL
+        self.buttons: dict[str, QPushButton] = {}
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.scroll = _AccountHScroll(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        # 버튼을 담는 안쪽 위젯은 드래그 핸들이기도 하다 — 버튼 오른쪽 빈 공간을
+        # 잡고 끌면 탭 줄과 똑같이 창이 움직인다.
+        self._strip = _DragArea()
+        self._strip.setStyleSheet("background: transparent;")
+        self._strip.drag_started.connect(self.drag_started.emit)
+        self._strip.drag_moved.connect(self.drag_moved.emit)
+        self._strip.drag_finished.connect(self.drag_finished.emit)
+        self._strip_layout = QHBoxLayout(self._strip)
+        # 오른쪽 여백은 핀 버튼 자리가 아니라 스크롤 끝 여유 — 핀은 아래 탭 줄에 있다.
+        self._strip_layout.setContentsMargins(10, 2, 10, 2)
+        self._strip_layout.setSpacing(5)
+        self._strip_layout.addStretch()
+        self.scroll.setWidget(self._strip)
+        outer.addWidget(self.scroll)
+
+    def set_accounts(self, accounts: list[dict], selected: str):
+        self._accounts = list(accounts or [])
+        self._selected = selected or ACCOUNT_FILTER_ALL
+        self._rebuild()
+
+    def set_selected(self, selected: str):
+        self._selected = selected or ACCOUNT_FILTER_ALL
+        self._restyle()
+
+    def _rebuild(self):
+        layout = self._strip_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self.buttons.clear()
+
+        entries = [(ACCOUNT_FILTER_ALL, "전체", None)]
+        entries += [(a["id"], a["name"], a["color"]) for a in self._accounts]
+        for key, label, color in entries:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setProperty("accent", color)
+            btn.clicked.connect(lambda _, k=key: self.account_selected.emit(k))
+            self.buttons[key] = btn
+            layout.addWidget(btn)
+        layout.addStretch()
+        self._restyle()
+
+    def _restyle(self):
+        for key, btn in self.buttons.items():
+            active = key == self._selected
+            btn.setChecked(active)
+            _apply_toggle_btn_style(btn, active, btn.property("accent"))
+
+    def contextMenuEvent(self, event):
+        self.manage_requested.emit(event.globalPos())
+
+
 # ─── 팝오버 메인 ─────────────────────────────────────────────────────────────
 class Popover(QWidget):
     """메뉴바 아이콘 아래에 펼쳐지는 팝오버 패널.
@@ -973,7 +1171,9 @@ class Popover(QWidget):
     memo_requested           = pyqtSignal(str)   # code (메모는 계좌 무관)
     delete_requested         = pyqtSignal(str)   # uid
     manage_watch_requested   = pyqtSignal()      # 관심종목 행 우클릭 → 관심종목 관리
+    manage_accounts_requested = pyqtSignal(QPoint)  # 계좌 줄 우클릭 → 계좌 관리
     market_filter_changed    = pyqtSignal(str)   # ALL / KR / US
+    account_filter_changed   = pyqtSignal(str)   # ALL / 계좌 id
     opacity_changed          = pyqtSignal(float)   # 0.1 ~ 1.0
     height_changed           = pyqtSignal(int)     # px
     position_offset_changed  = pyqtSignal(int, int) # 메뉴바 기준 x/y offset
@@ -1025,6 +1225,9 @@ class Popover(QWidget):
         self._usd_krw_rate: float | None = None
         self._us_return_basis: str = "krw"
         self._market_filter: str = "ALL"
+        # 계좌 레지스트리와 현재 선택. 시장 필터와 AND 로 걸린다.
+        self._accounts: list[dict] = []
+        self._account_filter: str = ACCOUNT_FILTER_ALL
         self._preferred_height: int | None = None
         # self._pinned 은 생성자 상단에서 역할에 맞춰 이미 설정함 (분리=기본 On).
         self._position_offset = QPoint(0, 0)
@@ -1066,6 +1269,19 @@ class Popover(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # ── 계좌 선택 줄 (보유 뷰 + 계좌 2개 이상일 때만) ─────────────────
+        # 탭 줄보다 위에 둔다. 계좌는 "무엇을 보고 있나"를 정하는 가장 바깥 축이라,
+        # 그 안에서 보유/관심 탭과 시장 필터가 걸리는 순서가 자연스럽다.
+        self.account_bar = _AccountBar(self.card)
+        self.account_bar.account_selected.connect(
+            lambda a: self._set_account_filter(a, emit=True)
+        )
+        self.account_bar.manage_requested.connect(self.manage_accounts_requested.emit)
+        self.account_bar.drag_started.connect(self._start_position_drag)
+        self.account_bar.drag_moved.connect(self._move_position_drag)
+        self.account_bar.drag_finished.connect(self._finish_position_drag)
+        root.addWidget(self.account_bar)
+
         # ── 뷰 토글: 보유 / 관심 (호스팅 중인 뷰만 탭으로) ────────────────
         # 탑 바의 빈 영역은 창 이동 핸들(타이틀바 역할) — 탭/요약 외에도 여기를 잡고
         # 끌면 메인/분리 창 모두 이동한다.
@@ -1097,7 +1313,6 @@ class Popover(QWidget):
         self.pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.pin_btn.clicked.connect(self._on_pin_clicked)
         self._sync_pin_button()
-        self.pin_btn.move(self.W - 34, 9)
         self.pin_btn.raise_()
 
         # 분리 창 전용: 다시 합치기(도킹) 버튼 — 핀 버튼 왼쪽에 띄운다.
@@ -1109,8 +1324,10 @@ class Popover(QWidget):
             self.dock_btn.setToolTip("팝오버로 다시 합치기")
             self.dock_btn.clicked.connect(lambda: self.dock_requested.emit())
             self._style_dock_button()
-            self.dock_btn.move(self.W - 34 - 28, 9)
             self.dock_btn.raise_()
+
+        # 두 버튼의 y 는 계좌 줄 유무에 따라 달라진다 (아래에서 한 번에 배치).
+        self._sync_account_bar()
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
@@ -1286,26 +1503,8 @@ class Popover(QWidget):
         return btn
 
     def _apply_market_filter_btn_style(self, btn: QPushButton, active: bool):
-        if active:
-            bg = C["blue"]
-            fg = C["bg"]
-            hover = "#b4befe"
-        else:
-            bg = "transparent"
-            fg = C["subtext"]
-            hover = C["surface"]
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {bg};
-                color: {fg};
-                border: none;
-                border-radius: 5px;
-                padding: 3px 7px;
-                font-size: 10px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {hover}; }}
-        """)
+        # 시장 필터 / 뷰 탭 / 계좌 버튼이 같은 토글 스타일을 쓴다.
+        _apply_toggle_btn_style(btn, active)
 
     def _set_market_filter(self, market: str, *, emit: bool = False):
         if market not in {"ALL", "KR", "US"}:
@@ -1326,6 +1525,56 @@ class Popover(QWidget):
             return True
         market = "US" if is_us_stock(stock) else "KR"
         return market == self._market_filter
+
+    # ── 계좌 선택 ─────────────────────────────────────────────────────────
+    def set_accounts(self, accounts: list[dict]):
+        """계좌 레지스트리 갱신. 계좌 수에 따라 계좌 줄이 나타나거나 사라진다."""
+        self._accounts = list(accounts or [])
+        self.account_bar.set_accounts(self._accounts, self._account_filter)
+        self._sync_account_bar()
+        if self._view == "holdings":
+            self._render()
+            self._apply_content_height()
+
+    def set_account_filter(self, account_id: str):
+        """외부(매니저)에서 선택 상태를 동기화. 시그널은 emit 하지 않는다."""
+        self._set_account_filter(account_id, emit=False)
+
+    def _set_account_filter(self, account_id: str, *, emit: bool = False):
+        self._account_filter = account_id or ACCOUNT_FILTER_ALL
+        self.account_bar.set_selected(self._account_filter)
+        if self._view == "holdings":
+            self._render()
+            self._apply_content_height()
+        if emit:
+            self.account_filter_changed.emit(self._account_filter)
+
+    def _matches_account_filter(self, stock: dict) -> bool:
+        return stock_in_account(stock, self._account_filter)
+
+    def _account_bar_shown(self) -> bool:
+        """계좌 줄을 띄울 조건 — 보유 뷰이고 계좌가 2개 이상일 때.
+
+        관심종목은 전 계좌가 공유하므로 계좌와 무관하고, 계좌가 하나뿐이면
+        [전체][기본 계좌] 는 아무 정보도 주지 않는 채 세로 공간만 먹는다.
+        """
+        return self._view == "holdings" and len(self._accounts) > 1
+
+    def _sync_account_bar(self):
+        self.account_bar.setVisible(self._account_bar_shown())
+        self._sync_float_buttons()
+
+    def _sync_float_buttons(self):
+        """핀/도킹 버튼은 레이아웃 밖 절대 좌표라, 계좌 줄이 생기면 그만큼 아래로
+        내려 항상 탭 줄과 같은 높이에 오게 한다."""
+        top = 9 + (_AccountBar.H if self._account_bar_shown() else 0)
+        self.pin_btn.move(self.W - 34, top)
+        if self.dock_btn is not None:
+            self.dock_btn.move(self.W - 34 - 28, top)
+
+    def _account_of(self, stock: dict) -> dict | None:
+        aid = stock.get("account_id")
+        return next((a for a in self._accounts if a.get("id") == aid), None)
 
     # ── 보유 / 관심 뷰 토글 ───────────────────────────────────────────────
     _VIEW_LABELS = (("보유", "holdings"), ("관심", "watch"))
@@ -1386,8 +1635,9 @@ class Popover(QWidget):
             active = key == view
             btn.setChecked(active)
             self._apply_market_filter_btn_style(btn, active)
-        # 관심 뷰에서는 손익 요약 카드를 숨긴다 (관심은 손익 무관)
+        # 관심 뷰에서는 손익 요약 카드와 계좌 줄을 숨긴다 (관심은 손익·계좌 무관)
         self.summary.setVisible(view == "holdings")
+        self._sync_account_bar()
         self._render()
         self._apply_content_height()
 
@@ -1503,15 +1753,21 @@ class Popover(QWidget):
     def _render_holdings(self):
         visible_stocks = [
             s for s in self._stocks
-            if not s.get("hidden", False) and self._matches_market_filter(s)
+            if not s.get("hidden", False)
+            and self._matches_market_filter(s)
+            and self._matches_account_filter(s)
         ]
         if not visible_stocks:
-            self.empty_lbl.setText("종목이 없습니다.\n메뉴 → 종목 추가 로 시작하세요.")
+            self.empty_lbl.setText(self._empty_holdings_text())
             self.empty_lbl.show()
             return
         self.empty_lbl.hide()
+        # 뱃지는 '전체'를 볼 때만 — 특정 계좌를 보는 중이면 전 행이 같은 계좌다.
+        show_badge = self._account_bar_shown() and self._account_filter == ACCOUNT_FILTER_ALL
         for s in visible_stocks:
             row = StockRow(s)
+            if show_badge:
+                row.set_account_badge(self._account_of(s))
             row.assets_hidden = self._assets_hidden
             row.us_return_basis = self._us_return_basis
             row.set_usd_krw_rate(self._usd_krw_rate)
@@ -1524,6 +1780,17 @@ class Popover(QWidget):
             self._rows_by_code.setdefault(s["code"], []).append(row)
             self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
             self._apply_cached(s["code"], row)
+
+    def _empty_holdings_text(self) -> str:
+        """빈 목록 안내. 특정 계좌를 보는 중이면 '어느 계좌가 비었는지'까지 말해
+        준다 — 그냥 '종목이 없습니다' 면 종목을 다 잃은 줄 알 수 있다."""
+        if self._account_filter != ACCOUNT_FILTER_ALL:
+            account = next(
+                (a for a in self._accounts if a.get("id") == self._account_filter), None
+            )
+            if account:
+                return f"'{account['name']}' 계좌에 종목이 없습니다.\n메뉴 → 종목 추가 로 담아보세요."
+        return "종목이 없습니다.\n메뉴 → 종목 추가 로 시작하세요."
 
     def _render_watch(self):
         visible_items = [
@@ -1641,11 +1908,13 @@ class Popover(QWidget):
                 rows_h = 120   # empty_lbl 안내 영역
         # 관심 뷰에서는 손익 요약 카드를 숨기므로 높이에서 제외
         summary_h = PortfolioSummary.H if self._view == "holdings" else 0
+        # 계좌 줄은 보유 뷰 + 계좌 2개 이상일 때만 자리를 차지한다
+        account_h = _AccountBar.H if self._account_bar_shown() else 0
 
-        # 뷰 토글 + (요약) + 구분선 2개 + 종목 영역 + 설정 바
+        # (계좌 줄) + 뷰 토글 + (요약) + 구분선 2개 + 종목 영역 + 설정 바
         # + 카드 위/아래 outer margin (각각 OUTER_M)
         return (
-            self.VIEW_ROW_H + summary_h + 1 + rows_h + 1
+            account_h + self.VIEW_ROW_H + summary_h + 1 + rows_h + 1
             + self.CONTROLS_H
             + self.OUTER_M * 2
         )

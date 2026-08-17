@@ -32,7 +32,7 @@ from ..core.storage import (
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
     normalize_stock_memos, normalize_detached,
-    ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter,
+    ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter, stock_in_account,
 )
 from ..ui_windows.manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
@@ -282,6 +282,7 @@ class MacAppManager(QObject):
         self.popover.delete_requested.connect(self._on_delete_request)
         self.popover.manage_watch_requested.connect(self.open_manage_watch_dialog)
         self.popover.market_filter_changed.connect(self._on_market_filter_changed)
+        self.popover.account_filter_changed.connect(self._on_account_filter_changed)
         self.popover.opacity_changed.connect(self._on_opacity_changed)
         self.popover.height_changed.connect(self._on_height_changed)
         self.popover.position_offset_changed.connect(self._on_position_offset_changed)
@@ -298,6 +299,8 @@ class MacAppManager(QObject):
         self.popover.set_position_offset(self.popover_offset)
         self.popover.set_pinned(self.pinned)
         self.popover.set_market_filter(self.market_filter)
+        self.popover.set_accounts(self.accounts)
+        self.popover.set_account_filter(self.account_filter)
         # 확대 일봉 팝업 이동평균선 설정 — 공유 dict 참조를 주입(이후 제자리 갱신 반영)
         self.popover.set_watch_ma(self.watch_ma)
         self.popover.set_pin_controller(self.watch_pin_controller)
@@ -609,6 +612,7 @@ class MacAppManager(QObject):
         win.delete_requested.connect(self._on_delete_request)
         win.manage_watch_requested.connect(self.open_manage_watch_dialog)
         win.market_filter_changed.connect(self._on_detached_market_filter_changed)
+        win.account_filter_changed.connect(self._on_detached_account_filter_changed)
         win.opacity_changed.connect(self._on_detached_opacity_changed)
         win.height_changed.connect(self._on_detached_height_changed)
         win.pinned_changed.connect(self._on_detached_pinned_changed)
@@ -653,6 +657,8 @@ class MacAppManager(QObject):
         win.set_watch_ma(self.watch_ma)
         win.set_pin_controller(self.watch_pin_controller)
         win.set_market_filter(self.detached_market_filter)
+        win.set_accounts(self.accounts)
+        win.set_account_filter(self.detached_account_filter)
         win.set_opacity(self.detached_opacity)
         if self.detached_height is not None:
             win.set_preferred_height(self.detached_height)
@@ -757,8 +763,14 @@ class MacAppManager(QObject):
         if not self.stocks:
             win.update_summary(0, 0)
             return
+        # 요약은 지금 화면에 보이는 것의 합이어야 한다 — 시장 필터와 계좌 필터를
+        # 모두 통과한 종목만 더한다 (팝오버가 행을 거르는 기준과 같다).
         market = self._holdings_filter()
-        stocks = [s for s in self.stocks if self._matches_filter(s, market)]
+        account = self._holdings_account_filter()
+        stocks = [
+            s for s in self.stocks
+            if self._matches_filter(s, market) and stock_in_account(s, account)
+        ]
         totals = portfolio_totals(
             stocks,
             current_prices=self.current_prices,
@@ -769,6 +781,11 @@ class MacAppManager(QObject):
     def _holdings_filter(self) -> str:
         """보유 뷰를 호스팅 중인 창의 시장 필터 (요약 계산 기준)."""
         return self.detached_market_filter if self.detached_view == "holdings" else self.market_filter
+
+    def _holdings_account_filter(self) -> str:
+        """보유 뷰를 호스팅 중인 창의 계좌 필터 (요약 계산 기준)."""
+        return (self.detached_account_filter if self.detached_view == "holdings"
+                else self.account_filter)
 
     def _matches_filter(self, stock: dict, market: str) -> bool:
         if market == "ALL":
@@ -798,6 +815,29 @@ class MacAppManager(QObject):
         elif self.detached_view == "watch":
             self._sync_popover_watchlist()
         self._save_config()
+
+    # ── 계좌 필터 ─────────────────────────────────────────────────────────
+    # 팝오버가 행 거르기와 버튼 상태는 이미 자기 안에서 처리했으므로, 매니저는
+    # 선택값을 기억하고 요약만 다시 계산하면 된다.
+    def _on_account_filter_changed(self, account_id: str):
+        self.account_filter = normalize_account_filter(account_id, self.accounts)
+        if self.detached_view != "holdings":   # 메인이 보유를 호스팅
+            self._recompute_summary()
+        self._save_config()
+
+    def _on_detached_account_filter_changed(self, account_id: str):
+        self.detached_account_filter = normalize_account_filter(account_id, self.accounts)
+        if self.detached_view == "holdings":
+            self._recompute_summary()
+        self._save_config()
+
+    def _sync_accounts_to_windows(self):
+        """계좌 목록/선택을 두 창에 다시 밀어 넣는다 (계좌 추가·이름 변경·삭제 후)."""
+        self.popover.set_accounts(self.accounts)
+        self.popover.set_account_filter(self.account_filter)
+        if self.detached_window is not None:
+            self.detached_window.set_accounts(self.accounts)
+            self.detached_window.set_account_filter(self.detached_account_filter)
 
     def _fetch_usd_krw_rate(self):
         result = fetch_usd_krw_rate()
