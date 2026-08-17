@@ -1112,7 +1112,8 @@ class MacAppManager(QObject):
                 current_price = float(result["price"])
                 self.current_prices[code] = current_price
                 self.last_price_result[code] = result
-                self.popover.update_stock_price(code, result)
+                # 보유 뷰가 분리돼 있으면 그 행은 메인 팝오버가 아니라 분리 창에 있다.
+                self._holdings_window().update_stock_price(code, result)
         if not current_price:
             QMessageBox.warning(
                 None,
@@ -1124,7 +1125,9 @@ class MacAppManager(QObject):
             rate_result = fetch_usd_krw_rate()
             if rate_result:
                 self.usd_krw_rate = float(rate_result["rate"])
-                self.popover.set_usd_krw_rate(self.usd_krw_rate)
+                # 환율은 전역 상태라 두 창 모두에 반영한다 (_fetch_usd_krw_rate 와 동일).
+                for win in self._all_windows():
+                    win.set_usd_krw_rate(self.usd_krw_rate)
 
         dlg = BuyPreviewDialog(
             stock=copy.deepcopy(target),
