@@ -32,12 +32,15 @@ def format_quantity(value) -> str:
 class StockWidget(QWidget):
     """화면에 떠있는 하나의 주식 위젯"""
 
-    deleted        = pyqtSignal(str)   # code 전달
-    edited         = pyqtSignal(str)   # 수정 완료 후 저장 요청
-    buy_requested  = pyqtSignal(str)   # 추가 매수 예상/확정 요청
-    memo_requested = pyqtSignal(str)   # 종목별 메모 팝업 요청
-    price_updated  = pyqtSignal(str)   # 현재가 갱신 시 (마스터 위젯 재집계용)
-    layout_changed = pyqtSignal(str)   # compact 높이 변경 시 재정렬 요청
+    # 보유 항목의 키는 code 가 아니라 uid 다 — 계좌가 다르면 같은 종목을 각자
+    # 보유할 수 있어, code 로 보내면 어느 보유분인지 결정할 수 없다.
+    # 메모만은 종목에 붙는 것이라 예외적으로 code 를 보낸다.
+    deleted        = pyqtSignal(str)   # uid 전달
+    edited         = pyqtSignal(str)   # uid — 수정 완료 후 저장 요청
+    buy_requested  = pyqtSignal(str)   # uid — 추가 매수 예상/확정 요청
+    memo_requested = pyqtSignal(str)   # code — 종목별 메모 팝업 요청
+    price_updated  = pyqtSignal(str)   # uid — 현재가 갱신 시 (마스터 위젯 재집계용)
+    layout_changed = pyqtSignal(str)   # uid — compact 높이 변경 시 재정렬 요청
 
     MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
@@ -49,7 +52,7 @@ class StockWidget(QWidget):
 
     def __init__(self, stock_data: dict, width: int | None = None, stagger_idx: int = 0):
         super().__init__()
-        self.data = stock_data          # code, name, avg_price, quantity, pos
+        self.data = stock_data          # code, uid, account_id, name, avg_price, quantity, pos
         self.current_price: float = 0
         self.usd_krw_rate: float | None = None
         self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
@@ -88,6 +91,11 @@ class StockWidget(QWidget):
         STAGGER_MS = 600   # 위젯당 약 0.6초 간격
         delay = self._stagger_idx * STAGGER_MS
         QTimer.singleShot(delay, self._start_fetching)
+
+    @property
+    def uid(self) -> str:
+        """이 위젯이 대표하는 보유 항목의 키. 매니저의 widgets dict 키와 같다."""
+        return self.data.get("uid", "")
 
     def _start_fetching(self):
         """타이머 가동 + 즉시 1회 fetch (stagger 지연 후 호출)."""
@@ -302,7 +310,7 @@ class StockWidget(QWidget):
             self.current_price = result["price"]
             self._prev_close = float(result["price"] - result["change_price"])
             self._apply_price(result)
-            self.price_updated.emit(self.data["code"])
+            self.price_updated.emit(self.uid)
 
     def set_usd_krw_rate(self, rate: float | None):
         self.usd_krw_rate = rate
@@ -403,12 +411,12 @@ class StockWidget(QWidget):
             self.card.setGeometry(0, 0, self.W, self._expanded_height())
             self.compact.setGeometry(0, 0, self.W, height)
             self.expand_panel.setGeometry(0, height, self.W, self.expand_panel.height())
-            self.layout_changed.emit(self.data["code"])
+            self.layout_changed.emit(self.uid)
             return
         self.setFixedHeight(height)
         self.card.setGeometry(0, 0, self.W, height)
         self.compact.setGeometry(0, 0, self.W, height)
-        self.layout_changed.emit(self.data["code"])
+        self.layout_changed.emit(self.uid)
 
     def _expanded_height(self) -> int:
         return self.EXPAND_H + max(0, self._compact_height - self.COMPACT_H)
@@ -580,13 +588,13 @@ class StockWidget(QWidget):
 
         action = menu.exec(event.globalPos())
         if action == buy_act:
-            self.buy_requested.emit(self.data["code"])
+            self.buy_requested.emit(self.uid)
         elif action == edit_act:
             self._open_edit()
         elif action == memo_act:
             self.memo_requested.emit(self.data["code"])
         elif action == del_act:
-            self.deleted.emit(self.data["code"])
+            self.deleted.emit(self.uid)
             self.close()
 
     def _open_edit(self):
@@ -601,7 +609,7 @@ class StockWidget(QWidget):
                 self.data.pop("buy_exchange_rate", None)
             if self.current_price:
                 self._update_detail(self.current_price)
-            self.edited.emit(self.data["code"])
+            self.edited.emit(self.uid)
 
 
 # ─── 폭이 모자라면 …로 줄이고, 줄였을 때만 hover 툴팁으로 전체 표시하는 라벨 ──

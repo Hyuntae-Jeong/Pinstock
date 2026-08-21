@@ -110,7 +110,14 @@ def _run(log_fp):
     cfg.write_text("BROKEN-DO-NOT-TOUCH", encoding="utf-8")
     before = cfg.read_bytes()
 
-    blocked = SimpleNamespace(config_load_failed=True)
+    # _save_config 은 저장 전에 계좌 정합(_reconcile_accounts)을 먼저 부른다 —
+    # 메모리만 만지는 단계라 가드보다 앞에 있고, 가짜 self 에도 그 재료가 필요하다.
+    blocked = SimpleNamespace(
+        config_load_failed=True,
+        stocks=[dict(s) for s in SAMPLE["stocks"]],
+        accounts=[], account_filter="ALL",
+    )
+    blocked._reconcile_accounts = lambda: WidgetManager._reconcile_accounts(blocked)
     WidgetManager._save_config(blocked)          # 가드에 막혀 즉시 반환해야 함
     assert cfg.read_bytes() == before, "로드 실패 세션인데 파일이 덮어써졌다"
     log("[ok] 6a. config_load_failed=True → 저장 거부, 손상 파일 보존")
@@ -124,11 +131,19 @@ def _run(log_fp):
         watch_visible=True, us_return_basis="krw", popover_opacity=1.0,
         memo={"text": "", "updated_at": None}, stock_memos={},
         update_last_check_date=None, update_skipped_version=None,
+        accounts=[], account_filter="ALL",
         _snapshot_watch_group_state=lambda: None,
     )
+    allowed._reconcile_accounts = lambda: WidgetManager._reconcile_accounts(allowed)
     WidgetManager._save_config(allowed)
     saved, warn = storage.read_config()
     assert [s["code"] for s in saved["stocks"]] == ["379810", "000660"], "정상 저장 실패"
+    # 계좌가 없던 설정도 저장을 거치면 기본 계좌 1개 + 전 보유분에 uid 가 붙는다
+    assert len(saved["accounts"]) == 1, "기본 계좌가 만들어지지 않았다"
+    assert saved["selected_account"] == "ALL"
+    uids = {s["uid"] for s in saved["stocks"]}
+    assert len(uids) == 2 and all(uids), "보유분마다 고유 uid 가 있어야 한다"
+    assert all(s["account_id"] == saved["accounts"][0]["id"] for s in saved["stocks"])
     log("[ok] 6b. config_load_failed=False → 정상 저장됨 (가드가 과하지 않음)")
 
     # ── 7. 일일 세대 백업 — 최근 7개만 유지 ────────────────────────────────

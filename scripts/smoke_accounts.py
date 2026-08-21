@@ -8,8 +8,8 @@
      "계좌2 삼성전자"가 같은 행으로 뭉개지고 편집/삭제가 엉뚱한 쪽을 건드린다
 
 구버전(계좌 개념 없음) stocks.json 의 마이그레이션, macOS 매니저의 실제 저장
-경로, 그리고 같은 종목을 두 계좌가 보유할 때 팝오버가 행 2개를 만들고 한 번 들어온
-시세를 양쪽에 뿌리는지까지 확인한다.
+경로, 같은 종목을 두 계좌가 보유할 때 팝오버가 행 2개를 만들고 한 번 들어온 시세를
+양쪽에 뿌리는지, 그리고 Windows 매니저가 위젯을 uid 로 가르는지까지 확인한다.
 """
 
 import os
@@ -435,8 +435,60 @@ def _run(log_fp):
     solo_table.deleteLater()
     log("[ok] 16. 종목 관리 — 계좌 컬럼으로 이동 / 계좌 필터 / 걸러진 표는 순서 드래그 잠금")
 
+    # ── 17. Windows 매니저 — 보유 항목 키가 uid 인지 (실제 WidgetManager 기동) ──
+    # 여기가 code 로 되돌아가면 "계좌1 삼성전자"가 "계좌2 삼성전자"에 덮여 위젯
+    # 하나가 사라지고, 삭제가 어느 보유분을 지울지 결정할 수 없다.
+    import json
+    import pinstock.ui_windows.manager as WM
+    import pinstock.ui_windows.floating_widget as WFW
+
+    wcfg = tmpdir / "win_stocks.json"
+    storage.CONFIG_FILE = str(wcfg)
+    storage.PREV_FILE = str(wcfg) + ".prev"
+    storage.BACKUP_FILE = str(wcfg) + ".bak"
+    WM.CONFIG_FILE = str(wcfg)
+    WM.BACKUP_FILE = str(wcfg) + ".bak"
+    wcfg.write_text(json.dumps({
+        "accounts": [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+                     {"id": "acc2", "name": "연금", "color": "#a6e3a1"}],
+        "selected_account": "acc2",
+        "stocks": [
+            {"code": "005930", "uid": "u1", "account_id": "acc1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "005930", "uid": "u2", "account_id": "acc2", "name": "삼성전자",
+             "avg_price": 60000, "quantity": 5, "pos": [300, 300]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    # 실제 HTTP 는 나가지 않게 — 폴링/환율만 막고 나머지는 진짜 코드로 돈다
+    WM.fetch_usd_krw_rate = lambda: None
+    WM.stock_index.start_background_refresh = lambda: None
+    for _n in ("fetch_stock", "fetch_us_stock", "fetch_minute_chart",
+               "fetch_daily_chart", "fetch_us_minute_chart", "fetch_us_daily_chart"):
+        setattr(WFW, _n, lambda _c: None)
+
+    wmgr = WM.WidgetManager(app)
+    assert sorted(wmgr.widgets) == ["u1", "u2"],         f"같은 종목 2계좌인데 위젯이 uid 로 갈라지지 않았다: {sorted(wmgr.widgets)}"
+    assert wmgr.widgets["u1"].pos().x() == 100 and wmgr.widgets["u2"].pos().x() == 300,         "보유분별 위젯 위치가 따로 복원되지 않았다"
+    assert wmgr.widgets["u1"].data["avg_price"] == 70000
+    assert wmgr.widgets["u2"].data["avg_price"] == 60000
+    assert wmgr.account_filter == "acc2", "선택 계좌가 복원되지 않았다"
+
+    # 한쪽만 삭제 — 다른 계좌 보유분은 그대로 남아야 한다
+    wmgr._on_delete("u1")
+    assert sorted(wmgr.widgets) == ["u2"], f"엉뚱한 보유분이 지워졌다: {sorted(wmgr.widgets)}"
+    assert [s["uid"] for s in wmgr.stocks] == ["u2"]
+
+    wsaved, _ = storage.read_config()
+    assert [a["id"] for a in wsaved["accounts"]] == ["acc1", "acc2"], "계좌가 갈렸다"
+    assert wsaved["selected_account"] == "acc2"
+    assert wsaved["stocks"][0]["uid"] == "u2", "저장에 uid 가 갈렸다"
+    for _w in list(wmgr.widgets.values()):
+        _w.close()
+    log("[ok] 17. Windows 매니저 — 위젯이 uid 키 / 계좌·선택 복원 / 한쪽만 삭제")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 16개 케이스 전부 통과")
+    log("\n[PASS] 17개 케이스 전부 통과")
 
 
 def main() -> int:
