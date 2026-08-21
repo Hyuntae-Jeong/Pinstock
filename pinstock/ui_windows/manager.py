@@ -787,6 +787,7 @@ class WidgetManager:
             self._spawn_widget(s, default_x, default_y, stagger_idx=visible_idx)
             if self._is_stock_visible(s):
                 visible_idx += 1
+        self._sync_pollers()
         self._sync_fx_timer()
         self._spawn_master()
 
@@ -1022,6 +1023,8 @@ class WidgetManager:
         w.buy_requested.connect(self._on_buy_requested)
         w.memo_requested.connect(self.open_stock_memo_dialog)
         w.price_updated.connect(lambda _: self._recompute_master())
+        w.price_fetched.connect(self._relay_price)
+        w.chart_fetched.connect(self._relay_chart)
         w.layout_changed.connect(lambda _: self._schedule_visible_widgets_reflow())
         w.set_usd_krw_rate(self.usd_krw_rate)
         w.set_us_return_basis(self.us_return_basis)
@@ -1036,6 +1039,32 @@ class WidgetManager:
         if self._is_stock_visible(stock) and not self.is_hidden:
             w.show()
         self.widgets[stock["uid"]] = w
+
+    def _sync_pollers(self):
+        """시세 폴링은 code 당 1개만 — 같은 종목을 여러 계좌가 보유해도 API 호출은
+        늘지 않는다. 종목 순서상 첫 위젯이 폴러가 되고 나머지는 중계로 받는다.
+
+        폴러가 삭제되면 다음 위젯이 여기서 승계한다 — "삭제한 종목의 폴러를 끈다"가
+        아니라 "종목마다 폴러가 정확히 하나 있게 만든다"로 생각할 것."""
+        leaders: set[str] = set()
+        for s in self.stocks:
+            w = self.widgets.get(s["uid"])
+            if not w:
+                continue
+            code = s["code"]
+            w.set_polling(code not in leaders)
+            leaders.add(code)
+
+    def _relay_price(self, code: str, result: dict):
+        """폴러가 받아온 시세를 같은 종목의 다른 계좌 위젯에 뿌린다."""
+        for w in self.widgets.values():
+            if not w.is_polling and w.data.get("code") == code:
+                w.apply_price_result(result)
+
+    def _relay_chart(self, code: str, data):
+        for w in self.widgets.values():
+            if not w.is_polling and w.data.get("code") == code:
+                w.apply_chart_data(data)
 
     def _on_edited(self, _uid: str):
         """개별 위젯에서 평단가/수량을 수정한 경우. 저장 + 마스터 갱신."""
@@ -1292,6 +1321,7 @@ class WidgetManager:
         )
         ny = 60 + visible_count * (StockWidget.COMPACT_H + 12)
         self._spawn_widget(d, 60, ny, stagger_idx=0)
+        self._sync_pollers()
 
         self._recompute_master()
 
@@ -1624,6 +1654,7 @@ class WidgetManager:
 
         # 순서 + 저장 + 너비 재계산
         self.stocks = new_stocks
+        self._sync_pollers()
         self._sync_fx_timer()
         self._apply_uniform_width()
         self._apply_market_filter()
@@ -1792,6 +1823,7 @@ class WidgetManager:
             default_x = 60
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
             self._spawn_widget(s, default_x, default_y, stagger_idx=i)
+        self._sync_pollers()
 
         # 마스터 위젯도 새 너비에 맞춰 갱신
         if self.master_widget:
@@ -1820,6 +1852,8 @@ class WidgetManager:
             memo_dlg = self._stock_memo_dialogs.pop(code, None)
             if memo_dlg is not None:
                 memo_dlg.close()
+        # 폴러였던 위젯이 사라졌으면 같은 종목의 남은 위젯이 승계한다
+        self._sync_pollers()
         self._save_config()
         self._sync_fx_timer()
         # 가장 긴 종목이 삭제된 경우 남은 위젯들도 줄어들도록

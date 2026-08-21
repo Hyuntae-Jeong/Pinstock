@@ -487,8 +487,62 @@ def _run(log_fp):
         _w.close()
     log("[ok] 17. Windows 매니저 — 위젯이 uid 키 / 계좌·선택 복원 / 한쪽만 삭제")
 
+    # ── 18. Windows 폴러 — code 당 1개, 중계, 폴러 삭제 시 승계 ────────────
+    # Windows 는 위젯이 각자 타이머로 시세를 가져온다. 그대로 두면 같은 종목을 두
+    # 계좌가 보유할 때 HTTP 호출이 종목당 2배로 늘고, 동기 호출이라 그만큼 UI 가
+    # 멎는다. 폴러는 code 당 1개만 두고 받아온 값을 나머지 위젯에 중계한다.
+    from PyQt6.QtCore import QEventLoop, QTimer
+
+    pcfg = tmpdir / "poll_stocks.json"
+    storage.CONFIG_FILE = str(pcfg)
+    storage.PREV_FILE = str(pcfg) + ".prev"
+    storage.BACKUP_FILE = str(pcfg) + ".bak"
+    WM.CONFIG_FILE = str(pcfg)
+    WM.BACKUP_FILE = str(pcfg) + ".bak"
+    pcfg.write_text(json.dumps({
+        "accounts": [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+                     {"id": "acc2", "name": "연금", "color": "#a6e3a1"}],
+        "selected_account": "ALL",
+        "stocks": [
+            {"code": "005930", "uid": "p1", "account_id": "acc1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "005930", "uid": "p2", "account_id": "acc2", "name": "삼성전자",
+             "avg_price": 60000, "quantity": 5, "pos": [300, 300]},
+            {"code": "000660", "uid": "p3", "account_id": "acc1", "name": "SK하이닉스",
+             "avg_price": 150000, "quantity": 1, "pos": [500, 100]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    price_calls: list = []
+
+    def _fake_quote(code):
+        price_calls.append(code)
+        return {"name": "삼성전자" if code == "005930" else "SK하이닉스",
+                "price": 80000.0, "change_price": 1000.0, "change_rate": 1.27}
+
+    WFW.fetch_stock = _fake_quote
+    WFW.fetch_minute_chart = lambda _c: {"prices": [1, 2, 3], "open": 1}
+
+    pmgr = WM.WidgetManager(app)
+    assert [pmgr.widgets[u].is_polling for u in ("p1", "p2", "p3")] == [True, False, True],         "같은 종목의 두 보유분이 각자 폴링하고 있다"
+
+    loop = QEventLoop()                       # stagger 지연(위젯당 0.6초) 통과
+    QTimer.singleShot(2500, loop.quit)
+    loop.exec()
+    assert price_calls.count("005930") == 1, f"같은 종목을 두 번 폴링했다: {price_calls}"
+    assert pmgr.widgets["p2"].current_price == 80000.0, "중계로 시세가 들어오지 않았다"
+
+    # 폴러였던 보유분을 지우면 같은 종목의 남은 위젯이 승계해 즉시 다시 돈다
+    price_calls.clear()
+    pmgr._on_delete("p1")
+    assert pmgr.widgets["p2"].is_polling, "폴러가 삭제됐는데 승계되지 않았다"
+    assert "005930" in price_calls, "승계한 위젯이 곧바로 폴링을 시작하지 않았다"
+    for _w in list(pmgr.widgets.values()):
+        _w.close()
+    log("[ok] 18. Windows 폴러 — code 당 1개 / 시세 중계 / 폴러 삭제 시 승계")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 17개 케이스 전부 통과")
+    log("\n[PASS] 18개 케이스 전부 통과")
 
 
 def main() -> int:
