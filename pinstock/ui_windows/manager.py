@@ -456,6 +456,23 @@ class WidgetManager:
         self._recompute_master()
         self._save_config()
 
+    def _account_bar_color(self, stock: dict) -> str:
+        """위젯 좌측에 표시할 계좌색. 표시할 이유가 없으면 빈 문자열.
+
+        '전체' 보기에서 계좌가 2개 이상일 때만 쓴다 — 특정 계좌를 보는 중이면 전
+        위젯이 같은 계좌라 색이 아무 정보도 주지 않는다.
+        """
+        if len(self.accounts) < 2 or self.account_filter != ACCOUNT_FILTER_ALL:
+            return ""
+        aid = stock.get("account_id")
+        return next((a.get("color", "") for a in self.accounts if a.get("id") == aid), "")
+
+    def _sync_account_bars(self):
+        for s in self.stocks:
+            w = self.widgets.get(s["uid"])
+            if w:
+                w.set_account_color(self._account_bar_color(s))
+
     def _apply_visibility(self):
         """각 위젯의 표시 여부만 현재 필터에 맞춘다 — 위치는 건드리지 않는다.
 
@@ -469,6 +486,7 @@ class WidgetManager:
                 w.hide()
             else:
                 w.show()
+        self._sync_account_bars()
 
     def _apply_filters(self):
         """계좌·시장 필터를 위젯 표시와 배치에 반영한다 (필터를 바꿨을 때)."""
@@ -1052,6 +1070,7 @@ class WidgetManager:
         w.chart_fetched.connect(self._relay_chart)
         w.layout_changed.connect(lambda _: self._schedule_visible_widgets_reflow())
         w.set_accounts(self.accounts)
+        w.set_account_color(self._account_bar_color(stock))
         w.set_usd_krw_rate(self.usd_krw_rate)
         w.set_us_return_basis(self.us_return_basis)
 
@@ -1432,6 +1451,7 @@ class WidgetManager:
         계좌가 1개로 줄면 마스터가 그 줄을 도로 접는다."""
         for w in self.widgets.values():
             w.set_accounts(self.accounts)
+        self._sync_account_bars()
         if self.master_widget:
             self.master_widget.set_accounts(self.accounts)
             self.master_widget.set_account_filter(self.account_filter)

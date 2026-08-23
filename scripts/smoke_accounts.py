@@ -847,8 +847,67 @@ def _run(log_fp):
         _w.close()
     log("[ok] 21. 마스터 계좌 필터 — 계좌 1개면 줄 접힘 / 계좌×시장 AND / 환율은 전 계좌 기준")
 
+    # ── 22. Windows 위젯 좌측 계좌색 막대 ──────────────────────────────────
+    # '전체' 보기에서 어느 계좌 것인지 구분하는 용도다. 특정 계좌를 보는 중이거나
+    # 계좌가 1개면 전 위젯이 같은 계좌라 색이 아무 정보도 주지 않는다 — 감춘다.
+    bcfg = tmpdir / "bar_stocks.json"
+    storage.CONFIG_FILE = str(bcfg)
+    storage.PREV_FILE = str(bcfg) + ".prev"
+    storage.BACKUP_FILE = str(bcfg) + ".bak"
+    WM.CONFIG_FILE = str(bcfg)
+    WM.BACKUP_FILE = str(bcfg) + ".bak"
+    bcfg.write_text(json.dumps({
+        "accounts": [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+                     {"id": "acc2", "name": "연금", "color": "#a6e3a1"}],
+        "selected_account": "ALL",
+        "stocks": [
+            {"code": "005930", "uid": "b1", "account_id": "acc1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "000660", "uid": "b2", "account_id": "acc2", "name": "SK하이닉스",
+             "avg_price": 100000, "quantity": 2, "pos": [300, 100]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    for _n in ("fetch_stock", "fetch_us_stock", "fetch_minute_chart",
+               "fetch_daily_chart", "fetch_us_minute_chart", "fetch_us_daily_chart"):
+        setattr(WFW, _n, lambda _c: None)
+    WM.fetch_usd_krw_rate = lambda: None
+
+    bmgr = WM.WidgetManager(app)
+    for _w in bmgr.widgets.values():
+        _w.show()
+
+    def _bar(uid):
+        b = bmgr.widgets[uid].account_bar
+        return b._color, b.isVisible()
+
+    assert _bar("b1") == ("#89b4fa", True), _bar("b1")
+    assert _bar("b2") == ("#a6e3a1", True), _bar("b2")
+
+    # 특정 계좌를 보는 중이면 감춘다
+    bmgr._on_account_filter_changed("acc1")
+    assert _bar("b1") == ("", False), _bar("b1")
+    bmgr._on_account_filter_changed(storage.ACCOUNT_FILTER_ALL)
+    assert _bar("b1") == ("#89b4fa", True), _bar("b1")
+
+    # 프리/애프터 표시로 카드가 높아지면 막대도 같이 길어진다
+    wb = bmgr.widgets["b1"]
+    wb._set_compact_height(wb.EXTENDED_COMPACT_H)
+    assert wb.account_bar.height() == wb.EXTENDED_COMPACT_H - WFW._AccountBar.V_INSET * 2,         wb.account_bar.height()
+    wb._set_compact_height(wb.COMPACT_H)
+
+    # 계좌가 1개뿐이면 색을 쓰지 않는다
+    bmgr.accounts = [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"}]
+    for _s in bmgr.stocks:
+        _s["account_id"] = "acc1"
+    bmgr._sync_account_bars()
+    assert all(_bar(u) == ("", False) for u in ("b1", "b2")), "계좌 1개인데 색이 남았다"
+
+    for _w in list(bmgr.widgets.values()):
+        _w.close()
+    log("[ok] 22. 위젯 계좌색 막대 — 전체 보기에서만 / 카드 높이 따라감 / 계좌 1개면 숨김")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 21개 케이스 전부 통과")
+    log("\n[PASS] 22개 케이스 전부 통과")
 
 
 def main() -> int:

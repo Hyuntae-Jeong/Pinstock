@@ -4,8 +4,8 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QMenu, QApplication,
     QPushButton,
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint, QSize, QEvent, pyqtSignal
-from PyQt6.QtGui import QFont, QFontMetrics, QCursor
+from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, QSize, QEvent, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QCursor, QPainter, QPainterPath
 from datetime import datetime
 
 from ..core.api import (
@@ -17,6 +17,48 @@ from ..core.portfolio import is_us_stock, is_index, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .chart_widget import SparklineWidget, ChartPopup, aggregate_candles
 from .manage_dialog import StockDialog
+
+
+class _AccountBar(QWidget):
+    """카드 좌측의 계좌색 알약 — '전체' 보기에서 어느 계좌 것인지 구분한다.
+
+    위젯이 작아(높이 58px) 맥 팝오버처럼 계좌명 뱃지를 넣을 자리가 없다. 종목명
+    좌마진(14px) 안쪽에 얇은 색 막대만 세워 자리를 뺏지 않는다.
+    """
+
+    WIDTH   = 3    # 더 두꺼우면 종목명과 붙어 보인다 (여백 14 - 6 - 3 = 5px)
+    X       = 6
+    V_INSET = 9    # 위아래로 이만큼 들여 카드 모서리와 겹치지 않게 한다
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._color: str = ""
+        # 카드 위에 얹히지만 클릭/드래그는 위젯 본체가 그대로 받아야 한다.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def set_color(self, color: str | None):
+        color = color or ""
+        if color == self._color:
+            return
+        self._color = color
+        self.setVisible(bool(color))
+        self.update()
+
+    def sync_geometry(self, compact_h: int):
+        """compact 영역 높이에 맞춘다 — 펼쳐도 막대는 종목 줄에만 붙어 있다."""
+        self.setGeometry(self.X, self.V_INSET, self.WIDTH,
+                         max(0, compact_h - self.V_INSET * 2))
+
+    def paintEvent(self, _event):
+        if not self._color:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), self.WIDTH / 2, self.WIDTH / 2)
+        p.fillPath(path, QColor(self._color))
+        p.end()
 
 
 def format_quantity(value) -> str:
@@ -188,6 +230,10 @@ class StockWidget(QWidget):
         self.compact = QWidget(self.card)
         self.compact.setGeometry(0, 0, self.W, self.COMPACT_H)
         self.compact.setStyleSheet("background: transparent;")
+
+        # 계좌색 알약 — compact 다음에 만들어 그 위에 얹힌다. 색이 없으면 숨는다.
+        self.account_bar = _AccountBar(self.card)
+        self.account_bar.sync_geometry(self._compact_height)
 
         hl = QHBoxLayout(self.compact)
         hl.setContentsMargins(14, 5, 10, 5)
@@ -364,6 +410,11 @@ class StockWidget(QWidget):
         self._apply_price(result)
         self.price_updated.emit(self.uid)
 
+    def set_account_color(self, color: str | None):
+        """계좌색 막대 표시. 빈 값이면 감춘다 — 특정 계좌를 보는 중이면 전 위젯이
+        같은 계좌라 구분할 이유가 없고, 계좌가 1개인 사용자에게도 보일 이유가 없다."""
+        self.account_bar.set_color(color)
+
     def set_accounts(self, accounts: list[dict] | None):
         """계좌 목록 갱신 — 수정 창에서 계좌를 옮길 수 있게 한다.
         계좌가 1개뿐이면 StockDialog 가 알아서 선택 행을 넣지 않는다."""
@@ -485,11 +536,13 @@ class StockWidget(QWidget):
             self.card.setGeometry(0, 0, self.W, self._expanded_height())
             self.compact.setGeometry(0, 0, self.W, height)
             self.expand_panel.setGeometry(0, height, self.W, self.expand_panel.height())
+            self.account_bar.sync_geometry(height)
             self.layout_changed.emit(self.uid)
             return
         self.setFixedHeight(height)
         self.card.setGeometry(0, 0, self.W, height)
         self.compact.setGeometry(0, 0, self.W, height)
+        self.account_bar.sync_geometry(height)
         self.layout_changed.emit(self.uid)
 
     def _expanded_height(self) -> int:
