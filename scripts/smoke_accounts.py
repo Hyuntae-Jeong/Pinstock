@@ -754,8 +754,101 @@ def _run(log_fp):
         _w.close()
     log("[ok] 20. 계좌 이동 중복 — 가중평균 병합 / 매수환율 재계산 / 취소 시 이동 되돌리기")
 
+    # ── 21. Windows 마스터 위젯 계좌 필터 ──────────────────────────────────
+    # 풋터(25px)는 우측 90px 를 투명도 슬라이더에 내주고 있어 최소 폭에서 시장 버튼
+    # 3개로 이미 꽉 찬다. 계좌 필터는 줄을 따로 두되, 계좌가 1개면 높이를 0 으로
+    # 접어 카드 크기가 계좌 기능 이전과 완전히 같아야 한다.
+    fcfg = tmpdir / "filter_stocks.json"
+    storage.CONFIG_FILE = str(fcfg)
+    storage.PREV_FILE = str(fcfg) + ".prev"
+    storage.BACKUP_FILE = str(fcfg) + ".bak"
+    WM.CONFIG_FILE = str(fcfg)
+    WM.BACKUP_FILE = str(fcfg) + ".bak"
+    fcfg.write_text(json.dumps({
+        "accounts": [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+                     {"id": "acc2", "name": "연금", "color": "#a6e3a1"}],
+        "selected_account": "ALL",
+        "stocks": [
+            {"code": "005930", "uid": "f1", "account_id": "acc1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "000660", "uid": "f2", "account_id": "acc2", "name": "SK하이닉스",
+             "avg_price": 100000, "quantity": 2, "pos": [300, 100]},
+            {"code": "NVDA", "uid": "f3", "account_id": "acc2", "name": "NVIDIA",
+             "market": "US", "currency": "USD", "avg_price": 100.0, "quantity": 1,
+             "pos": [500, 100]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    for _n in ("fetch_stock", "fetch_us_stock", "fetch_minute_chart",
+               "fetch_daily_chart", "fetch_us_minute_chart", "fetch_us_daily_chart"):
+        setattr(WFW, _n, lambda _c: None)
+    WM.fetch_usd_krw_rate = lambda: {"rate": 1400.0}
+
+    fmgr = WM.WidgetManager(app)
+    master = fmgr.master_widget
+    master.show()
+    for _w in fmgr.widgets.values():
+        _w.show()
+
+    def _visible():
+        return sorted(u for u, w in fmgr.widgets.items() if w.isVisible())
+
+    from pinstock.ui_windows.master_widget import MasterWidget as _MW
+    assert master.account_row.isVisible(), "계좌 2개인데 계좌 줄이 안 보인다"
+    assert master.H == _MW.GRID_H + _MW.ACCOUNT_H + _MW.FOOTER_H, master.H
+    assert master.footer.y() == _MW.GRID_H + _MW.ACCOUNT_H, "풋터가 계좌 줄 아래로 안 내려갔다"
+    assert [master.account_combo.itemText(i)
+            for i in range(master.account_combo.count())] == ["전체", "주계좌", "연금"]
+    assert _visible() == ["f1", "f2", "f3"]
+
+    # 계좌 필터 — 그 계좌 종목만, 선택은 저장까지
+    fmgr._on_account_filter_changed("acc2")
+    assert _visible() == ["f2", "f3"], _visible()
+    assert storage.read_config()[0]["selected_account"] == "acc2"
+
+    # 계좌 × 시장은 AND, 요약은 둘 다 통과한 것만 더한다
+    fmgr._on_market_filter_changed("US")
+    assert _visible() == ["f3"], _visible()
+    summed = [s for s in fmgr.stocks
+              if fmgr._matches_market_filter(s)
+              and WM.stock_in_account(s, fmgr.account_filter)]
+    assert [s["uid"] for s in summed] == ["f3"], summed
+    fmgr._on_market_filter_changed("ALL")
+
+    # 환율 폴링은 필터와 무관하게 전 계좌 기준 — 다른 계좌를 보는 중에 계좌를
+    # 되돌리면 환율이 이미 맞아 있어야 한다
+    fmgr._on_account_filter_changed("acc1")
+    assert _visible() == ["f1"], _visible()
+    assert fmgr.fx_timer.isActive(), "미국 종목이 다른 계좌에 있는데 환율이 멈췄다"
+
+    # 계좌가 1개로 줄면 줄을 도로 접고 필터는 '전체'로 폴백한다
+    _orig_acct_exec2 = md.AccountManagerDialog.exec
+
+    def _keep_one(self):
+        self._accounts[:] = [a for a in self._accounts if a["id"] == "acc2"]
+        for s in self._stocks:
+            s["account_id"] = "acc2"
+        return 1
+
+    md.AccountManagerDialog.exec = _keep_one
+    _orig_q = WM.QMessageBox.question
+    WM.QMessageBox.question = staticmethod(lambda *a, **k: md.QMessageBox.StandardButton.Yes)
+    try:
+        fmgr.open_account_dialog()
+    finally:
+        md.AccountManagerDialog.exec = _orig_acct_exec2
+        WM.QMessageBox.question = _orig_q
+
+    assert not master.account_row.isVisible(), "계좌 1개인데 계좌 줄이 남아 있다"
+    assert master.H == _MW.GRID_H + _MW.FOOTER_H, f"카드 높이가 원래대로 안 돌아왔다: {master.H}"
+    assert fmgr.account_filter == "ALL", fmgr.account_filter
+    assert len(_visible()) == 3, "필터가 전체로 돌아왔는데 숨은 위젯이 있다"
+    master.close()
+    for _w in list(fmgr.widgets.values()):
+        _w.close()
+    log("[ok] 21. 마스터 계좌 필터 — 계좌 1개면 줄 접힘 / 계좌×시장 AND / 환율은 전 계좌 기준")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 20개 케이스 전부 통과")
+    log("\n[PASS] 21개 케이스 전부 통과")
 
 
 def main() -> int:

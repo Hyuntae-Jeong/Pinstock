@@ -48,7 +48,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter,
-    merge_account_duplicates,
+    merge_account_duplicates, stock_in_account,
     ConfigLoadError, read_config, write_config_atomic, rotate_daily_backup,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_stock_schema,
@@ -397,7 +397,10 @@ class WidgetManager:
     def _is_stock_visible(self, stock: dict) -> bool:
         if not stock:
             return False
-        return not stock.get("hidden", False) and self._matches_market_filter(stock)
+        # 계좌와 시장은 서로 독립된 축이라 AND 로 묶는다.
+        return (not stock.get("hidden", False)
+                and self._matches_market_filter(stock)
+                and stock_in_account(stock, self.account_filter))
 
     # ── 관심 그룹 고정 너비 / 표시 여부 ───────────────────────────────────
     def _calc_uniform_watch_width(self) -> int:
@@ -443,10 +446,21 @@ class WidgetManager:
 
     def _on_market_filter_changed(self, market: str):
         self.market_filter = market if market in {"ALL", "KR", "US"} else "ALL"
-        self._apply_market_filter()
+        self._apply_filters()
         self._recompute_master()
 
-    def _apply_market_filter(self):
+    def _on_account_filter_changed(self, account_id: str):
+        """보고 있는 계좌 변경. 요약은 화면에 보이는 것의 합이므로 같이 다시 센다."""
+        self.account_filter = normalize_account_filter(account_id, self.accounts)
+        self._apply_filters()
+        self._recompute_master()
+        self._save_config()
+
+    def _apply_visibility(self):
+        """각 위젯의 표시 여부만 현재 필터에 맞춘다 — 위치는 건드리지 않는다.
+
+        계좌 이동처럼 '한 종목의 소속만 바뀐' 경우에 쓴다. 여기서 재정렬까지 하면
+        평단가만 고친 사용자의 위젯 배치가 통째로 흐트러진다."""
         for s in self.stocks:
             w = self.widgets.get(s["uid"])
             if not w:
@@ -455,11 +469,17 @@ class WidgetManager:
                 w.hide()
             else:
                 w.show()
+
+    def _apply_filters(self):
+        """계좌·시장 필터를 위젯 표시와 배치에 반영한다 (필터를 바꿨을 때)."""
+        self._apply_visibility()
         # 관심 그룹도 같은 시장 필터를 적용 — 멤버 구성이 바뀌므로 그룹을 다시 구성
+        # (관심종목은 계좌를 타지 않는다 — 전 계좌가 하나의 목록을 공유한다)
         self._sync_watch_groups()
         self._compact_visible_widgets()
         if self.master_widget:
             self.master_widget.set_market_filter(self.market_filter)
+            self.master_widget.set_account_filter(self.account_filter)
             self.master_widget.sync_aux_windows()
 
     # ── 트레이 ─────────────────────────────────────────────────────────────
@@ -1082,6 +1102,8 @@ class WidgetManager:
         if not self._settle_account_moves(before) and w is not None:
             # 합치기를 취소했으면 위젯이 들고 있는 dict 도 원래 계좌로 돌아가 있다
             w.data["account_id"] = before.get(uid, w.data.get("account_id"))
+        # 다른 계좌로 옮겼으면 지금 보고 있는 계좌에서 빠질 수 있다
+        self._apply_visibility()
         self._save_config()
         self._recompute_master()
 
@@ -1139,8 +1161,11 @@ class WidgetManager:
             self.master_widget.set_opacity(self.popover_opacity)
             self.master_widget.opacity_changed.connect(self._on_opacity_changed)
             self.master_widget.market_filter_changed.connect(self._on_market_filter_changed)
+            self.master_widget.account_filter_changed.connect(self._on_account_filter_changed)
             self.master_widget.context_menu_requested.connect(self._show_context_menu)
             self.master_widget.set_market_filter(self.market_filter)
+            self.master_widget.set_accounts(self.accounts)
+            self.master_widget.set_account_filter(self.account_filter)
             # 시작 시 저장된 투명도가 임계치 이하면 show 전에 미리 click-through 활성화
             # (슬라이더는 별도 윈도우라 영향 없음).
             if self._is_click_through_opacity(self.popover_opacity):
@@ -1262,8 +1287,11 @@ class WidgetManager:
             for w in self.widgets.values()
             if w.current_price
         }
+        # 요약은 화면에 보이는 것의 합 — 두 필터를 다 통과한 종목만 더한다.
         totals = portfolio_totals(
-            [s for s in self.stocks if self._matches_market_filter(s)],
+            [s for s in self.stocks
+             if self._matches_market_filter(s)
+             and stock_in_account(s, self.account_filter)],
             current_prices=current_prices,
             usd_krw_rate=self.usd_krw_rate,
         )
@@ -1331,6 +1359,7 @@ class WidgetManager:
         self._settle_account_moves(before)
         self._sync_pollers()          # 폴러였던 보유분이 사라졌으면 남은 위젯이 승계
         self._sync_accounts_to_widgets()
+        self._apply_visibility()
         self._sync_fx_timer()
         self._apply_uniform_width()
         self._save_config()
@@ -1397,9 +1426,15 @@ class WidgetManager:
         return True
 
     def _sync_accounts_to_widgets(self):
-        """계좌 목록이 바뀌면 위젯에도 알린다 — 위젯 우클릭 수정 창의 계좌 선택 행용."""
+        """계좌 목록이 바뀌면 위젯과 마스터에도 알린다.
+
+        위젯은 우클릭 수정 창의 계좌 선택 행에, 마스터는 계좌 필터 줄에 쓴다.
+        계좌가 1개로 줄면 마스터가 그 줄을 도로 접는다."""
         for w in self.widgets.values():
             w.set_accounts(self.accounts)
+        if self.master_widget:
+            self.master_widget.set_accounts(self.accounts)
+            self.master_widget.set_account_filter(self.account_filter)
 
     def _default_account_for_add(self) -> str:
         """새 종목이 들어갈 기본 계좌 — 지금 보고 있는 계좌, '전체'면 첫 계좌."""
@@ -1789,7 +1824,7 @@ class WidgetManager:
         self._sync_pollers()
         self._sync_fx_timer()
         self._apply_uniform_width()
-        self._apply_market_filter()
+        self._apply_filters()
         self._save_config()
         self._recompute_master()
 
@@ -1957,9 +1992,10 @@ class WidgetManager:
             self._spawn_widget(s, default_x, default_y, stagger_idx=i)
         self._sync_pollers()
 
-        # 마스터 위젯도 새 너비에 맞춰 갱신
+        # 마스터 위젯도 새 너비/계좌 목록에 맞춰 갱신
         if self.master_widget:
             self.master_widget.set_uniform_width(self.uniform_w)
+        self._sync_accounts_to_widgets()
 
         self._save_config()
         self._recompute_master()
