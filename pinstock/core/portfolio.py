@@ -144,6 +144,44 @@ def buy_preview(
     }
 
 
+def merge_holdings(base: dict, incoming: dict) -> dict:
+    """같은 계좌·같은 종목의 두 보유분을 하나로 합친다 (base 를 제자리 수정).
+
+    계좌 이동으로만 생기는 상황이다 — 종목 추가는 (code, account_id) 중복을 막는다.
+    평단가는 수량 가중평균, 수량은 합. base 의 uid·pos·이름을 유지하므로 화면에서는
+    "옮겨온 쪽이 원래 있던 항목에 흡수된다".
+
+    미국 주식의 매수환율도 매입원가(원화) 기준으로 다시 잡는다 — 물타기(buy_preview)와
+    같은 계산이다. 한쪽에만 환율이 기록돼 있으면 통째로 버린다: 반쪽 환율로 전체를
+    환산하면 기록이 없는 쪽 매입원가가 그만큼 틀어지고, 키가 없으면 현재 환율로
+    폴백해 최소한 일관된 값이 된다.
+    """
+    bq = _to_float(base.get("quantity"))
+    iq = _to_float(incoming.get("quantity"))
+    ba = _to_float(base.get("avg_price"))
+    ia = _to_float(incoming.get("avg_price"))
+    total_qty = bq + iq
+    new_avg = ((ba * bq) + (ia * iq)) / total_qty if total_qty > 0 else ba
+
+    us = is_us_stock(base)
+    br = _to_float(base.get("buy_exchange_rate"))
+    ir = _to_float(incoming.get("buy_exchange_rate"))
+    if us and br > 0 and ir > 0 and new_avg > 0 and total_qty > 0:
+        invest_krw = (ba * bq * br) + (ia * iq * ir)
+        new_rate = invest_krw / (new_avg * total_qty)
+        if new_rate > 0:
+            base["buy_exchange_rate"] = round(new_rate, 4)
+    else:
+        base.pop("buy_exchange_rate", None)
+
+    base["avg_price"] = round(new_avg, 4) if us else int(round(new_avg))
+    base["quantity"] = round(total_qty, 3)
+    # 한쪽이라도 표시 중이면 합친 결과도 표시한다 (숨김은 보수적으로 풀어 준다)
+    if not incoming.get("hidden", False):
+        base["hidden"] = False
+    return base
+
+
 def portfolio_totals(
     stocks: list[dict],
     current_prices: dict | None = None,

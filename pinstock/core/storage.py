@@ -10,7 +10,7 @@ import shutil
 from datetime import date
 from pathlib import Path
 
-from .portfolio import portfolio_totals, stock_metrics
+from .portfolio import merge_holdings, portfolio_totals, stock_metrics
 
 
 # ─── 설정 파일 경로 (OS별 표준 디렉토리) ──────────────────────────────────────
@@ -69,11 +69,195 @@ def normalize_stock_schema(stock: dict) -> dict:
         except (TypeError, ValueError):
             normalized.pop("buy_exchange_rate", None)
 
+    # 계좌: 이 보유분이 속한 계좌 id. 레지스트리와의 정합(빈 값·삭제된 계좌 회수)은
+    # 계좌 목록을 함께 봐야 하므로 ensure_accounts() 가 맡는다.
+    account_id = normalized.get("account_id")
+    normalized["account_id"] = account_id.strip() if isinstance(account_id, str) else ""
+
+    # uid: 보유 항목 고유 식별자. 여러 계좌가 같은 종목을 각자 보유할 수 있게 된
+    # 뒤로, 행/편집/삭제/위젯 위치의 키는 code 가 아니라 이 uid 다. code 를 키로
+    # 쓰면 "계좌1 삼성전자"와 "계좌2 삼성전자"가 같은 항목으로 뭉개진다.
+    uid = normalized.get("uid")
+    normalized["uid"] = (
+        uid.strip() if isinstance(uid, str) and uid.strip() else new_holding_uid()
+    )
+
     return normalized
 
 
 def normalize_stocks_schema(stocks: list[dict]) -> list[dict]:
     return [normalize_stock_schema(s) for s in stocks if isinstance(s, dict)]
+
+
+# ─── 계좌 레지스트리 ─────────────────────────────────────────────────────────
+# 증권 계좌(주계좌/연금/ISA 등)를 나눠 관리하기 위한 목록. 태그와 같은
+# {id, name, color} 구조이고, 보유 종목은 account_id 로 참조한다. id 는 이름/색을
+# 바꿔도 참조가 끊기지 않도록 한 번 만들면 고정한다.
+#
+# 불변식 두 가지:
+#   - 계좌는 항상 1개 이상 존재한다 (0개면 종목을 둘 곳이 없다)
+#   - 모든 보유 종목의 account_id 는 실재하는 계좌를 가리킨다
+# 둘 다 ensure_accounts() 가 보장한다.
+#
+# 관심종목에는 계좌 개념이 없다 — 전 계좌가 하나의 목록을 공유한다.
+DEFAULT_ACCOUNT_NAME = "기본 계좌"
+DEFAULT_ACCOUNT_COLOR = "#89b4fa"
+# 계좌명 길이 상한. macOS 팝오버(360px)의 계좌 버튼 한 줄에 들어가도록 제한한다.
+ACCOUNT_NAME_MAX = 6
+# 계좌 필터 '전체' — 특정 계좌 id 와 섞이지 않도록 예약어로 둔다.
+ACCOUNT_FILTER_ALL = "ALL"
+
+
+def new_account_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def new_holding_uid() -> str:
+    # 계좌·태그(8자)보다 길게 잡는다 — 보유 항목은 Excel 가져오기 등으로 훨씬 자주,
+    # 훨씬 많이 만들어져 충돌 여지를 더 줄여 두는 편이 낫다.
+    return uuid.uuid4().hex[:12]
+
+
+def normalize_account(account: dict) -> dict | None:
+    """계좌 한 개를 정규화. id/name 이 비면 None(무효). 색상이 이상하면 기본색."""
+    if not isinstance(account, dict):
+        return None
+    aid = str(account.get("id") or "").strip()
+    name = str(account.get("name") or "").strip()[:ACCOUNT_NAME_MAX]
+    if not aid or not name:
+        return None
+    color = str(account.get("color") or "").strip()
+    if not _HEX_COLOR_RE.match(color):
+        color = DEFAULT_ACCOUNT_COLOR
+    return {"id": aid, "name": name, "color": color.lower()}
+
+
+def normalize_accounts(accounts: list) -> list[dict]:
+    """계좌 레지스트리 정규화. 무효 항목·중복 id 는 제거한다.
+
+    '최소 1개' 보장은 여기서 하지 않는다 — 보유 종목까지 같이 봐야 배정을 끝낼 수
+    있어서 ensure_accounts() 가 맡는다.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for a in accounts or []:
+        na = normalize_account(a)
+        if na and na["id"] not in seen:
+            seen.add(na["id"])
+            out.append(na)
+    return out
+
+
+def account_map(accounts: list[dict]) -> dict[str, dict]:
+    """{account_id: account} 빠른 조회용 매핑 (행 뱃지의 이름/색 표시에 사용)."""
+    return {a["id"]: a for a in accounts if isinstance(a, dict) and a.get("id")}
+
+
+def ensure_accounts(stocks: list[dict], accounts: list) -> list[dict]:
+    """계좌 레지스트리와 보유 종목의 소속을 정합하게 맞춘다 (stocks 는 제자리 수정).
+
+    - 계좌가 하나도 없으면 기본 계좌를 만든다.
+    - account_id 가 비었거나 실재하지 않는 계좌를 가리키면 첫 계좌로 회수한다.
+      계좌 개념이 없던 구버전 stocks.json 이 여기서 통째로 기본 계좌에 배정된다.
+    - uid 가 없거나 다른 보유분과 겹치면 새로 발급한다.
+
+    idempotent — 이미 정합한 입력은 그대로 통과하므로 로드/저장 양쪽에서 안심하고
+    부를 수 있다. 반환값은 (필요하면 새로 만든) 계좌 목록.
+    """
+    accounts = normalize_accounts(accounts)
+    if not accounts:
+        accounts = [{
+            "id": new_account_id(),
+            "name": DEFAULT_ACCOUNT_NAME,
+            "color": DEFAULT_ACCOUNT_COLOR,
+        }]
+
+    valid = {a["id"] for a in accounts}
+    fallback = accounts[0]["id"]
+    seen_uids: set[str] = set()
+    for s in stocks or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("account_id") not in valid:
+            s["account_id"] = fallback
+        uid = s.get("uid")
+        if not isinstance(uid, str) or not uid.strip() or uid in seen_uids:
+            uid = new_holding_uid()
+            s["uid"] = uid
+        seen_uids.add(uid)
+    return accounts
+
+
+def merge_account_duplicates(
+    stocks: list[dict], preferred_uids=()
+) -> tuple[list[dict], list[dict]]:
+    """한 계좌 안에 같은 종목이 두 건 이상이면 하나로 합친다.
+
+    종목 추가는 (code, account_id) 중복을 막으므로 이 상황은 계좌 이동으로만 생긴다.
+    그대로 두면 한 계좌의 같은 종목이 두 줄로 남아 요약과 종목 관리 표가 어긋난다.
+
+    preferred_uids 에 든 보유분을 흡수하는 쪽(base)으로 삼는다 — 호출측이 "이번에
+    움직이지 않은 쪽"을 넘겨 주면 옮겨온 항목이 원래 있던 항목에 흡수돼, 위젯 위치가
+    엉뚱하게 옮겨 가지 않는다. 해당하는 게 없으면 목록에서 먼저 나오는 쪽이 base 다.
+
+    반환값은 (합쳐진 보유 목록, 합침 기록). 기록 항목은
+    {code, name, account_id, kept_uid, dropped_uid} 이며 사용자 안내에 쓴다.
+    """
+    preferred = set(preferred_uids or ())
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for s in stocks or []:
+        if not isinstance(s, dict):
+            continue
+        key = (str(s.get("code") or ""), str(s.get("account_id") or ""))
+        groups.setdefault(key, []).append(s)
+
+    bases: dict[int, dict] = {}     # id(base) → base
+    dropped: set[int] = set()
+    merged: list[dict] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        base = next((s for s in group if s.get("uid") in preferred), group[0])
+        for s in group:
+            if s is base:
+                continue
+            merge_holdings(base, s)
+            dropped.add(id(s))
+            merged.append({
+                "code": base.get("code", ""),
+                "name": base.get("name", "") or base.get("code", ""),
+                "account_id": base.get("account_id", ""),
+                "kept_uid": base.get("uid", ""),
+                "dropped_uid": s.get("uid", ""),
+            })
+        bases[id(base)] = base
+
+    if not merged:
+        return list(stocks or []), []
+    # base 는 원래 자리에 그대로 두고 흡수된 항목만 걷어낸다 (순서 유지)
+    return [s for s in stocks if id(s) not in dropped], merged
+
+
+def normalize_account_filter(value, accounts: list[dict]) -> str:
+    """계좌 필터를 'ALL' 또는 실재하는 계좌 id 로 정규화.
+
+    삭제된 계좌를 가리키고 있으면 '전체'로 되돌린다 — 그대로 두면 아무 종목도
+    통과하지 못해 영문 모를 빈 화면이 된다.
+    """
+    v = str(value or "").strip()
+    if not v or v == ACCOUNT_FILTER_ALL:
+        return ACCOUNT_FILTER_ALL
+    return v if any(a.get("id") == v for a in accounts or []) else ACCOUNT_FILTER_ALL
+
+
+def stock_in_account(stock: dict, account_filter: str) -> bool:
+    """계좌 필터 통과 여부. 'ALL'(또는 빈 값)이면 전부 통과한다.
+
+    시장 필터(전체/한국/미국)와는 AND 로 결합한다 — 두 필터는 서로 독립이다.
+    """
+    if not account_filter or account_filter == ACCOUNT_FILTER_ALL:
+        return True
+    return str(stock.get("account_id") or "") == account_filter
 
 
 # ─── 메모(투자 메모장) 스키마 ─────────────────────────────────────────────────
@@ -134,13 +318,20 @@ def normalize_stock_memos(raw) -> dict:
 # 구버전(없음)이면 분리 안 한 기본 상태로 돌린다.
 def normalize_detached(raw) -> dict:
     """{view: 'holdings'|'watch'|None, pos: [x,y]|None, height: int|None,
-    pinned: bool, opacity: float, market_filter: 'ALL'|'KR'|'US'} 로 정규화."""
+    pinned: bool, opacity: float, market_filter: 'ALL'|'KR'|'US',
+    account_filter: 'ALL'|<account_id>} 로 정규화.
+
+    분리 창은 메인 팝오버와 독립된 시장/계좌 필터를 가진다 ("본창=전체, 분리창=계좌1"
+    같은 조합). account_filter 는 계좌 레지스트리를 모르는 자리라 문자열 형태만
+    맞춰 두고, 실재하는 계좌인지는 호출측이 normalize_account_filter() 로 거른다.
+    """
     view = None
     pos = None
     height = None
     pinned = False
     opacity = 1.0
     market_filter = "ALL"
+    account_filter = ACCOUNT_FILTER_ALL
     if isinstance(raw, dict):
         v = raw.get("view")
         if v in ("holdings", "watch"):
@@ -164,8 +355,11 @@ def normalize_detached(raw) -> dict:
             opacity = 1.0
         mf = str(raw.get("market_filter") or "ALL").strip().upper()
         market_filter = mf if mf in ("ALL", "KR", "US") else "ALL"
+        af = str(raw.get("account_filter") or "").strip()
+        account_filter = af or ACCOUNT_FILTER_ALL
     return {"view": view, "pos": pos, "height": height,
-            "pinned": pinned, "opacity": opacity, "market_filter": market_filter}
+            "pinned": pinned, "opacity": opacity, "market_filter": market_filter,
+            "account_filter": account_filter}
 
 
 # ─── 관심종목(워치리스트) 스키마 ──────────────────────────────────────────────

@@ -4,8 +4,8 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QMenu, QApplication,
     QPushButton,
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint, QSize, QEvent, pyqtSignal
-from PyQt6.QtGui import QFont, QFontMetrics, QCursor
+from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, QSize, QEvent, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QCursor, QPainter, QPainterPath
 from datetime import datetime
 
 from ..core.api import (
@@ -17,6 +17,48 @@ from ..core.portfolio import is_us_stock, is_index, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .chart_widget import SparklineWidget, ChartPopup, aggregate_candles
 from .manage_dialog import StockDialog
+
+
+class _AccountBar(QWidget):
+    """카드 좌측의 계좌색 알약 — '전체' 보기에서 어느 계좌 것인지 구분한다.
+
+    위젯이 작아(높이 58px) 맥 팝오버처럼 계좌명 뱃지를 넣을 자리가 없다. 종목명
+    좌마진(14px) 안쪽에 얇은 색 막대만 세워 자리를 뺏지 않는다.
+    """
+
+    WIDTH   = 3    # 더 두꺼우면 종목명과 붙어 보인다 (여백 14 - 6 - 3 = 5px)
+    X       = 6
+    V_INSET = 9    # 위아래로 이만큼 들여 카드 모서리와 겹치지 않게 한다
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._color: str = ""
+        # 카드 위에 얹히지만 클릭/드래그는 위젯 본체가 그대로 받아야 한다.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def set_color(self, color: str | None):
+        color = color or ""
+        if color == self._color:
+            return
+        self._color = color
+        self.setVisible(bool(color))
+        self.update()
+
+    def sync_geometry(self, compact_h: int):
+        """compact 영역 높이에 맞춘다 — 펼쳐도 막대는 종목 줄에만 붙어 있다."""
+        self.setGeometry(self.X, self.V_INSET, self.WIDTH,
+                         max(0, compact_h - self.V_INSET * 2))
+
+    def paintEvent(self, _event):
+        if not self._color:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), self.WIDTH / 2, self.WIDTH / 2)
+        p.fillPath(path, QColor(self._color))
+        p.end()
 
 
 def format_quantity(value) -> str:
@@ -32,12 +74,19 @@ def format_quantity(value) -> str:
 class StockWidget(QWidget):
     """화면에 떠있는 하나의 주식 위젯"""
 
-    deleted        = pyqtSignal(str)   # code 전달
-    edited         = pyqtSignal(str)   # 수정 완료 후 저장 요청
-    buy_requested  = pyqtSignal(str)   # 추가 매수 예상/확정 요청
-    memo_requested = pyqtSignal(str)   # 종목별 메모 팝업 요청
-    price_updated  = pyqtSignal(str)   # 현재가 갱신 시 (마스터 위젯 재집계용)
-    layout_changed = pyqtSignal(str)   # compact 높이 변경 시 재정렬 요청
+    # 보유 항목의 키는 code 가 아니라 uid 다 — 계좌가 다르면 같은 종목을 각자
+    # 보유할 수 있어, code 로 보내면 어느 보유분인지 결정할 수 없다.
+    # 메모만은 종목에 붙는 것이라 예외적으로 code 를 보낸다.
+    deleted        = pyqtSignal(str)   # uid 전달
+    edited         = pyqtSignal(str)   # uid — 수정 완료 후 저장 요청
+    buy_requested  = pyqtSignal(str)   # uid — 추가 매수 예상/확정 요청
+    memo_requested = pyqtSignal(str)   # code — 종목별 메모 팝업 요청
+    price_updated  = pyqtSignal(str)   # uid — 현재가 갱신 시 (마스터 위젯 재집계용)
+    layout_changed = pyqtSignal(str)   # uid — compact 높이 변경 시 재정렬 요청
+    # 폴러 위젯이 실제로 받아온 원본 — 매니저가 같은 종목의 다른 계좌 위젯에 중계한다.
+    # 시세는 시장 데이터라 계좌와 무관하므로 키는 uid 가 아니라 code 다.
+    price_fetched  = pyqtSignal(str, object)   # code, 시세 result
+    chart_fetched  = pyqtSignal(str, object)   # code, (kind, payload) 또는 None
 
     MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
@@ -49,7 +98,7 @@ class StockWidget(QWidget):
 
     def __init__(self, stock_data: dict, width: int | None = None, stagger_idx: int = 0):
         super().__init__()
-        self.data = stock_data          # code, name, avg_price, quantity, pos
+        self.data = stock_data          # code, uid, account_id, name, avg_price, quantity, pos
         self.current_price: float = 0
         self.usd_krw_rate: float | None = None
         self.us_return_basis: str = "krw"   # 미국 주식 수익률 표시 기준 (krw|usd)
@@ -58,6 +107,16 @@ class StockWidget(QWidget):
         self._press_pos = None    # 좌클릭 시작 위치 (드래그/클릭 구분용)
         self._moved: bool = False # 일정 거리 이상 움직였는지
         self._stagger_idx = stagger_idx   # 동시 호출 분산용 인덱스
+        # 시세 폴링은 code 당 1개만 돈다. 같은 종목을 여러 계좌가 보유해도 HTTP 호출은
+        # 늘지 않고, 받아온 값은 매니저가 나머지 위젯에 중계한다. 매니저가
+        # set_polling(False) 로 꺼 둔 위젯은 타이머를 아예 돌리지 않는다.
+        self._polling: bool = True
+        self._fetch_started: bool = False
+        # 우클릭 → 수정 창의 계좌 선택 행에 쓸 계좌 목록. 매니저가 넣어 준다.
+        self._accounts: list[dict] = []
+        # 수정 창에서 계좌를 옮기기 직전의 소속. 매니저가 "같은 계좌에 같은 종목이
+        # 겹쳤는지"를 판단하고, 사용자가 합치기를 취소하면 여기로 되돌린다.
+        self.prev_account_id: str = ""
         self._compact_height = self.COMPACT_H
 
         # 외부에서 통일 너비를 받지 않으면 종목명 기준 자체 계산
@@ -89,12 +148,50 @@ class StockWidget(QWidget):
         delay = self._stagger_idx * STAGGER_MS
         QTimer.singleShot(delay, self._start_fetching)
 
+    @property
+    def uid(self) -> str:
+        """이 위젯이 대표하는 보유 항목의 키. 매니저의 widgets dict 키와 같다."""
+        return self.data.get("uid", "")
+
     def _start_fetching(self):
         """타이머 가동 + 즉시 1회 fetch (stagger 지연 후 호출)."""
+        self._fetch_started = True
+        if not self._polling:
+            return          # 이 종목은 다른 위젯이 폴링 중 — 값은 중계로 받는다
         self.refresh_timer.start(5_000)
         self.chart_timer.start(60_000)
         self._fetch_price()
         self._fetch_chart()
+
+    def set_polling(self, enabled: bool):
+        """이 위젯이 해당 종목의 폴러인지 지정한다 (매니저가 code 당 1개만 켠다).
+
+        꺼지면 타이머를 멈추고, 켜지면(폴러가 삭제돼 승계받은 경우) 즉시 다시 돈다.
+        stagger 지연 중이라면 _start_fetching 이 이 플래그를 보고 알아서 판단한다."""
+        enabled = bool(enabled)
+        if enabled == self._polling:
+            return
+        self._polling = enabled
+        if not enabled:
+            self.refresh_timer.stop()
+            self.chart_timer.stop()
+        elif self._fetch_started:
+            self._start_fetching()
+
+    @property
+    def is_polling(self) -> bool:
+        return self._polling
+
+    def closeEvent(self, event):
+        """닫힌 위젯의 타이머를 멈춘다.
+
+        삭제된 종목의 위젯이 계속 살아 있으면(참조가 어디든 남아 있으면) 타이머가
+        그대로 돌아 없는 종목의 HTTP 호출이 남는다."""
+        self._polling = False
+        self.refresh_timer.stop()
+        self.chart_timer.stop()
+        self.collapse_timer.stop()
+        super().closeEvent(event)
 
     # ── 종목명에 맞춰 가로폭 계산 ─────────────────────────────────────────
     @staticmethod
@@ -133,6 +230,10 @@ class StockWidget(QWidget):
         self.compact = QWidget(self.card)
         self.compact.setGeometry(0, 0, self.W, self.COMPACT_H)
         self.compact.setStyleSheet("background: transparent;")
+
+        # 계좌색 알약 — compact 다음에 만들어 그 위에 얹힌다. 색이 없으면 숨는다.
+        self.account_bar = _AccountBar(self.card)
+        self.account_bar.sync_geometry(self._compact_height)
 
         hl = QHBoxLayout(self.compact)
         hl.setContentsMargins(14, 5, 10, 5)
@@ -294,15 +395,30 @@ class StockWidget(QWidget):
 
     # ── 데이터 갱신 ────────────────────────────────────────────────────────
     def _fetch_price(self):
-        """현재가/등락률 갱신 (5초 주기)."""
+        """현재가/등락률 갱신 (5초 주기). 폴러 위젯에서만 호출된다."""
         result = fetch_us_stock(self.data["code"]) if is_us_stock(self.data) else fetch_stock(self.data["code"])
         if result:
-            self.data["name"] = result["name"]
-            self.name_lbl.setText(result["name"])
-            self.current_price = result["price"]
-            self._prev_close = float(result["price"] - result["change_price"])
-            self._apply_price(result)
-            self.price_updated.emit(self.data["code"])
+            self.apply_price_result(result)
+            self.price_fetched.emit(self.data["code"], result)
+
+    def apply_price_result(self, result: dict):
+        """받아온 시세를 화면에 반영. 폴러 자신도, 중계받는 위젯도 같은 경로를 탄다."""
+        self.data["name"] = result["name"]
+        self.name_lbl.setText(result["name"])
+        self.current_price = result["price"]
+        self._prev_close = float(result["price"] - result["change_price"])
+        self._apply_price(result)
+        self.price_updated.emit(self.uid)
+
+    def set_account_color(self, color: str | None):
+        """계좌색 막대 표시. 빈 값이면 감춘다 — 특정 계좌를 보는 중이면 전 위젯이
+        같은 계좌라 구분할 이유가 없고, 계좌가 1개인 사용자에게도 보일 이유가 없다."""
+        self.account_bar.set_color(color)
+
+    def set_accounts(self, accounts: list[dict] | None):
+        """계좌 목록 갱신 — 수정 창에서 계좌를 옮길 수 있게 한다.
+        계좌가 1개뿐이면 StockDialog 가 알아서 선택 행을 넣지 않는다."""
+        self._accounts = list(accounts or [])
 
     def set_usd_krw_rate(self, rate: float | None):
         self.usd_krw_rate = rate
@@ -315,19 +431,36 @@ class StockWidget(QWidget):
             self._update_detail(self.current_price)
 
     def _fetch_chart(self):
-        """sparkline 갱신 (60초 주기) — 당일 분봉 우선, 비어있으면 최근 일봉 폴백."""
+        """sparkline 갱신 (60초 주기). 폴러 위젯에서만 호출된다."""
+        data = self._load_chart_data()
+        self.apply_chart_data(data)
+        self.chart_fetched.emit(self.data["code"], data)
+
+    def _load_chart_data(self):
+        """당일 분봉 우선, 비어있으면 최근 일봉 폴백. ("minute"|"daily", payload) 또는 None."""
         if is_us_stock(self.data):
             chart = fetch_us_minute_chart(self.data["code"])
         else:
             chart = fetch_minute_chart(self.data["code"])
         if chart and len(chart["prices"]) >= 2:
+            return ("minute", chart)
+        daily = fetch_us_daily_chart(self.data["code"]) if is_us_stock(self.data) else fetch_daily_chart(self.data["code"])
+        return ("daily", daily) if daily else None
+
+    def apply_chart_data(self, data):
+        """sparkline 반영. 폴러 자신도, 중계받는 위젯도 같은 경로를 탄다.
+
+        _prev_close 는 위젯마다 자기 시세 갱신에서 채워지므로 중계받은 쪽에서도
+        분봉의 전일 종가 점선이 제 위치에 그려진다."""
+        if not data:
+            return
+        kind, payload = data
+        if kind == "minute":
             # 분봉 모드: 전일 종가 점선(=현재가 - 전일대비)도 함께 표시
-            self.sparkline.set_data(chart["prices"], chart["open"], self._prev_close)
+            self.sparkline.set_data(payload["prices"], payload["open"], self._prev_close)
         else:
             # 일봉 모드: 최근 N일 캔들 차트로 폴백
-            daily = fetch_us_daily_chart(self.data["code"]) if is_us_stock(self.data) else fetch_daily_chart(self.data["code"])
-            if daily:
-                self.sparkline.set_candles(daily["candles"])
+            self.sparkline.set_candles(payload["candles"])
 
     def _apply_price(self, result: dict):
         price = result["price"]
@@ -403,12 +536,14 @@ class StockWidget(QWidget):
             self.card.setGeometry(0, 0, self.W, self._expanded_height())
             self.compact.setGeometry(0, 0, self.W, height)
             self.expand_panel.setGeometry(0, height, self.W, self.expand_panel.height())
-            self.layout_changed.emit(self.data["code"])
+            self.account_bar.sync_geometry(height)
+            self.layout_changed.emit(self.uid)
             return
         self.setFixedHeight(height)
         self.card.setGeometry(0, 0, self.W, height)
         self.compact.setGeometry(0, 0, self.W, height)
-        self.layout_changed.emit(self.data["code"])
+        self.account_bar.sync_geometry(height)
+        self.layout_changed.emit(self.uid)
 
     def _expanded_height(self) -> int:
         return self.EXPAND_H + max(0, self._compact_height - self.COMPACT_H)
@@ -580,28 +715,33 @@ class StockWidget(QWidget):
 
         action = menu.exec(event.globalPos())
         if action == buy_act:
-            self.buy_requested.emit(self.data["code"])
+            self.buy_requested.emit(self.uid)
         elif action == edit_act:
             self._open_edit()
         elif action == memo_act:
             self.memo_requested.emit(self.data["code"])
         elif action == del_act:
-            self.deleted.emit(self.data["code"])
+            self.deleted.emit(self.uid)
             self.close()
 
     def _open_edit(self):
-        dlg = StockDialog(data=self.data)
+        self.prev_account_id = self.data.get("account_id", "")
+        dlg = StockDialog(data=self.data, accounts=self._accounts)
         if dlg.exec():
             new = dlg.get_data()
             self.data["avg_price"] = new["avg_price"]
             self.data["quantity"]  = new["quantity"]
+            # 계좌를 바꿨으면 그대로 계좌 간 이동이다 — uid 가 유지되므로 위젯
+            # 위치·메모는 그대로 따라간다.
+            if new.get("account_id"):
+                self.data["account_id"] = new["account_id"]
             if "buy_exchange_rate" in new:
                 self.data["buy_exchange_rate"] = new["buy_exchange_rate"]
             else:
                 self.data.pop("buy_exchange_rate", None)
             if self.current_price:
                 self._update_detail(self.current_price)
-            self.edited.emit(self.data["code"])
+            self.edited.emit(self.uid)
 
 
 # ─── 폭이 모자라면 …로 줄이고, 줄였을 때만 hover 툴팁으로 전체 표시하는 라벨 ──

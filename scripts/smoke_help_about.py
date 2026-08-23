@@ -35,12 +35,12 @@ def _run(log_fp):
     log("[step] imports ok")
 
     # ── HelpDialog — 정적 카테고리 + 동적 'Pinstock 정보' 섹션 ──
-    # HELP_SECTIONS 는 정적 11개. 'Pinstock 정보' 는 HelpDialog 가 런타임에
-    # 한 개 더 붙이므로 다이얼로그의 실제 섹션(_sections)은 12개가 된다.
-    assert len(HELP_SECTIONS) == 11
+    # HELP_SECTIONS 는 정적 12개. 'Pinstock 정보' 는 HelpDialog 가 런타임에
+    # 한 개 더 붙이므로 다이얼로그의 실제 섹션(_sections)은 13개가 된다.
+    assert len(HELP_SECTIONS) == 12
     help_dlg = HelpDialog(on_check_update=lambda: None)
     log("[step] HelpDialog() ok")
-    assert len(help_dlg._sections) == 12
+    assert len(help_dlg._sections) == 13
     assert help_dlg.category_list.count() == len(help_dlg._sections)
     for i, (sidebar, body_h2, _body) in enumerate(help_dlg._sections):
         help_dlg.category_list.setCurrentRow(i)
@@ -70,7 +70,7 @@ def _run(log_fp):
 
     # ── 콜백 없으면 업데이트 확인 링크 비노출 (개발 빌드 등) ──
     help_nocb = HelpDialog()
-    assert len(help_nocb._sections) == 12
+    assert len(help_nocb._sections) == 13
     assert "pinstock:check-update" not in help_nocb._sections[-1][2]
     log("[OK] HelpDialog(콜백 없음) — 업데이트 확인 링크 비노출")
 

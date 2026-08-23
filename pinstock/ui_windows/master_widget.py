@@ -4,11 +4,12 @@ import sys
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QApplication,
-    QPushButton, QSlider, QStyle, QStyleOptionSlider,
+    QComboBox, QPushButton, QSlider, QStyle, QStyleOptionSlider,
 )
-from PyQt6.QtCore import Qt, QPoint, QRectF, QTimer, pyqtSignal
-from PyQt6.QtGui import QPainter, QPen, QBrush, QColor
+from PyQt6.QtCore import Qt, QPoint, QRectF, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap
 
+from ..core.storage import ACCOUNT_FILTER_ALL
 from .theme import C
 
 
@@ -210,6 +211,63 @@ class _SliderWindow(QFrame):
         _disable_win11_dwm_chrome(int(self.winId()))
 
 
+class _AccountCombo(QComboBox):
+    """마스터 카드의 계좌 필터 콤보.
+
+    카드 위에 얹히는 콤보라 앱 전역 스타일이 없다 — 배경/테두리/여백을 직접 준다.
+    세로 여백을 0 으로 두는 게 중요하다: 계좌 줄이 24px 뿐이라 기본 padding 이면
+    콤보가 줄 높이를 넘겨 카드 밖으로 밀린다.
+
+    휠은 무시한다. 마스터 위에서 휠을 굴리다 커서가 콤보를 지나칠 때 보고 있던
+    계좌가 제멋대로 바뀌면, 요약 숫자가 왜 달라졌는지 알 길이 없다.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setIconSize(QSize(9, 9))
+        self.setFixedHeight(18)
+        self.setStyleSheet(f"""
+            QComboBox {{
+                background: {C['surface']};
+                color: {C['text']};
+                border: none;
+                border-radius: 5px;
+                padding: 0px 4px;
+                font-size: 10px;
+                font-weight: bold;
+            }}
+            QComboBox:hover {{ background: {C['border']}; }}
+            QComboBox::drop-down {{ border: none; width: 12px; }}
+            QComboBox::down-arrow {{ image: none; }}
+            QComboBox QAbstractItemView {{
+                background: {C['bg']};
+                color: {C['text']};
+                border: 1px solid {C['border']};
+                selection-background-color: {C['surface']};
+                outline: none;
+                padding: 2px;
+            }}
+        """)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+def _account_dot(color: str, size: int = 9) -> QIcon:
+    """계좌 색 점 — 콤보 항목 앞에 붙여 어느 계좌인지 색으로 잇는다."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color or C["blue"]))
+    p.drawEllipse(0, 0, size, size)
+    p.end()
+    return QIcon(pm)
+
+
 # ─── 포트폴리오 요약 마스터 위젯 ─────────────────────────────────────────────
 class MasterWidget(QWidget):
     """포트폴리오 전체 요약을 표시하는 마스터 위젯.
@@ -219,7 +277,12 @@ class MasterWidget(QWidget):
 
     GRID_H   = 96    # 2×2 요약 그리드 영역 높이
     FOOTER_H = 25    # 우측 하단 필터/투명도 슬라이더 영역 높이
-    H        = GRID_H + FOOTER_H   # compact 카드 전체 높이
+    # 계좌 필터 줄 높이. 풋터는 우측 90px 를 투명도 슬라이더에 내주고 있어 최소 폭
+    # (240px)에서는 시장 버튼 3개로 이미 꽉 찬다 — 계좌 콤보를 같은 줄에 욱여넣으면
+    # 폭이 좁은 사용자에게서 잘린다. 그래서 줄을 따로 두되, 계좌가 1개면 높이를 0 으로
+    # 접어 카드 크기가 이전과 완전히 같게 만든다.
+    ACCOUNT_H = 24
+    H        = GRID_H + FOOTER_H   # compact 카드 기본 높이 (계좌 줄 없을 때)
     RADIUS   = 13
     DRAG_THRESHOLD = 4
     MASK     = "•••••"   # 자산 숨김 시 4지표/종목 손익에 표시
@@ -236,6 +299,7 @@ class MasterWidget(QWidget):
 
     opacity_changed = pyqtSignal(float)   # 0.1 ~ 1.0
     market_filter_changed = pyqtSignal(str)   # ALL / KR / US
+    account_filter_changed = pyqtSignal(str)  # "ALL" 또는 계좌 id
     context_menu_requested = pyqtSignal(QPoint)   # 우클릭 위치(전역 좌표) → 매니저가 트레이와 동일 메뉴 표시
 
     def __init__(self, width: int):
@@ -249,6 +313,13 @@ class MasterWidget(QWidget):
         self.is_expanded: bool = False
         self.holdings: list[dict] = []   # [{"name", "profit", "profit_rate"}, ...]
         self._market_filter: str = "ALL"
+        # 계좌 필터 — 계좌가 1개면 줄 자체를 접는다 (_account_h == 0).
+        self._accounts: list[dict] = []
+        self._account_filter: str = ACCOUNT_FILTER_ALL
+        self._account_h: int = 0
+        self._syncing_account_combo: bool = False
+        # 계좌 줄 유무에 따라 카드 높이가 달라지므로 인스턴스 값으로 들고 간다.
+        self.H = self.GRID_H + self.FOOTER_H
         # 자산 숨김 — True 면 4지표/종목 손익을 •••• 로 마스킹. update_metrics 후
         # 토글이 와도 다시 그릴 수 있도록 마지막 입력값을 보관해둔다.
         self._assets_hidden: bool = False
@@ -295,6 +366,21 @@ class MasterWidget(QWidget):
         self.eval_val   = self._make_cell(grid, 0, 1, "평가금액")
         self.profit_val = self._make_cell(grid, 1, 0, "평가손익", bold=True)
         self.prate_val  = self._make_cell(grid, 1, 1, "수익률",   bold=True)
+
+        # 계좌 필터 줄 — 계좌가 2개 이상일 때만 높이를 갖는다.
+        self.account_row = QWidget(self.card)
+        self.account_row.setGeometry(0, self.GRID_H, self.W, 0)
+        self.account_row.setStyleSheet("background: transparent;")
+        account_layout = QHBoxLayout(self.account_row)
+        account_layout.setContentsMargins(12, 0, 14, 2)
+        account_layout.setSpacing(6)
+        acc_lbl = QLabel("계좌")
+        acc_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 10px;")
+        account_layout.addWidget(acc_lbl)
+        self.account_combo = _AccountCombo(self.account_row)
+        self.account_combo.activated.connect(self._on_account_combo_activated)
+        account_layout.addWidget(self.account_combo, 1)
+        self.account_row.hide()
 
         # 우측 하단 투명도 슬라이더 풋터 — 슬라이더 자체는 별도 top-level 윈도우로 분리.
         # (마스터가 click-through 상태여도 슬라이더는 그대로 조작 가능하도록.)
@@ -369,6 +455,59 @@ class MasterWidget(QWidget):
 
     def set_market_filter(self, market: str):
         self._set_market_filter(market, emit=False)
+
+    # ── 계좌 필터 ─────────────────────────────────────────────────────────
+    def set_accounts(self, accounts: list[dict] | None):
+        """계좌 목록 갱신. 계좌가 1개면 줄을 통째로 접는다 — [전체][기본 계좌] 는
+        아무 정보도 주지 않으면서 카드만 키운다. 계좌를 안 나눠 쓰는 사용자는
+        화면이 이전과 완전히 같아야 한다."""
+        self._accounts = list(accounts or [])
+        self._syncing_account_combo = True
+        self.account_combo.clear()
+        self.account_combo.addItem("전체", ACCOUNT_FILTER_ALL)
+        for a in self._accounts:
+            self.account_combo.addItem(
+                _account_dot(a.get("color", "")), a.get("name", ""), a.get("id", "")
+            )
+        idx = self.account_combo.findData(self._account_filter)
+        self.account_combo.setCurrentIndex(max(0, idx))
+        self._syncing_account_combo = False
+        self._set_account_row_height(self.ACCOUNT_H if len(self._accounts) > 1 else 0)
+
+    def set_account_filter(self, account_id: str):
+        self._account_filter = account_id or ACCOUNT_FILTER_ALL
+        self._syncing_account_combo = True
+        idx = self.account_combo.findData(self._account_filter)
+        self.account_combo.setCurrentIndex(max(0, idx))
+        self._syncing_account_combo = False
+
+    def _on_account_combo_activated(self, _index: int):
+        # activated 만 받는다 — currentIndexChanged 는 목록을 다시 채울 때의
+        # setCurrentIndex 로도 울려 헛된 필터 변경이 생긴다.
+        if self._syncing_account_combo:
+            return
+        value = self.account_combo.currentData() or ACCOUNT_FILTER_ALL
+        if value == self._account_filter:
+            return
+        self._account_filter = value
+        self.account_filter_changed.emit(value)
+
+    def _set_account_row_height(self, height: int):
+        """계좌 줄 높이를 바꾸고 카드 전체를 다시 배치한다."""
+        if height == self._account_h:
+            return
+        self._account_h = height
+        self.H = self.GRID_H + height + self.FOOTER_H
+        self.account_row.setGeometry(0, self.GRID_H, self.W, height)
+        self.account_row.setVisible(height > 0)
+        self.footer.setGeometry(0, self.GRID_H + height, self.W, self.FOOTER_H)
+        if self.is_expanded:
+            self._resize_to_expanded()
+        else:
+            self.setFixedHeight(self.H)
+            self.card.setGeometry(0, 0, self.W, self.H)
+        self._sync_slider_window_pos()
+        self._sync_lock_overlay()
 
     # ── 투명도 슬라이더 (우측 하단) ───────────────────────────────────────
     _GROOVE_QSS = """
@@ -448,7 +587,7 @@ class MasterWidget(QWidget):
         if not hasattr(self, "slider_window"):
             return
         x = self.x() + self.W - self.SLIDER_RIGHT_MARGIN - _SliderWindow.WIDTH
-        y = self.y() + self.GRID_H
+        y = self.y() + self.GRID_H + self._account_h
         self.slider_window.move(x, y)
 
     def sync_aux_windows(self):
@@ -523,7 +662,8 @@ class MasterWidget(QWidget):
         cur_h = self.height()
         self.card.setGeometry(0, 0, base_w, cur_h)
         self.compact.setGeometry(0, 0, base_w, self.GRID_H)
-        self.footer.setGeometry(0, self.GRID_H, base_w, self.FOOTER_H)
+        self.account_row.setGeometry(0, self.GRID_H, base_w, self._account_h)
+        self.footer.setGeometry(0, self.GRID_H + self._account_h, base_w, self.FOOTER_H)
         if self.is_expanded:
             panel_h = cur_h - self.H
             self.expand_panel.setGeometry(0, self.H, base_w, panel_h)

@@ -47,6 +47,8 @@ from ..core.api import fetch_usd_krw_rate
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
+    ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter,
+    merge_account_duplicates, stock_in_account,
     ConfigLoadError, read_config, write_config_atomic, rotate_daily_backup,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_stock_schema,
@@ -58,6 +60,7 @@ from .floating_widget import StockWidget, TagGroupWidget
 from .chart_widget import PinController
 from .master_widget import MasterWidget
 from .manage_dialog import (
+    AccountManagerDialog,
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
     fetch_quote_for_stock,
 )
@@ -77,6 +80,10 @@ class WidgetManager:
     def __init__(self, app: QApplication):
         self.app = app
         self.stocks: list[dict] = []
+        # 계좌 레지스트리 [{id,name,color}] 와 현재 보고 있는 계좌("ALL" 또는 계좌 id).
+        # 불변식(최소 1개·소속 유효·uid 유일)은 _reconcile_accounts() 가 세운다.
+        self.accounts: list[dict] = []
+        self.account_filter: str = ACCOUNT_FILTER_ALL
         self.watchlist: list[dict] = []   # 관심종목 — 보유와 독립된 별도 목록
         self.watch_tags: list[dict] = []  # 관심종목 태그 레지스트리 {id,name,color}
         # 확대 일봉 팝업 표시 설정(이동평균선 + 배경 종목명 + 표시 기간) — 모든 관심 행이 공유(제자리 갱신).
@@ -87,6 +94,8 @@ class WidgetManager:
                                "show_volume": False, "candle_unit": "day"}
         # 확대 팝업 고정/hover 조율자 — 모든 관심 그룹·행이 공유 (팝업 한 번에 1개만)
         self.watch_pin_controller = PinController()
+        # 키는 code 가 아니라 보유 항목의 uid 다 — 계좌가 다르면 같은 종목을 각자
+        # 보유할 수 있어 code 를 키로 쓰면 위젯 하나가 다른 하나를 덮어쓴다.
         self.widgets: dict[str, StockWidget] = {}
         # 관심종목은 태그별 그룹 위젯으로 표시 (key: tag_id 또는 "__untagged__")
         self.watch_groups: dict[str, TagGroupWidget] = {}
@@ -144,6 +153,9 @@ class WidgetManager:
         self._config_warning: str | None = None   # 시작 직후 사용자에게 띄울 안내문
 
         self._load_config()
+        # 로드 직후 계좌 불변식을 한 번 세운다 — 위젯 생성이 uid 를 키로 쓰므로
+        # 이 시점에 모든 보유분이 uid 와 소속 계좌를 갖고 있어야 한다.
+        self._reconcile_accounts()
         self._setup_tray()
         self._spawn_all()
         self._sync_watch_groups()
@@ -164,11 +176,11 @@ class WidgetManager:
     def toggle_visibility(self):
         self.is_hidden = not self.is_hidden
         # 표시 복귀 시 종목별 hidden 상태와 시장 필터를 함께 보존
-        stock_by_code = {s["code"]: s for s in self.stocks}
-        for code, w in self.widgets.items():
+        stock_by_uid = {s["uid"]: s for s in self.stocks}
+        for uid, w in self.widgets.items():
             if self.is_hidden:
                 w.hide()
-            elif self._is_stock_visible(stock_by_code.get(code, {})):
+            elif self._is_stock_visible(stock_by_uid.get(uid, {})):
                 w.show()
             else:
                 w.hide()
@@ -246,7 +258,7 @@ class WidgetManager:
         for s in self.stocks:
             if not self._is_stock_visible(s):
                 continue
-            w = self.widgets.get(s["code"])
+            w = self.widgets.get(s["uid"])
             if not w:
                 continue
             center = w.frameGeometry().center()
@@ -339,9 +351,9 @@ class WidgetManager:
 
         # 표시 종목만 stocks 순서대로 column-wrap 정렬 (숨김은 빈 슬롯 방지를 위해 제외)
         visible_items = [
-            (s, self.widgets[s["code"]])
+            (s, self.widgets[s["uid"]])
             for s in self.stocks
-            if not s.get("hidden", False) and s["code"] in self.widgets
+            if not s.get("hidden", False) and s["uid"] in self.widgets
         ]
         col_top_y = geo.y() + MARGIN_Y + master_offset
         bottom_y = geo.y() + geo.height() - MARGIN_BOTTOM
@@ -385,7 +397,10 @@ class WidgetManager:
     def _is_stock_visible(self, stock: dict) -> bool:
         if not stock:
             return False
-        return not stock.get("hidden", False) and self._matches_market_filter(stock)
+        # 계좌와 시장은 서로 독립된 축이라 AND 로 묶는다.
+        return (not stock.get("hidden", False)
+                and self._matches_market_filter(stock)
+                and stock_in_account(stock, self.account_filter))
 
     # ── 관심 그룹 고정 너비 / 표시 여부 ───────────────────────────────────
     def _calc_uniform_watch_width(self) -> int:
@@ -431,23 +446,58 @@ class WidgetManager:
 
     def _on_market_filter_changed(self, market: str):
         self.market_filter = market if market in {"ALL", "KR", "US"} else "ALL"
-        self._apply_market_filter()
+        self._apply_filters()
         self._recompute_master()
 
-    def _apply_market_filter(self):
+    def _on_account_filter_changed(self, account_id: str):
+        """보고 있는 계좌 변경. 요약은 화면에 보이는 것의 합이므로 같이 다시 센다."""
+        self.account_filter = normalize_account_filter(account_id, self.accounts)
+        self._apply_filters()
+        self._recompute_master()
+        self._save_config()
+
+    def _account_bar_color(self, stock: dict) -> str:
+        """위젯 좌측에 표시할 계좌색. 표시할 이유가 없으면 빈 문자열.
+
+        '전체' 보기에서 계좌가 2개 이상일 때만 쓴다 — 특정 계좌를 보는 중이면 전
+        위젯이 같은 계좌라 색이 아무 정보도 주지 않는다.
+        """
+        if len(self.accounts) < 2 or self.account_filter != ACCOUNT_FILTER_ALL:
+            return ""
+        aid = stock.get("account_id")
+        return next((a.get("color", "") for a in self.accounts if a.get("id") == aid), "")
+
+    def _sync_account_bars(self):
         for s in self.stocks:
-            w = self.widgets.get(s["code"])
+            w = self.widgets.get(s["uid"])
+            if w:
+                w.set_account_color(self._account_bar_color(s))
+
+    def _apply_visibility(self):
+        """각 위젯의 표시 여부만 현재 필터에 맞춘다 — 위치는 건드리지 않는다.
+
+        계좌 이동처럼 '한 종목의 소속만 바뀐' 경우에 쓴다. 여기서 재정렬까지 하면
+        평단가만 고친 사용자의 위젯 배치가 통째로 흐트러진다."""
+        for s in self.stocks:
+            w = self.widgets.get(s["uid"])
             if not w:
                 continue
             if self.is_hidden or not self._is_stock_visible(s):
                 w.hide()
             else:
                 w.show()
+        self._sync_account_bars()
+
+    def _apply_filters(self):
+        """계좌·시장 필터를 위젯 표시와 배치에 반영한다 (필터를 바꿨을 때)."""
+        self._apply_visibility()
         # 관심 그룹도 같은 시장 필터를 적용 — 멤버 구성이 바뀌므로 그룹을 다시 구성
+        # (관심종목은 계좌를 타지 않는다 — 전 계좌가 하나의 목록을 공유한다)
         self._sync_watch_groups()
         self._compact_visible_widgets()
         if self.master_widget:
             self.master_widget.set_market_filter(self.market_filter)
+            self.master_widget.set_account_filter(self.account_filter)
             self.master_widget.sync_aux_windows()
 
     # ── 트레이 ─────────────────────────────────────────────────────────────
@@ -461,6 +511,7 @@ class WidgetManager:
 
         add_act    = QAction("➕   종목 추가",   menu)
         manage_act = QAction("📋   종목 관리",   menu)
+        account_act = QAction("🏦   계좌 관리",  menu)
         watch_add_act    = QAction("⭐   관심종목 추가", menu)
         watch_manage_act = QAction("⭐   관심종목 관리", menu)
         self.watch_toggle_act = QAction(self._watch_toggle_text(), menu)
@@ -480,6 +531,7 @@ class WidgetManager:
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
+        account_act.triggered.connect(self.open_account_dialog)
         watch_add_act.triggered.connect(self.open_add_watch_dialog)
         watch_manage_act.triggered.connect(self.open_manage_watch_dialog)
         self.watch_toggle_act.triggered.connect(self.toggle_watch_visible)
@@ -508,6 +560,7 @@ class WidgetManager:
         stock_menu.setStyleSheet(TRAY_MENU_STYLE)
         stock_menu.addAction(add_act)
         stock_menu.addAction(manage_act)
+        stock_menu.addAction(account_act)
         watch_menu = menu.addMenu("⭐   관심종목")
         watch_menu.setStyleSheet(TRAY_MENU_STYLE)
         watch_menu.addAction(watch_add_act)
@@ -608,6 +661,10 @@ class WidgetManager:
             self.stocks = normalize_stocks_schema(data)
         elif isinstance(data, dict):
             self.stocks = normalize_stocks_schema(data.get("stocks", []) or [])
+            # 계좌는 있는 그대로 담아만 둔다 — 무효 항목 제거·기본 계좌 생성·고아
+            # 보유분 회수는 로드가 끝난 뒤 _reconcile_accounts() 가 한 번에 처리한다.
+            self.accounts = data.get("accounts") or []
+            self.account_filter = data.get("selected_account") or ACCOUNT_FILTER_ALL
             self.watchlist = normalize_watchlist_schema(data.get("watchlist", []) or [])
             self.watch_tags = normalize_tags(data.get("watch_tags", []) or [])
             prune_watch_tags(self.watchlist, self.watch_tags)
@@ -683,7 +740,25 @@ class WidgetManager:
         msg, self._config_warning = self._config_warning, None
         show_topmost_message(QMessageBox.Icon.Warning, "설정 파일 오류", msg)
 
+    def _reconcile_accounts(self):
+        """계좌 불변식을 다시 세운다 — 보유 목록이 바뀐 뒤/저장 직전에 호출.
+
+        메모리만 만지고 파일은 건드리지 않으므로 저장이 막힌 세션에서도 안전하다.
+        idempotent 라 몇 번을 불러도 계좌 id 나 uid 가 갈리지 않는다.
+        """
+        self.accounts = ensure_accounts(self.stocks, self.accounts)
+        # 계좌가 지워졌으면 필터를 '전체'로 되돌린다 (그대로 두면 빈 화면이 된다).
+        self.account_filter = normalize_account_filter(self.account_filter, self.accounts)
+
+    def _holding(self, uid: str) -> dict | None:
+        """uid 로 보유 항목을 찾는다. code 로 찾으면 같은 종목을 가진 다른 계좌의
+        보유분을 집을 수 있어, 위젯에서 오는 요청은 항상 uid 로 받는다."""
+        return next((s for s in self.stocks if s.get("uid") == uid), None)
+
     def _save_config(self):
+        # 계좌 정합은 저장 가드보다 먼저 — 파일을 만지지 않으므로 보호 대상이 아니고,
+        # 로드 실패 세션에서도 메모리 상태는 일관되게 유지하는 편이 낫다.
+        self._reconcile_accounts()
         # 로드에 실패한 세션은 메모리가 '빈 기본값'이다. 여기서 저장하면 원본이
         # 그 빈 상태로 덮여 영구 유실된다 — 위젯 위치를 잃는 편이 훨씬 낫다.
         if self.config_load_failed:
@@ -704,6 +779,8 @@ class WidgetManager:
         self._snapshot_watch_group_state()   # 현재 그룹 위치/고정 상태 반영
         data = {
             "stocks": self.stocks,
+            "accounts": self.accounts,
+            "selected_account": self.account_filter,
             "watchlist": self.watchlist,
             "watch_tags": self.watch_tags,
             "watch_ma": self.watch_ma,
@@ -733,7 +810,7 @@ class WidgetManager:
 
     def save_positions(self):
         for s in self.stocks:
-            w = self.widgets.get(s["code"])
+            w = self.widgets.get(s["uid"])
             if w:
                 pos = w.pos()
                 s["pos"] = [pos.x(), pos.y()]
@@ -753,6 +830,7 @@ class WidgetManager:
             self._spawn_widget(s, default_x, default_y, stagger_idx=visible_idx)
             if self._is_stock_visible(s):
                 visible_idx += 1
+        self._sync_pollers()
         self._sync_fx_timer()
         self._spawn_master()
 
@@ -889,7 +967,7 @@ class WidgetManager:
             return
         anchor_widget = None
         for s in visible:
-            w = self.widgets.get(s["code"])
+            w = self.widgets.get(s["uid"])
             if w:
                 anchor_widget = w
                 break
@@ -904,7 +982,7 @@ class WidgetManager:
         for s in self.stocks:
             if s.get("hidden", False):
                 continue
-            w = self.widgets.get(s["code"])
+            w = self.widgets.get(s["uid"])
             if not w:
                 continue
             screen = QApplication.screenAt(w.frameGeometry().center())
@@ -919,7 +997,7 @@ class WidgetManager:
         gap = 4
         y = base_y
         for s in visible:
-            w = self.widgets.get(s["code"])
+            w = self.widgets.get(s["uid"])
             if not w:
                 continue
             x = base_x
@@ -946,7 +1024,7 @@ class WidgetManager:
         for s in self.stocks:
             if not self._is_stock_visible(s):
                 continue
-            w = self.widgets.get(s["code"])
+            w = self.widgets.get(s["uid"])
             if not w or not w.isVisible():
                 continue
             screen = QApplication.screenAt(w.frameGeometry().center()) or QApplication.primaryScreen()
@@ -982,14 +1060,17 @@ class WidgetManager:
         self._save_config()
 
     def _spawn_widget(self, stock: dict, def_x=60, def_y=60, stagger_idx: int = 0):
-        code = stock["code"]
         w = StockWidget(stock, width=self.uniform_w, stagger_idx=stagger_idx)
         w.deleted.connect(self._on_delete)
         w.edited.connect(self._on_edited)
         w.buy_requested.connect(self._on_buy_requested)
         w.memo_requested.connect(self.open_stock_memo_dialog)
         w.price_updated.connect(lambda _: self._recompute_master())
+        w.price_fetched.connect(self._relay_price)
+        w.chart_fetched.connect(self._relay_chart)
         w.layout_changed.connect(lambda _: self._schedule_visible_widgets_reflow())
+        w.set_accounts(self.accounts)
+        w.set_account_color(self._account_bar_color(stock))
         w.set_usd_krw_rate(self.usd_krw_rate)
         w.set_us_return_basis(self.us_return_basis)
 
@@ -1002,16 +1083,52 @@ class WidgetManager:
         # 종목별 hidden 표시 + 시장 필터 + 전체 숨김 상태를 함께 고려
         if self._is_stock_visible(stock) and not self.is_hidden:
             w.show()
-        self.widgets[code] = w
+        self.widgets[stock["uid"]] = w
 
-    def _on_edited(self, _code: str):
-        """개별 위젯에서 평단가/수량을 수정한 경우. 저장 + 마스터 갱신."""
+    def _sync_pollers(self):
+        """시세 폴링은 code 당 1개만 — 같은 종목을 여러 계좌가 보유해도 API 호출은
+        늘지 않는다. 종목 순서상 첫 위젯이 폴러가 되고 나머지는 중계로 받는다.
+
+        폴러가 삭제되면 다음 위젯이 여기서 승계한다 — "삭제한 종목의 폴러를 끈다"가
+        아니라 "종목마다 폴러가 정확히 하나 있게 만든다"로 생각할 것."""
+        leaders: set[str] = set()
+        for s in self.stocks:
+            w = self.widgets.get(s["uid"])
+            if not w:
+                continue
+            code = s["code"]
+            w.set_polling(code not in leaders)
+            leaders.add(code)
+
+    def _relay_price(self, code: str, result: dict):
+        """폴러가 받아온 시세를 같은 종목의 다른 계좌 위젯에 뿌린다."""
+        for w in self.widgets.values():
+            if not w.is_polling and w.data.get("code") == code:
+                w.apply_price_result(result)
+
+    def _relay_chart(self, code: str, data):
+        for w in self.widgets.values():
+            if not w.is_polling and w.data.get("code") == code:
+                w.apply_chart_data(data)
+
+    def _on_edited(self, uid: str):
+        """개별 위젯에서 평단가/수량/계좌를 수정한 경우. 저장 + 마스터 갱신."""
+        before = self._account_snapshot()
+        w = self.widgets.get(uid)
+        if w is not None and w.prev_account_id:
+            before[uid] = w.prev_account_id
+            w.prev_account_id = ""
+        if not self._settle_account_moves(before) and w is not None:
+            # 합치기를 취소했으면 위젯이 들고 있는 dict 도 원래 계좌로 돌아가 있다
+            w.data["account_id"] = before.get(uid, w.data.get("account_id"))
+        # 다른 계좌로 옮겼으면 지금 보고 있는 계좌에서 빠질 수 있다
+        self._apply_visibility()
         self._save_config()
         self._recompute_master()
 
-    def _on_buy_requested(self, code: str):
-        stock = next((s for s in self.stocks if s.get("code") == code), None)
-        widget = self.widgets.get(code)
+    def _on_buy_requested(self, uid: str):
+        stock = self._holding(uid)
+        widget = self.widgets.get(uid)
         if not stock or not widget:
             return
 
@@ -1063,8 +1180,11 @@ class WidgetManager:
             self.master_widget.set_opacity(self.popover_opacity)
             self.master_widget.opacity_changed.connect(self._on_opacity_changed)
             self.master_widget.market_filter_changed.connect(self._on_market_filter_changed)
+            self.master_widget.account_filter_changed.connect(self._on_account_filter_changed)
             self.master_widget.context_menu_requested.connect(self._show_context_menu)
             self.master_widget.set_market_filter(self.market_filter)
+            self.master_widget.set_accounts(self.accounts)
+            self.master_widget.set_account_filter(self.account_filter)
             # 시작 시 저장된 투명도가 임계치 이하면 show 전에 미리 click-through 활성화
             # (슬라이더는 별도 윈도우라 영향 없음).
             if self._is_click_through_opacity(self.popover_opacity):
@@ -1179,13 +1299,18 @@ class WidgetManager:
             self.master_widget.clear_metrics()
             return
 
+        # 시세는 계좌와 무관한 시장 데이터라 계속 code 키다. 위젯은 uid 키지만
+        # 같은 종목의 보유분끼리는 같은 값이라 어느 쪽을 담아도 결과가 같다.
         current_prices = {
-            code: w.current_price
-            for code, w in self.widgets.items()
+            w.data["code"]: w.current_price
+            for w in self.widgets.values()
             if w.current_price
         }
+        # 요약은 화면에 보이는 것의 합 — 두 필터를 다 통과한 종목만 더한다.
         totals = portfolio_totals(
-            [s for s in self.stocks if self._matches_market_filter(s)],
+            [s for s in self.stocks
+             if self._matches_market_filter(s)
+             and stock_in_account(s, self.account_filter)],
             current_prices=current_prices,
             usd_krw_rate=self.usd_krw_rate,
         )
@@ -1213,9 +1338,134 @@ class WidgetManager:
             for w in self.widgets.values():
                 w.set_usd_krw_rate(None)
 
+    # ── 계좌 관리 ──────────────────────────────────────────────────────────
+    def open_account_dialog(self):
+        """계좌 추가/수정/순서/삭제. 삭제 시 소속 종목 처리(이동 또는 함께 삭제)까지
+        다이얼로그 안에서 끝나고, 여기서는 그 결과를 그대로 받아 반영한다."""
+        dlg = AccountManagerDialog(
+            accounts=copy.deepcopy(self.accounts),
+            stocks=copy.deepcopy(self.stocks),
+        )
+        before = self._account_snapshot()
+        if not dlg.exec():
+            return
+        self.accounts = dlg.get_accounts()
+        # 다이얼로그는 깊은 복사본을 다루므로 결과를 원본 dict 에 제자리로 옮긴다.
+        # 통째로 갈아끼우면 widget.data 와 identity 가 끊겨, 이후 위젯에서 한 수정이
+        # 저장되는 self.stocks 에 반영되지 않는다.
+        result = {s["uid"]: s for s in dlg.get_stocks() if s.get("uid")}
+        kept: list[dict] = []
+        for s in self.stocks:
+            moved = result.get(s.get("uid"))
+            if moved is None:
+                # 계좌를 지우면서 소속 종목도 함께 지운 경우
+                w = self.widgets.pop(s["uid"], None)
+                if w:
+                    w.close()
+                continue
+            s["account_id"] = moved.get("account_id", s.get("account_id"))
+            kept.append(s)
+        self.stocks = kept
+        # 메모창은 종목 단위 — 그 종목을 아무 계좌도 들고 있지 않을 때만 닫는다.
+        live_codes = {s["code"] for s in self.stocks}
+        for code in [c for c in self._stock_memo_dialogs if c not in live_codes]:
+            dlg_memo = self._stock_memo_dialogs.pop(code, None)
+            if dlg_memo is not None:
+                dlg_memo.close()
+        self._reconcile_accounts()
+        # 계좌를 지우며 '다른 계좌로 이동'을 골랐을 때 대상 계좌에 같은 종목이
+        # 이미 있으면 여기서 합쳐진다.
+        self._settle_account_moves(before)
+        self._sync_pollers()          # 폴러였던 보유분이 사라졌으면 남은 위젯이 승계
+        self._sync_accounts_to_widgets()
+        self._apply_visibility()
+        self._sync_fx_timer()
+        self._apply_uniform_width()
+        self._save_config()
+        self._recompute_master()
+        self._refresh_memo_list_if_open()
+
+    def _account_snapshot(self) -> dict:
+        """{uid: account_id} — 계좌 이동 전후를 비교하고 되돌리기 위한 스냅샷."""
+        return {s["uid"]: s.get("account_id", "") for s in self.stocks}
+
+    def _settle_account_moves(self, before: dict) -> bool:
+        """계좌 이동 뒤 뒷정리 — 한 계좌에 같은 종목이 겹쳤으면 하나로 합친다.
+
+        종목 추가는 (code, account_id) 중복을 막으므로 이 상황은 이동으로만 생긴다.
+        되돌릴 수 없는 통합이라 먼저 물어보고, 취소하면 before 상태로 되돌린다.
+        반환값은 이동을 확정했는지 여부.
+        """
+        seen: set = set()
+        dups: list[dict] = []
+        for s in self.stocks:
+            key = (s.get("code"), s.get("account_id"))
+            if key in seen:
+                dups.append(s)
+            else:
+                seen.add(key)
+        if not dups:
+            return True
+
+        names = {a.get("id"): a.get("name", "") for a in self.accounts}
+        lines = "\n".join(
+            f"• {s.get('name') or s['code']} ({names.get(s.get('account_id'), '')})"
+            for s in dups
+        )
+        ret = QMessageBox.question(
+            None, "보유분 합치기",
+            "계좌를 옮기면서 같은 계좌에 같은 종목이 겹쳤습니다.\n\n"
+            f"{lines}\n\n"
+            "겹친 보유분을 하나로 합칩니다. 평단가는 수량 가중평균으로 다시\n"
+            "계산되며 되돌릴 수 없습니다.\n\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            for s in self.stocks:
+                s["account_id"] = before.get(s["uid"], s.get("account_id"))
+            return False
+
+        # 이번에 움직이지 않은 쪽을 흡수하는 쪽으로 삼는다 — 옮겨온 항목이 원래
+        # 있던 항목에 흡수돼야 위젯이 엉뚱한 자리로 옮겨 가지 않는다.
+        unmoved = {s["uid"] for s in self.stocks
+                   if before.get(s["uid"]) == s.get("account_id")}
+        self.stocks, records = merge_account_duplicates(self.stocks,
+                                                        preferred_uids=unmoved)
+        live = {s["uid"] for s in self.stocks}
+        for uid in [u for u in self.widgets if u not in live]:
+            self.widgets.pop(uid).close()
+        # 흡수한 쪽 위젯은 평단가/수량이 바뀌었으니 다시 그린다
+        for rec in records:
+            w = self.widgets.get(rec["kept_uid"])
+            if w is not None and w.current_price:
+                w._update_detail(w.current_price)
+        self._sync_pollers()
+        self._apply_uniform_width()
+        return True
+
+    def _sync_accounts_to_widgets(self):
+        """계좌 목록이 바뀌면 위젯과 마스터에도 알린다.
+
+        위젯은 우클릭 수정 창의 계좌 선택 행에, 마스터는 계좌 필터 줄에 쓴다.
+        계좌가 1개로 줄면 마스터가 그 줄을 도로 접는다."""
+        for w in self.widgets.values():
+            w.set_accounts(self.accounts)
+        self._sync_account_bars()
+        if self.master_widget:
+            self.master_widget.set_accounts(self.accounts)
+            self.master_widget.set_account_filter(self.account_filter)
+
+    def _default_account_for_add(self) -> str:
+        """새 종목이 들어갈 기본 계좌 — 지금 보고 있는 계좌, '전체'면 첫 계좌."""
+        if any(a.get("id") == self.account_filter for a in self.accounts):
+            return self.account_filter
+        return self.accounts[0]["id"] if self.accounts else ""
+
     # ── 종목 추가 ──────────────────────────────────────────────────────────
     def open_add_dialog(self):
-        dlg = StockDialog()
+        dlg = StockDialog(accounts=self.accounts,
+                          default_account=self._default_account_for_add())
         if not dlg.exec():
             return
         d = dlg.get_data()
@@ -1223,7 +1473,10 @@ class WidgetManager:
 
         if not code:
             return
-        if code in self.widgets:
+        # 중복은 계좌 안에서만 따진다 — 다른 계좌가 같은 종목을 갖는 것은 정상이다.
+        d["account_id"] = d.get("account_id") or self._default_account_for_add()
+        if any(s["code"] == code and s.get("account_id") == d["account_id"]
+               for s in self.stocks):
             QMessageBox.information(None, "알림", f"'{code}'는 이미 추가되어 있습니다.")
             return
 
@@ -1244,10 +1497,11 @@ class WidgetManager:
         # 새 위젯 위치: 현재 표시 필터에서 보이는 위젯들 아래.
         visible_count = sum(
             1 for s in self.stocks
-            if s["code"] != code and self._is_stock_visible(s)
+            if s["uid"] in self.widgets and self._is_stock_visible(s)
         )
         ny = 60 + visible_count * (StockWidget.COMPACT_H + 12)
         self._spawn_widget(d, 60, ny, stagger_idx=0)
+        self._sync_pollers()
 
         self._recompute_master()
 
@@ -1523,48 +1777,52 @@ class WidgetManager:
     # ── 종목 일괄 관리 ────────────────────────────────────────────────────
     def open_manage_dialog(self):
         # 평가손익 계산용 현재가 스냅샷
+        # 시세는 계좌와 무관한 시장 데이터라 위젯이 uid 키여도 계속 code 키다.
         current_prices = {
-            code: w.current_price
-            for code, w in self.widgets.items()
+            w.data["code"]: w.current_price
+            for w in self.widgets.values()
             if w.current_price
         }
         dlg = ManageStocksDialog(
             stocks=copy.deepcopy(self.stocks),
             current_prices=current_prices,
             usd_krw_rate=self.usd_krw_rate,
+            accounts=copy.deepcopy(self.accounts),
+            account_filter=self.account_filter,
         )
+        before = self._account_snapshot()
         if not dlg.exec():
             return
         new_stocks = dlg.get_stocks()
         new_stocks = normalize_stocks_schema(new_stocks)
 
-        old_map = {s["code"]: s for s in self.stocks}
-        new_map = {s["code"]: s for s in new_stocks}
+        old_map = {s["uid"]: s for s in self.stocks}
+        new_map = {s["uid"]: s for s in new_stocks}
 
-        # 삭제된 종목: 위젯 닫고 제거
-        for code in list(old_map):
-            if code not in new_map:
-                w = self.widgets.pop(code, None)
+        # 삭제된 보유분: 위젯 닫고 제거
+        for uid in list(old_map):
+            if uid not in new_map:
+                w = self.widgets.pop(uid, None)
                 if w:
                     w.close()
 
-        # 추가된 종목: 위젯 생성 (기본 위치) — 다수 추가 시 stagger로 분산
+        # 추가된 보유분: 위젯 생성 (기본 위치) — 다수 추가 시 stagger로 분산
         added_idx = 0
         for s in new_stocks:
-            if s["code"] not in old_map:
+            if s["uid"] not in old_map:
                 visible_count = sum(
                     1 for stock in new_stocks
-                    if stock["code"] in self.widgets and self._is_stock_visible(stock)
+                    if stock["uid"] in self.widgets and self._is_stock_visible(stock)
                 )
                 ny = 60 + visible_count * (StockWidget.COMPACT_H + 12)
                 self._spawn_widget(s, 60, ny, stagger_idx=added_idx)
                 added_idx += 1
 
-        # 기존 종목: 평단가/수량/hidden 변경 반영
+        # 기존 보유분: 평단가/수량/hidden 변경 반영
         for s in new_stocks:
-            code = s["code"]
-            if code in old_map and code in self.widgets:
-                w = self.widgets[code]
+            uid = s["uid"]
+            if uid in old_map and uid in self.widgets:
+                w = self.widgets[uid]
                 # self.stocks 항목(s)과 위젯 data 객체를 같은 객체로 재연결.
                 # (in-place update 로는 self.stocks = new_stocks 이후 위젯 data 가
                 #  옛 객체로 분리되어, 이후 개별 수정이 마스터/저장에 반영되지 않음)
@@ -1579,9 +1837,14 @@ class WidgetManager:
 
         # 순서 + 저장 + 너비 재계산
         self.stocks = new_stocks
+        # 표에서 계좌를 옮겼을 수 있으므로 소속을 다시 검증하고, 한 계좌에 같은
+        # 종목이 겹쳤으면 합친다.
+        self._reconcile_accounts()
+        self._settle_account_moves(before)
+        self._sync_pollers()
         self._sync_fx_timer()
         self._apply_uniform_width()
-        self._apply_market_filter()
+        self._apply_filters()
         self._save_config()
         self._recompute_master()
 
@@ -1607,9 +1870,10 @@ class WidgetManager:
             path += ".xlsx"
 
         # 마스터 위젯과 동일한 4지표를 시트 하단에 포함시키기 위해 현재가 dict 전달
+        # 시세는 계좌와 무관한 시장 데이터라 위젯이 uid 키여도 계속 code 키다.
         current_prices = {
-            code: w.current_price
-            for code, w in self.widgets.items()
+            w.data["code"]: w.current_price
+            for w in self.widgets.values()
             if w.current_price
         }
 
@@ -1706,9 +1970,15 @@ class WidgetManager:
             by_code = {s["code"]: s for s in self.stocks}
             new_stocks = []
             for s in imported:
-                # 기존 항목이 있으면 pos 등 부가 정보 보존
-                base = dict(by_code.get(s["code"], {}))
+                # 기존 항목이 있으면 pos·계좌 등 부가 정보 보존
+                existing = by_code.get(s["code"])
+                base = dict(existing or {})
                 base.update(s)   # 평단가/수량/이름은 Excel 값으로 갱신
+                if existing and existing.get("uid"):
+                    # 병합은 기존 보유분의 평단가/수량 갱신이다. Excel 행마다 새로
+                    # 발급된 uid 로 덮으면 같은 보유분이 매번 다른 항목이 돼 위젯
+                    # 위치·계좌 소속이 초기화된다.
+                    base["uid"] = existing["uid"]
                 new_stocks.append(base)
             # Excel 에 없는 기존 종목은 뒤에 그대로 유지
             imported_codes = {s["code"] for s in imported}
@@ -1733,16 +2003,19 @@ class WidgetManager:
         self.widgets.clear()
 
         self.stocks = normalize_stocks_schema(new_stocks)
+        self._reconcile_accounts()
         self.uniform_w = self._calc_uniform_width()
 
         for i, s in enumerate(self.stocks):
             default_x = 60
             default_y = 60 + i * (StockWidget.COMPACT_H + 12)
             self._spawn_widget(s, default_x, default_y, stagger_idx=i)
+        self._sync_pollers()
 
-        # 마스터 위젯도 새 너비에 맞춰 갱신
+        # 마스터 위젯도 새 너비/계좌 목록에 맞춰 갱신
         if self.master_widget:
             self.master_widget.set_uniform_width(self.uniform_w)
+        self._sync_accounts_to_widgets()
 
         self._save_config()
         self._recompute_master()
@@ -1755,12 +2028,20 @@ class WidgetManager:
             self.toggle_visibility()
 
     # ── 종목 삭제 ──────────────────────────────────────────────────────────
-    def _on_delete(self, code: str):
-        self.stocks = [s for s in self.stocks if s["code"] != code]
-        self.widgets.pop(code, None)
-        memo_dlg = self._stock_memo_dialogs.pop(code, None)
-        if memo_dlg is not None:
-            memo_dlg.close()
+    def _on_delete(self, uid: str):
+        target = self._holding(uid)
+        if target is None:
+            return
+        code = target["code"]
+        self.stocks = [s for s in self.stocks if s.get("uid") != uid]
+        self.widgets.pop(uid, None)
+        # 메모창은 종목 단위라, 다른 계좌가 같은 종목을 아직 들고 있으면 열어 둔다.
+        if not any(s["code"] == code for s in self.stocks):
+            memo_dlg = self._stock_memo_dialogs.pop(code, None)
+            if memo_dlg is not None:
+                memo_dlg.close()
+        # 폴러였던 위젯이 사라졌으면 같은 종목의 남은 위젯이 승계한다
+        self._sync_pollers()
         self._save_config()
         self._sync_fx_timer()
         # 가장 긴 종목이 삭제된 경우 남은 위젯들도 줄어들도록
