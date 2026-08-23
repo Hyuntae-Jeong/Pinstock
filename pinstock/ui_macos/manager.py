@@ -33,6 +33,7 @@ from ..core.storage import (
     normalize_watchlist_schema, normalize_tags, prune_watch_tags, normalize_memo,
     normalize_stock_memos, normalize_detached,
     ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter, stock_in_account,
+    merge_account_duplicates,
 )
 from ..ui_windows.manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
@@ -995,6 +996,55 @@ class MacAppManager(QObject):
         msg, self._config_warning = self._config_warning, None
         show_topmost_message(QMessageBox.Icon.Warning, "설정 파일 오류", msg)
 
+    def _account_snapshot(self) -> dict:
+        """{uid: account_id} — 계좌 이동 전후를 비교하고 되돌리기 위한 스냅샷."""
+        return {s["uid"]: s.get("account_id", "") for s in self.stocks}
+
+    def _settle_account_moves(self, before: dict) -> bool:
+        """계좌 이동 뒤 뒷정리 — 한 계좌에 같은 종목이 겹쳤으면 하나로 합친다.
+
+        종목 추가는 (code, account_id) 중복을 막으므로 이 상황은 이동으로만 생긴다.
+        되돌릴 수 없는 통합이라 먼저 물어보고, 취소하면 before 상태로 되돌린다.
+        반환값은 이동을 확정했는지 여부.
+        """
+        seen: set = set()
+        dups: list[dict] = []
+        for s in self.stocks:
+            key = (s.get("code"), s.get("account_id"))
+            if key in seen:
+                dups.append(s)
+            else:
+                seen.add(key)
+        if not dups:
+            return True
+
+        names = {a.get("id"): a.get("name", "") for a in self.accounts}
+        lines = "\n".join(
+            f"• {s.get('name') or s['code']} ({names.get(s.get('account_id'), '')})"
+            for s in dups
+        )
+        ret = QMessageBox.question(
+            None, "보유분 합치기",
+            "계좌를 옮기면서 같은 계좌에 같은 종목이 겹쳤습니다.\n\n"
+            f"{lines}\n\n"
+            "겹친 보유분을 하나로 합칩니다. 평단가는 수량 가중평균으로 다시\n"
+            "계산되며 되돌릴 수 없습니다.\n\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            for s in self.stocks:
+                s["account_id"] = before.get(s["uid"], s.get("account_id"))
+            return False
+
+        # 이번에 움직이지 않은 쪽을 흡수하는 쪽으로 삼는다 — 옮겨온 항목이 원래
+        # 있던 항목에 흡수돼야 행이 엉뚱한 자리로 옮겨 가지 않는다.
+        unmoved = {s["uid"] for s in self.stocks
+                   if before.get(s["uid"]) == s.get("account_id")}
+        self.stocks, _records = merge_account_duplicates(self.stocks,
+                                                         preferred_uids=unmoved)
+        return True
+
     def _reconcile_accounts(self):
         """계좌 불변식을 다시 세운다 — 보유 목록이 바뀐 뒤/저장 직전에 호출.
 
@@ -1072,12 +1122,15 @@ class MacAppManager(QObject):
             accounts=copy.deepcopy(self.accounts),
             stocks=copy.deepcopy(self.stocks),
         )
+        before = self._account_snapshot()
         if not dlg.exec():
             return
         self.accounts = dlg.get_accounts()
         self.stocks = normalize_stocks_schema(dlg.get_stocks())
         # 삭제된 계좌를 가리키던 필터를 '전체'로 되돌리고 고아 종목을 회수한다.
         self._reconcile_accounts()
+        # '다른 계좌로 이동'을 골랐을 때 대상 계좌에 같은 종목이 이미 있으면 합친다.
+        self._settle_account_moves(before)
         # 종목이 함께 삭제됐으면 아무도 안 쓰는 폴러를 정리한다.
         self._prune_fetchers()
         self._sync_fx_timer()
@@ -1218,14 +1271,17 @@ class MacAppManager(QObject):
             accounts=copy.deepcopy(self.accounts),
             account_filter=self._holdings_account_filter(),
         )
+        before = self._account_snapshot()
         if not dlg.exec():
             return
         new_stocks = dlg.get_stocks()
         new_stocks = normalize_stocks_schema(new_stocks)
 
         self.stocks = new_stocks
-        # 표에서 계좌를 옮겼을 수 있으므로 소속을 다시 검증한다.
+        # 표에서 계좌를 옮겼을 수 있으므로 소속을 다시 검증하고, 한 계좌에 같은
+        # 종목이 겹쳤으면 합친다.
         self._reconcile_accounts()
+        self._settle_account_moves(before)
         # 폴러 정리/시작은 '어떤 종목이 추가·삭제됐나'가 아니라 '지금 살아 있는
         # code 가 무엇인가'로 판단한다 — 같은 종목이 여러 계좌에 있을 수 있어서
         # 한쪽이 사라져도 폴러가 필요할 수 있다.
@@ -1299,6 +1355,7 @@ class MacAppManager(QObject):
         target = self._holding(uid)
         if target is None:
             return
+        before = self._account_snapshot()
         dlg = StockDialog(data=target, accounts=self.accounts)
         if not dlg.exec():
             return
@@ -1312,6 +1369,8 @@ class MacAppManager(QObject):
             target["buy_exchange_rate"] = new["buy_exchange_rate"]
         else:
             target.pop("buy_exchange_rate", None)
+        # 옮긴 계좌에 같은 종목이 이미 있으면 합친다 (취소하면 계좌가 되돌아간다).
+        self._settle_account_moves(before)
         self._save_config()
         self._sync_popover_stocks()
         self._recompute_summary()

@@ -10,7 +10,7 @@ import shutil
 from datetime import date
 from pathlib import Path
 
-from .portfolio import portfolio_totals, stock_metrics
+from .portfolio import merge_holdings, portfolio_totals, stock_metrics
 
 
 # ─── 설정 파일 경로 (OS별 표준 디렉토리) ──────────────────────────────────────
@@ -186,6 +186,56 @@ def ensure_accounts(stocks: list[dict], accounts: list) -> list[dict]:
             s["uid"] = uid
         seen_uids.add(uid)
     return accounts
+
+
+def merge_account_duplicates(
+    stocks: list[dict], preferred_uids=()
+) -> tuple[list[dict], list[dict]]:
+    """한 계좌 안에 같은 종목이 두 건 이상이면 하나로 합친다.
+
+    종목 추가는 (code, account_id) 중복을 막으므로 이 상황은 계좌 이동으로만 생긴다.
+    그대로 두면 한 계좌의 같은 종목이 두 줄로 남아 요약과 종목 관리 표가 어긋난다.
+
+    preferred_uids 에 든 보유분을 흡수하는 쪽(base)으로 삼는다 — 호출측이 "이번에
+    움직이지 않은 쪽"을 넘겨 주면 옮겨온 항목이 원래 있던 항목에 흡수돼, 위젯 위치가
+    엉뚱하게 옮겨 가지 않는다. 해당하는 게 없으면 목록에서 먼저 나오는 쪽이 base 다.
+
+    반환값은 (합쳐진 보유 목록, 합침 기록). 기록 항목은
+    {code, name, account_id, kept_uid, dropped_uid} 이며 사용자 안내에 쓴다.
+    """
+    preferred = set(preferred_uids or ())
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for s in stocks or []:
+        if not isinstance(s, dict):
+            continue
+        key = (str(s.get("code") or ""), str(s.get("account_id") or ""))
+        groups.setdefault(key, []).append(s)
+
+    bases: dict[int, dict] = {}     # id(base) → base
+    dropped: set[int] = set()
+    merged: list[dict] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        base = next((s for s in group if s.get("uid") in preferred), group[0])
+        for s in group:
+            if s is base:
+                continue
+            merge_holdings(base, s)
+            dropped.add(id(s))
+            merged.append({
+                "code": base.get("code", ""),
+                "name": base.get("name", "") or base.get("code", ""),
+                "account_id": base.get("account_id", ""),
+                "kept_uid": base.get("uid", ""),
+                "dropped_uid": s.get("uid", ""),
+            })
+        bases[id(base)] = base
+
+    if not merged:
+        return list(stocks or []), []
+    # base 는 원래 자리에 그대로 두고 흡수된 항목만 걷어낸다 (순서 유지)
+    return [s for s in stocks if id(s) not in dropped], merged
 
 
 def normalize_account_filter(value, accounts: list[dict]) -> str:

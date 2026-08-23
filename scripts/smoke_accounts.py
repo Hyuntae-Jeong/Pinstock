@@ -661,8 +661,101 @@ def _run(log_fp):
         _w.close()
     log("[ok] 19. Windows 매니저 ↔ 계좌 다이얼로그 — 이동 시 위젯 유지 / 함께 삭제 / 추가 기본 계좌")
 
+    # ── 20. 계좌 이동으로 겹친 보유분 합치기 ────────────────────────────────
+    # 종목 추가는 (code, account_id) 중복을 막지만 계좌 이동은 그 규칙을 우회한다.
+    # 그대로 두면 한 계좌의 같은 종목이 두 줄로 남아 요약과 표가 어긋난다.
+    from pinstock.core.storage import merge_account_duplicates
+
+    pair = [
+        {"code": "005930", "uid": "m1", "account_id": "acc1", "name": "삼성전자",
+         "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+        {"code": "005930", "uid": "m2", "account_id": "acc1", "name": "삼성전자",
+         "avg_price": 60000, "quantity": 5, "pos": [300, 300]},
+        {"code": "000660", "uid": "m3", "account_id": "acc1", "name": "SK하이닉스",
+         "avg_price": 100, "quantity": 1},
+    ]
+    out, records = merge_account_duplicates([dict(s) for s in pair], preferred_uids={"m2"})
+    assert [s["uid"] for s in out] == ["m2", "m3"], [s["uid"] for s in out]
+    kept = out[0]
+    assert kept["avg_price"] == 66667, kept["avg_price"]      # (70000*10+60000*5)/15
+    assert kept["quantity"] == 15, kept["quantity"]
+    assert kept["pos"] == [300, 300], "흡수하는 쪽(안 움직인 쪽)의 위치가 유지돼야 한다"
+    assert records[0]["kept_uid"] == "m2" and records[0]["dropped_uid"] == "m1"
+
+    # 미국 주식 — 매수환율은 매입원가(원화) 기준으로 다시 잡는다
+    us_pair = [
+        {"code": "NVDA", "uid": "n1", "account_id": "acc1", "market": "US",
+         "currency": "USD", "avg_price": 100.0, "quantity": 10, "buy_exchange_rate": 1300.0},
+        {"code": "NVDA", "uid": "n2", "account_id": "acc1", "market": "US",
+         "currency": "USD", "avg_price": 200.0, "quantity": 10, "buy_exchange_rate": 1400.0},
+    ]
+    us_out, _ = merge_account_duplicates([dict(s) for s in us_pair], preferred_uids={"n1"})
+    assert len(us_out) == 1
+    assert us_out[0]["avg_price"] == 150.0, us_out[0]["avg_price"]
+    # (100*10*1300 + 200*10*1400) / (150*20) = 4_100_000 / 3_000 ≈ 1366.6667
+    assert abs(us_out[0]["buy_exchange_rate"] - 1366.6667) < 0.001, us_out[0]
+
+    # 한쪽에만 매수환율이 있으면 통째로 버린다 — 반쪽 환율로 전체를 환산하면
+    # 기록 없는 쪽 매입원가가 그만큼 틀어진다.
+    half = [dict(us_pair[0]), {k: v for k, v in us_pair[1].items()
+                               if k != "buy_exchange_rate"}]
+    half_out, _ = merge_account_duplicates(half, preferred_uids={"n1"})
+    assert "buy_exchange_rate" not in half_out[0], half_out[0]
+
+    # ── Windows 매니저 — 확인 창에서 취소하면 이동 자체를 되돌린다 ──────────
+    mcfg = tmpdir / "merge_stocks.json"
+    storage.CONFIG_FILE = str(mcfg)
+    storage.PREV_FILE = str(mcfg) + ".prev"
+    storage.BACKUP_FILE = str(mcfg) + ".bak"
+    WM.CONFIG_FILE = str(mcfg)
+    WM.BACKUP_FILE = str(mcfg) + ".bak"
+    mcfg.write_text(json.dumps({
+        "accounts": [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+                     {"id": "acc2", "name": "연금", "color": "#a6e3a1"}],
+        "selected_account": "ALL",
+        "stocks": [
+            {"code": "005930", "uid": "k1", "account_id": "acc1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "005930", "uid": "k2", "account_id": "acc2", "name": "삼성전자",
+             "avg_price": 60000, "quantity": 5, "pos": [300, 300]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    for _n in ("fetch_stock", "fetch_us_stock", "fetch_minute_chart",
+               "fetch_daily_chart", "fetch_us_minute_chart", "fetch_us_daily_chart"):
+        setattr(WFW, _n, lambda _c: None)
+
+    mmgr = WM.WidgetManager(app)
+    _YES = md.QMessageBox.StandardButton.Yes
+    _NO = md.QMessageBox.StandardButton.No
+    _orig_wm_question = WM.QMessageBox.question
+
+    wk2 = mmgr.widgets["k2"]
+    WM.QMessageBox.question = staticmethod(lambda *a, **k: _NO)
+    try:
+        wk2.prev_account_id = "acc2"
+        wk2.data["account_id"] = "acc1"          # 수정 창에서 계좌를 옮긴 상태
+        mmgr._on_edited("k2")
+        assert sorted(mmgr.widgets) == ["k1", "k2"], "취소했는데 위젯이 사라졌다"
+        assert wk2.data["account_id"] == "acc2", "취소했는데 계좌가 되돌아가지 않았다"
+
+        WM.QMessageBox.question = staticmethod(lambda *a, **k: _YES)
+        wk2.prev_account_id = "acc2"
+        wk2.data["account_id"] = "acc1"
+        mmgr._on_edited("k2")
+    finally:
+        WM.QMessageBox.question = _orig_wm_question
+
+    assert list(mmgr.widgets) == ["k1"], f"흡수된 위젯이 안 닫혔다: {list(mmgr.widgets)}"
+    assert mmgr.stocks[0]["avg_price"] == 66667 and mmgr.stocks[0]["quantity"] == 15
+    assert mmgr.widgets["k1"].pos().x() == 100, "안 움직인 쪽 위젯 위치가 바뀌었다"
+    msaved, _ = storage.read_config()
+    assert len(msaved["stocks"]) == 1 and msaved["stocks"][0]["uid"] == "k1"
+    for _w in list(mmgr.widgets.values()):
+        _w.close()
+    log("[ok] 20. 계좌 이동 중복 — 가중평균 병합 / 매수환율 재계산 / 취소 시 이동 되돌리기")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 19개 케이스 전부 통과")
+    log("\n[PASS] 20개 케이스 전부 통과")
 
 
 def main() -> int:

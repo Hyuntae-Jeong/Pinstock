@@ -72,6 +72,9 @@ class StockWidget(QWidget):
         self._fetch_started: bool = False
         # 우클릭 → 수정 창의 계좌 선택 행에 쓸 계좌 목록. 매니저가 넣어 준다.
         self._accounts: list[dict] = []
+        # 수정 창에서 계좌를 옮기기 직전의 소속. 매니저가 "같은 계좌에 같은 종목이
+        # 겹쳤는지"를 판단하고, 사용자가 합치기를 취소하면 여기로 되돌린다.
+        self.prev_account_id: str = ""
         self._compact_height = self.COMPACT_H
 
         # 외부에서 통일 너비를 받지 않으면 종목명 기준 자체 계산
@@ -669,6 +672,7 @@ class StockWidget(QWidget):
             self.close()
 
     def _open_edit(self):
+        self.prev_account_id = self.data.get("account_id", "")
         dlg = StockDialog(data=self.data, accounts=self._accounts)
         if dlg.exec():
             new = dlg.get_data()

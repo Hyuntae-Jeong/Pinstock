@@ -48,6 +48,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter,
+    merge_account_duplicates,
     ConfigLoadError, read_config, write_config_atomic, rotate_daily_backup,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_stock_schema,
@@ -1071,8 +1072,16 @@ class WidgetManager:
             if not w.is_polling and w.data.get("code") == code:
                 w.apply_chart_data(data)
 
-    def _on_edited(self, _uid: str):
-        """개별 위젯에서 평단가/수량을 수정한 경우. 저장 + 마스터 갱신."""
+    def _on_edited(self, uid: str):
+        """개별 위젯에서 평단가/수량/계좌를 수정한 경우. 저장 + 마스터 갱신."""
+        before = self._account_snapshot()
+        w = self.widgets.get(uid)
+        if w is not None and w.prev_account_id:
+            before[uid] = w.prev_account_id
+            w.prev_account_id = ""
+        if not self._settle_account_moves(before) and w is not None:
+            # 합치기를 취소했으면 위젯이 들고 있는 dict 도 원래 계좌로 돌아가 있다
+            w.data["account_id"] = before.get(uid, w.data.get("account_id"))
         self._save_config()
         self._recompute_master()
 
@@ -1290,6 +1299,7 @@ class WidgetManager:
             accounts=copy.deepcopy(self.accounts),
             stocks=copy.deepcopy(self.stocks),
         )
+        before = self._account_snapshot()
         if not dlg.exec():
             return
         self.accounts = dlg.get_accounts()
@@ -1316,6 +1326,9 @@ class WidgetManager:
             if dlg_memo is not None:
                 dlg_memo.close()
         self._reconcile_accounts()
+        # 계좌를 지우며 '다른 계좌로 이동'을 골랐을 때 대상 계좌에 같은 종목이
+        # 이미 있으면 여기서 합쳐진다.
+        self._settle_account_moves(before)
         self._sync_pollers()          # 폴러였던 보유분이 사라졌으면 남은 위젯이 승계
         self._sync_accounts_to_widgets()
         self._sync_fx_timer()
@@ -1323,6 +1336,65 @@ class WidgetManager:
         self._save_config()
         self._recompute_master()
         self._refresh_memo_list_if_open()
+
+    def _account_snapshot(self) -> dict:
+        """{uid: account_id} — 계좌 이동 전후를 비교하고 되돌리기 위한 스냅샷."""
+        return {s["uid"]: s.get("account_id", "") for s in self.stocks}
+
+    def _settle_account_moves(self, before: dict) -> bool:
+        """계좌 이동 뒤 뒷정리 — 한 계좌에 같은 종목이 겹쳤으면 하나로 합친다.
+
+        종목 추가는 (code, account_id) 중복을 막으므로 이 상황은 이동으로만 생긴다.
+        되돌릴 수 없는 통합이라 먼저 물어보고, 취소하면 before 상태로 되돌린다.
+        반환값은 이동을 확정했는지 여부.
+        """
+        seen: set = set()
+        dups: list[dict] = []
+        for s in self.stocks:
+            key = (s.get("code"), s.get("account_id"))
+            if key in seen:
+                dups.append(s)
+            else:
+                seen.add(key)
+        if not dups:
+            return True
+
+        names = {a.get("id"): a.get("name", "") for a in self.accounts}
+        lines = "\n".join(
+            f"• {s.get('name') or s['code']} ({names.get(s.get('account_id'), '')})"
+            for s in dups
+        )
+        ret = QMessageBox.question(
+            None, "보유분 합치기",
+            "계좌를 옮기면서 같은 계좌에 같은 종목이 겹쳤습니다.\n\n"
+            f"{lines}\n\n"
+            "겹친 보유분을 하나로 합칩니다. 평단가는 수량 가중평균으로 다시\n"
+            "계산되며 되돌릴 수 없습니다.\n\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            for s in self.stocks:
+                s["account_id"] = before.get(s["uid"], s.get("account_id"))
+            return False
+
+        # 이번에 움직이지 않은 쪽을 흡수하는 쪽으로 삼는다 — 옮겨온 항목이 원래
+        # 있던 항목에 흡수돼야 위젯이 엉뚱한 자리로 옮겨 가지 않는다.
+        unmoved = {s["uid"] for s in self.stocks
+                   if before.get(s["uid"]) == s.get("account_id")}
+        self.stocks, records = merge_account_duplicates(self.stocks,
+                                                        preferred_uids=unmoved)
+        live = {s["uid"] for s in self.stocks}
+        for uid in [u for u in self.widgets if u not in live]:
+            self.widgets.pop(uid).close()
+        # 흡수한 쪽 위젯은 평단가/수량이 바뀌었으니 다시 그린다
+        for rec in records:
+            w = self.widgets.get(rec["kept_uid"])
+            if w is not None and w.current_price:
+                w._update_detail(w.current_price)
+        self._sync_pollers()
+        self._apply_uniform_width()
+        return True
 
     def _sync_accounts_to_widgets(self):
         """계좌 목록이 바뀌면 위젯에도 알린다 — 위젯 우클릭 수정 창의 계좌 선택 행용."""
@@ -1663,6 +1735,7 @@ class WidgetManager:
             accounts=copy.deepcopy(self.accounts),
             account_filter=self.account_filter,
         )
+        before = self._account_snapshot()
         if not dlg.exec():
             return
         new_stocks = dlg.get_stocks()
@@ -1709,8 +1782,10 @@ class WidgetManager:
 
         # 순서 + 저장 + 너비 재계산
         self.stocks = new_stocks
-        # 표에서 계좌를 옮겼을 수 있으므로 소속을 다시 검증한다.
+        # 표에서 계좌를 옮겼을 수 있으므로 소속을 다시 검증하고, 한 계좌에 같은
+        # 종목이 겹쳤으면 합친다.
         self._reconcile_accounts()
+        self._settle_account_moves(before)
         self._sync_pollers()
         self._sync_fx_timer()
         self._apply_uniform_width()
