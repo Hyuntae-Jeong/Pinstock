@@ -59,6 +59,7 @@ from .floating_widget import StockWidget, TagGroupWidget
 from .chart_widget import PinController
 from .master_widget import MasterWidget
 from .manage_dialog import (
+    AccountManagerDialog,
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
     fetch_quote_for_stock,
 )
@@ -471,6 +472,7 @@ class WidgetManager:
 
         add_act    = QAction("➕   종목 추가",   menu)
         manage_act = QAction("📋   종목 관리",   menu)
+        account_act = QAction("🏦   계좌 관리",  menu)
         watch_add_act    = QAction("⭐   관심종목 추가", menu)
         watch_manage_act = QAction("⭐   관심종목 관리", menu)
         self.watch_toggle_act = QAction(self._watch_toggle_text(), menu)
@@ -490,6 +492,7 @@ class WidgetManager:
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
+        account_act.triggered.connect(self.open_account_dialog)
         watch_add_act.triggered.connect(self.open_add_watch_dialog)
         watch_manage_act.triggered.connect(self.open_manage_watch_dialog)
         self.watch_toggle_act.triggered.connect(self.toggle_watch_visible)
@@ -518,6 +521,7 @@ class WidgetManager:
         stock_menu.setStyleSheet(TRAY_MENU_STYLE)
         stock_menu.addAction(add_act)
         stock_menu.addAction(manage_act)
+        stock_menu.addAction(account_act)
         watch_menu = menu.addMenu("⭐   관심종목")
         watch_menu.setStyleSheet(TRAY_MENU_STYLE)
         watch_menu.addAction(watch_add_act)
@@ -1026,6 +1030,7 @@ class WidgetManager:
         w.price_fetched.connect(self._relay_price)
         w.chart_fetched.connect(self._relay_chart)
         w.layout_changed.connect(lambda _: self._schedule_visible_widgets_reflow())
+        w.set_accounts(self.accounts)
         w.set_usd_krw_rate(self.usd_krw_rate)
         w.set_us_return_basis(self.us_return_basis)
 
@@ -1277,6 +1282,53 @@ class WidgetManager:
             for w in self.widgets.values():
                 w.set_usd_krw_rate(None)
 
+    # ── 계좌 관리 ──────────────────────────────────────────────────────────
+    def open_account_dialog(self):
+        """계좌 추가/수정/순서/삭제. 삭제 시 소속 종목 처리(이동 또는 함께 삭제)까지
+        다이얼로그 안에서 끝나고, 여기서는 그 결과를 그대로 받아 반영한다."""
+        dlg = AccountManagerDialog(
+            accounts=copy.deepcopy(self.accounts),
+            stocks=copy.deepcopy(self.stocks),
+        )
+        if not dlg.exec():
+            return
+        self.accounts = dlg.get_accounts()
+        # 다이얼로그는 깊은 복사본을 다루므로 결과를 원본 dict 에 제자리로 옮긴다.
+        # 통째로 갈아끼우면 widget.data 와 identity 가 끊겨, 이후 위젯에서 한 수정이
+        # 저장되는 self.stocks 에 반영되지 않는다.
+        result = {s["uid"]: s for s in dlg.get_stocks() if s.get("uid")}
+        kept: list[dict] = []
+        for s in self.stocks:
+            moved = result.get(s.get("uid"))
+            if moved is None:
+                # 계좌를 지우면서 소속 종목도 함께 지운 경우
+                w = self.widgets.pop(s["uid"], None)
+                if w:
+                    w.close()
+                continue
+            s["account_id"] = moved.get("account_id", s.get("account_id"))
+            kept.append(s)
+        self.stocks = kept
+        # 메모창은 종목 단위 — 그 종목을 아무 계좌도 들고 있지 않을 때만 닫는다.
+        live_codes = {s["code"] for s in self.stocks}
+        for code in [c for c in self._stock_memo_dialogs if c not in live_codes]:
+            dlg_memo = self._stock_memo_dialogs.pop(code, None)
+            if dlg_memo is not None:
+                dlg_memo.close()
+        self._reconcile_accounts()
+        self._sync_pollers()          # 폴러였던 보유분이 사라졌으면 남은 위젯이 승계
+        self._sync_accounts_to_widgets()
+        self._sync_fx_timer()
+        self._apply_uniform_width()
+        self._save_config()
+        self._recompute_master()
+        self._refresh_memo_list_if_open()
+
+    def _sync_accounts_to_widgets(self):
+        """계좌 목록이 바뀌면 위젯에도 알린다 — 위젯 우클릭 수정 창의 계좌 선택 행용."""
+        for w in self.widgets.values():
+            w.set_accounts(self.accounts)
+
     def _default_account_for_add(self) -> str:
         """새 종목이 들어갈 기본 계좌 — 지금 보고 있는 계좌, '전체'면 첫 계좌."""
         if any(a.get("id") == self.account_filter for a in self.accounts):
@@ -1285,7 +1337,8 @@ class WidgetManager:
 
     # ── 종목 추가 ──────────────────────────────────────────────────────────
     def open_add_dialog(self):
-        dlg = StockDialog()
+        dlg = StockDialog(accounts=self.accounts,
+                          default_account=self._default_account_for_add())
         if not dlg.exec():
             return
         d = dlg.get_data()
@@ -1607,6 +1660,8 @@ class WidgetManager:
             stocks=copy.deepcopy(self.stocks),
             current_prices=current_prices,
             usd_krw_rate=self.usd_krw_rate,
+            accounts=copy.deepcopy(self.accounts),
+            account_filter=self.account_filter,
         )
         if not dlg.exec():
             return
@@ -1654,6 +1709,8 @@ class WidgetManager:
 
         # 순서 + 저장 + 너비 재계산
         self.stocks = new_stocks
+        # 표에서 계좌를 옮겼을 수 있으므로 소속을 다시 검증한다.
+        self._reconcile_accounts()
         self._sync_pollers()
         self._sync_fx_timer()
         self._apply_uniform_width()

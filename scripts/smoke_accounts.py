@@ -433,7 +433,33 @@ def _run(log_fp):
     assert solo_table.table.isColumnHidden(solo_table.COL_ACCOUNT), "계좌 1개인데 컬럼이 보인다"
     assert solo_table.account_filter_combo is None, "계좌 1개인데 필터 콤보가 있다"
     solo_table.deleteLater()
-    log("[ok] 16. 종목 관리 — 계좌 컬럼으로 이동 / 계좌 필터 / 걸러진 표는 순서 드래그 잠금")
+
+    # 표 안의 '추가'/'수정' 도 계좌 선택 행을 띄운다 — 표의 계좌 콤보로만 옮길 수
+    # 있으면 같은 창 안에서 경로마다 규칙이 달라진다.
+    dlg2 = md.ManageStocksDialog([dict(s) for s in mixed], accounts=accounts3,
+                                 account_filter="acc3")
+    seen_kw: dict = {}
+    _orig_sd_init = md.StockDialog.__init__
+
+    def _spy_init(self, *a, **kw):
+        seen_kw.clear()
+        seen_kw.update(kw)
+        _orig_sd_init(self, *a, **kw)
+
+    md.StockDialog.__init__ = _spy_init
+    md.StockDialog.exec = lambda self: 0
+    try:
+        dlg2._add()
+        assert seen_kw.get("accounts") is accounts3, "추가 창에 계좌 목록이 안 넘어갔다"
+        assert seen_kw.get("default_account") == "acc3",             f"걸러 보는 계좌가 기본값이 아니다: {seen_kw.get('default_account')}"
+        dlg2.table.selectRow(0)
+        dlg2._edit_selected()
+        assert seen_kw.get("accounts") is accounts3, "수정 창에 계좌 목록이 안 넘어갔다"
+    finally:
+        md.StockDialog.__init__ = _orig_sd_init
+        del md.StockDialog.exec
+    dlg2.deleteLater()
+    log("[ok] 16. 종목 관리 — 계좌 컬럼으로 이동 / 계좌 필터 / 표 안 추가·수정도 계좌 선택")
 
     # ── 17. Windows 매니저 — 보유 항목 키가 uid 인지 (실제 WidgetManager 기동) ──
     # 여기가 code 로 되돌아가면 "계좌1 삼성전자"가 "계좌2 삼성전자"에 덮여 위젯
@@ -541,8 +567,102 @@ def _run(log_fp):
         _w.close()
     log("[ok] 18. Windows 폴러 — code 당 1개 / 시세 중계 / 폴러 삭제 시 승계")
 
+    # ── 19. Windows 매니저 ↔ 계좌 다이얼로그 연결 ──────────────────────────
+    # 다이얼로그는 깊은 복사본을 다룬다. 결과를 통째로 갈아끼우면 widget.data 와
+    # identity 가 끊겨 이후 위젯에서 한 수정이 저장에 반영되지 않고, 위젯을 다시
+    # 세우면 위치와 시세가 초기화된다. 결과는 원본 dict 에 제자리로 옮겨야 한다.
+    acfg = tmpdir / "acct_stocks.json"
+    storage.CONFIG_FILE = str(acfg)
+    storage.PREV_FILE = str(acfg) + ".prev"
+    storage.BACKUP_FILE = str(acfg) + ".bak"
+    WM.CONFIG_FILE = str(acfg)
+    WM.BACKUP_FILE = str(acfg) + ".bak"
+    acfg.write_text(json.dumps({
+        "accounts": [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"}],
+        "selected_account": "ALL",
+        "stocks": [
+            {"code": "005930", "uid": "a1", "account_id": "acc1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "000660", "uid": "a2", "account_id": "acc1", "name": "SK하이닉스",
+             "avg_price": 150000, "quantity": 1, "pos": [300, 100]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    for _n in ("fetch_stock", "fetch_us_stock", "fetch_minute_chart",
+               "fetch_daily_chart", "fetch_us_minute_chart", "fetch_us_daily_chart"):
+        setattr(WFW, _n, lambda _c: None)
+
+    amgr = WM.WidgetManager(app)
+    w_a1 = amgr.widgets["a1"]
+    d_a1 = amgr.stocks[0]
+
+    # 계좌를 하나 더 만들고 삼성전자를 그쪽으로 옮긴다 (실제 다이얼로그의 결과 계약)
+    _orig_acct_exec = md.AccountManagerDialog.exec
+
+    def _add_and_move(self):
+        self._accounts.append({"id": "acc2", "name": "연금", "color": "#a6e3a1"})
+        for s in self._stocks:
+            if s["code"] == "005930":
+                s["account_id"] = "acc2"
+        return 1
+
+    md.AccountManagerDialog.exec = _add_and_move
+    try:
+        amgr.open_account_dialog()
+    finally:
+        md.AccountManagerDialog.exec = _orig_acct_exec
+
+    assert [a["id"] for a in amgr.accounts] == ["acc1", "acc2"], amgr.accounts
+    assert amgr.widgets["a1"] is w_a1, "계좌만 바뀌었는데 위젯이 다시 만들어졌다"
+    assert amgr.stocks[0] is d_a1, "self.stocks 와 widget.data 의 identity 가 끊겼다"
+    assert w_a1.pos().x() == 100, "위젯 위치가 초기화됐다"
+    assert d_a1["account_id"] == "acc2", "계좌 이동이 원본에 반영되지 않았다"
+    assert len(w_a1._accounts) == 2, "위젯 수정 창에 쓸 계좌 목록이 갱신되지 않았다"
+
+    # 계좌를 지우면서 소속 종목도 함께 삭제 → 위젯도 같이 사라져야 한다
+    def _delete_with_stocks(self):
+        self._accounts[:] = [a for a in self._accounts if a["id"] != "acc2"]
+        self._stocks[:] = [s for s in self._stocks if s["account_id"] != "acc2"]
+        return 1
+
+    md.AccountManagerDialog.exec = _delete_with_stocks
+    try:
+        amgr.open_account_dialog()
+    finally:
+        md.AccountManagerDialog.exec = _orig_acct_exec
+
+    assert [a["id"] for a in amgr.accounts] == ["acc1"], amgr.accounts
+    assert list(amgr.widgets) == ["a2"], f"함께 삭제된 종목의 위젯이 남았다: {list(amgr.widgets)}"
+    assert [s["uid"] for s in amgr.stocks] == ["a2"]
+
+    # 종목 추가 창에는 계좌 목록과 '지금 보고 있는 계좌'가 기본값으로 넘어간다
+    _seen: dict = {}
+    _orig_stock_dlg = WM.StockDialog
+
+    class _SpyStockDialog:
+        def __init__(self, **kw):
+            _seen.update(kw)
+
+        def exec(self):
+            return 0
+
+    WM.StockDialog = _SpyStockDialog
+    try:
+        amgr.account_filter = "acc1"
+        amgr.open_add_dialog()
+    finally:
+        WM.StockDialog = _orig_stock_dlg
+    assert _seen.get("default_account") == "acc1", _seen
+    assert [a["id"] for a in _seen.get("accounts", [])] == ["acc1"], _seen
+
+    asaved, _ = storage.read_config()
+    assert [a["id"] for a in asaved["accounts"]] == ["acc1"]
+    assert asaved["stocks"][0]["uid"] == "a2"
+    for _w in list(amgr.widgets.values()):
+        _w.close()
+    log("[ok] 19. Windows 매니저 ↔ 계좌 다이얼로그 — 이동 시 위젯 유지 / 함께 삭제 / 추가 기본 계좌")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 18개 케이스 전부 통과")
+    log("\n[PASS] 19개 케이스 전부 통과")
 
 
 def main() -> int:

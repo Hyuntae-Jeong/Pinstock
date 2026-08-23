@@ -70,6 +70,8 @@ class StockWidget(QWidget):
         # set_polling(False) 로 꺼 둔 위젯은 타이머를 아예 돌리지 않는다.
         self._polling: bool = True
         self._fetch_started: bool = False
+        # 우클릭 → 수정 창의 계좌 선택 행에 쓸 계좌 목록. 매니저가 넣어 준다.
+        self._accounts: list[dict] = []
         self._compact_height = self.COMPACT_H
 
         # 외부에서 통일 너비를 받지 않으면 종목명 기준 자체 계산
@@ -358,6 +360,11 @@ class StockWidget(QWidget):
         self._prev_close = float(result["price"] - result["change_price"])
         self._apply_price(result)
         self.price_updated.emit(self.uid)
+
+    def set_accounts(self, accounts: list[dict] | None):
+        """계좌 목록 갱신 — 수정 창에서 계좌를 옮길 수 있게 한다.
+        계좌가 1개뿐이면 StockDialog 가 알아서 선택 행을 넣지 않는다."""
+        self._accounts = list(accounts or [])
 
     def set_usd_krw_rate(self, rate: float | None):
         self.usd_krw_rate = rate
@@ -662,11 +669,15 @@ class StockWidget(QWidget):
             self.close()
 
     def _open_edit(self):
-        dlg = StockDialog(data=self.data)
+        dlg = StockDialog(data=self.data, accounts=self._accounts)
         if dlg.exec():
             new = dlg.get_data()
             self.data["avg_price"] = new["avg_price"]
             self.data["quantity"]  = new["quantity"]
+            # 계좌를 바꿨으면 그대로 계좌 간 이동이다 — uid 가 유지되므로 위젯
+            # 위치·메모는 그대로 따라간다.
+            if new.get("account_id"):
+                self.data["account_id"] = new["account_id"]
             if "buy_exchange_rate" in new:
                 self.data["buy_exchange_rate"] = new["buy_exchange_rate"]
             else:

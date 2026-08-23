@@ -1790,15 +1790,25 @@ class ManageStocksDialog(QDialog):
         self._rebuild_table()
 
     # ── 액션 ───────────────────────────────────────────────────────────────
+    def _default_account(self) -> str:
+        """표에서 새 종목이 들어갈 계좌 — 지금 걸러 보는 계좌, '전체'면 첫 계좌."""
+        if any(a.get("id") == self._account_filter for a in self._accounts):
+            return self._account_filter
+        return self._accounts[0]["id"] if self._accounts else ""
+
     def _add(self):
-        dlg = StockDialog(parent=self)
+        dlg = StockDialog(parent=self, accounts=self._accounts,
+                          default_account=self._default_account())
         if not dlg.exec():
             return
         d = dlg.get_data()
         code = d["code"]
         if not code:
             return
-        if any(s["code"] == code for s in self._stocks):
+        # 중복은 계좌 안에서만 따진다 — 다른 계좌가 같은 종목을 갖는 것은 정상이다.
+        d["account_id"] = d.get("account_id") or self._default_account()
+        if any(s["code"] == code and s.get("account_id") == d["account_id"]
+               for s in self._stocks):
             QMessageBox.information(self, "알림", f"'{code}'는 이미 추가되어 있습니다.")
             return
 
@@ -1822,12 +1832,16 @@ class ManageStocksDialog(QDialog):
         stock_idx = self._stock_index_for_row(row)
         if stock_idx is None:
             return
-        dlg = StockDialog(parent=self, data=self._stocks[stock_idx])
+        dlg = StockDialog(parent=self, data=self._stocks[stock_idx],
+                          accounts=self._accounts)
         if not dlg.exec():
             return
         new = dlg.get_data()
         self._stocks[stock_idx]["avg_price"] = new["avg_price"]
         self._stocks[stock_idx]["quantity"]  = new["quantity"]
+        # 수정 창에서 계좌를 바꿨으면 그대로 계좌 간 이동이다 (표의 계좌 콤보와 동일).
+        if new.get("account_id"):
+            self._stocks[stock_idx]["account_id"] = new["account_id"]
         if "buy_exchange_rate" in new:
             self._stocks[stock_idx]["buy_exchange_rate"] = new["buy_exchange_rate"]
         else:
