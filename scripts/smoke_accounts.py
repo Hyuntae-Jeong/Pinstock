@@ -906,8 +906,205 @@ def _run(log_fp):
         _w.close()
     log("[ok] 22. 위젯 계좌색 막대 — 전체 보기에서만 / 카드 높이 따라감 / 계좌 1개면 숨김")
 
+    # ── 23. Excel — 계좌별 시트 내보내기/가져오기 ──────────────────────────
+    # 계좌를 나눠 쓰기 전에는 1번 시트 하나뿐이었다. 그 상태로 두면 같은 종목을 두
+    # 계좌가 보유할 때 같은 코드가 두 행으로 나가고, 다시 가져올 때 '중복' 으로
+    # 거부돼 백업/복원이 통째로 깨진다.
+    from openpyxl import Workbook, load_workbook
+    from pinstock.core.storage import (
+        export_stocks_to_excel, import_stocks_from_excel, reconcile_imported_accounts,
+    )
+
+    xdir = tmpdir / "excel"
+    xdir.mkdir(exist_ok=True)
+    accs2 = [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+             {"id": "acc2", "name": "연금", "color": "#a6e3a1"}]
+    xstocks = [
+        {"code": "005930", "uid": "x1", "account_id": "acc1", "name": "삼성전자",
+         "avg_price": 70000, "quantity": 10, "market": "KR", "currency": "KRW"},
+        {"code": "005930", "uid": "x2", "account_id": "acc2", "name": "삼성전자",
+         "avg_price": 60000, "quantity": 5, "market": "KR", "currency": "KRW"},
+        {"code": "NVDA", "uid": "x3", "account_id": "acc2", "name": "NVIDIA",
+         "avg_price": 100.0, "quantity": 2, "market": "US", "currency": "USD",
+         "buy_exchange_rate": 1300.0},
+    ]
+    multi_path = str(xdir / "multi.xlsx")
+    export_stocks_to_excel(xstocks, multi_path, {"005930": 80000, "NVDA": 150.0},
+                           1400.0, accounts=accs2)
+
+    wb = load_workbook(multi_path)
+    assert wb.sheetnames == ["보유종목", "주계좌", "연금"], wb.sheetnames
+    main_header = [c.value for c in wb["보유종목"][1]]
+    assert "계좌" in main_header, main_header
+    # 계좌 시트는 시트 하나가 곧 한 계좌라 계좌 컬럼을 넣지 않는다
+    assert "계좌" not in [c.value for c in wb["연금"][1]]
+    flat = [str(c.value) for row in wb["보유종목"].iter_rows() for c in row]
+    assert "계좌별 요약" in flat, "1번 시트에 계좌별 소계가 없다"
+    assert "계좌 정보" in [str(c.value) for row in wb["연금"].iter_rows() for c in row]
+
+    got, got_accs = import_stocks_from_excel(multi_path)
+    assert [a["id"] for a in got_accs] == ["acc1", "acc2"], got_accs
+    assert [a["color"] for a in got_accs] == ["#89b4fa", "#a6e3a1"], "계좌 색이 안 돌아왔다"
+    assert len(got) == 3 and sum(1 for s in got if s["code"] == "005930") == 2,         "같은 종목 2계좌가 라운드트립에서 사라졌다"
+    nv = next(s for s in got if s["code"] == "NVDA")
+    assert nv["account_id"] == "acc2" and nv["buy_exchange_rate"] == 1300.0
+
+    # 계좌가 1개면 계좌 기능 이전과 완전히 같은 파일이어야 한다
+    solo_path = str(xdir / "solo.xlsx")
+    export_stocks_to_excel([dict(xstocks[0])], solo_path,
+                           accounts=[{"id": "acc1", "name": "기본 계좌", "color": "#89b4fa"}])
+    swb = load_workbook(solo_path)
+    assert swb.sheetnames == ["보유종목"], swb.sheetnames
+    assert "계좌" not in [c.value for c in swb.active[1]]
+    solo_stocks, solo_accs = import_stocks_from_excel(solo_path)
+    assert solo_accs == [] and solo_stocks[0]["account_id"] == ""
+
+    # 계좌 시트를 지운 파일 — 1번 시트의 계좌 컬럼으로 소속을 되살린다
+    wb2 = load_workbook(multi_path)
+    for t in ("주계좌", "연금"):
+        del wb2[t]
+    no_sheets = str(xdir / "no_sheets.xlsx")
+    wb2.save(no_sheets)
+    ns_stocks, ns_accs = import_stocks_from_excel(no_sheets)
+    assert [a["name"] for a in ns_accs] == ["주계좌", "연금"], ns_accs
+    ns_name = {a["id"]: a["name"] for a in ns_accs}
+    assert sorted(ns_name[s["account_id"]] for s in ns_stocks) == ["연금", "연금", "주계좌"]
+
+    # 계좌 개념이 아예 없던 구버전 파일
+    legacy_path = str(xdir / "legacy.xlsx")
+    lw = Workbook(); lws = lw.active; lws.title = "보유종목"
+    lws.append(["종목코드", "종목명", "평단가", "수량"])
+    lws.append(["005930", "삼성전자", 70000, 10])
+    lw.save(legacy_path)
+    lg_stocks, lg_accs = import_stocks_from_excel(legacy_path)
+    assert lg_accs == [] and lg_stocks[0]["account_id"] == ""
+
+    # reconcile — id 매칭 / 이름 매칭 / 새로 만들기 / 계좌 정보 없을 때 기본 계좌
+    tgt = [{"code": "A", "account_id": "acc1"}, {"code": "B", "account_id": "zzz"}]
+    after, created = reconcile_imported_accounts(
+        tgt,
+        [{"id": "acc1", "name": "이름바뀜", "color": "#89b4fa"},
+         {"id": "zzz", "name": "새계좌", "color": "#f9e2af"}],
+        accs2, default_account_id="acc1")
+    assert tgt[0]["account_id"] == "acc1", "id 가 같으면 기존 계좌에 붙어야 한다"
+    assert [a["id"] for a in created] == ["zzz"], created
+    assert len(after) == 3, after
+
+    by_name = [{"code": "A", "account_id": "other"}]
+    after2, created2 = reconcile_imported_accounts(
+        by_name, [{"id": "other", "name": "연금", "color": "#f9e2af"}],
+        accs2, default_account_id="acc1")
+    assert by_name[0]["account_id"] == "acc2", "이름이 같으면 그 계좌에 붙어야 한다"
+    assert created2 == [] and len(after2) == 2
+
+    no_acc = [{"code": "A", "account_id": ""}]
+    after3, created3 = reconcile_imported_accounts(no_acc, [], accs2,
+                                                   default_account_id="acc2")
+    assert no_acc[0]["account_id"] == "acc2", "계좌 정보가 없으면 기본 계좌로 가야 한다"
+    assert created3 == []
+    log("[ok] 23. Excel 계좌 시트 — 라운드트립 / 계좌 1개면 이전과 동일 / 구버전 / 계좌 매칭")
+
+    # ── 24. Windows 매니저 — 전 종목 삭제 후 Excel 로 계좌까지 복원 ────────
+    # 실제로 보고된 흐름이다: 내보내기 → 보유 종목 전부 삭제 → 그 파일을 가져오기.
+    # 계좌 정보가 파일에 없던 시절에는 전부 한 계좌로 뭉쳐 들어왔다.
+    ecfg = tmpdir / "excel_stocks.json"
+    storage.CONFIG_FILE = str(ecfg)
+    storage.PREV_FILE = str(ecfg) + ".prev"
+    storage.BACKUP_FILE = str(ecfg) + ".bak"
+    WM.CONFIG_FILE = str(ecfg)
+    WM.BACKUP_FILE = str(ecfg) + ".bak"
+    ecfg.write_text(json.dumps({
+        "accounts": [{"id": "acc1", "name": "주계좌", "color": "#89b4fa"},
+                     {"id": "acc2", "name": "연금", "color": "#a6e3a1"}],
+        "selected_account": "ALL",
+        "stocks": [
+            {"code": "005930", "uid": "e1", "account_id": "acc1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "005930", "uid": "e2", "account_id": "acc2", "name": "삼성전자",
+             "avg_price": 60000, "quantity": 5, "pos": [300, 300]},
+            {"code": "000660", "uid": "e3", "account_id": "acc2", "name": "SK하이닉스",
+             "avg_price": 100000, "quantity": 2, "pos": [500, 100]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    for _n in ("fetch_stock", "fetch_us_stock", "fetch_minute_chart",
+               "fetch_daily_chart", "fetch_us_minute_chart", "fetch_us_daily_chart"):
+        setattr(WFW, _n, lambda _c: None)
+    WM.fetch_usd_krw_rate = lambda: None
+
+    emgr = WM.WidgetManager(app)
+    out_xlsx = str(tmpdir / "roundtrip.xlsx")
+    seen_msgs: list = []
+
+    class _FakeFileDialog:
+        @staticmethod
+        def getSaveFileName(*a, **k):
+            return (out_xlsx, "")
+
+        @staticmethod
+        def getOpenFileName(*a, **k):
+            return (out_xlsx, "")
+
+    class _FakeMsgBox:
+        Icon = md.QMessageBox.Icon
+        StandardButton = md.QMessageBox.StandardButton
+
+        @staticmethod
+        def question(_p, _t, m, *a, **k):
+            seen_msgs.append(m)
+            return md.QMessageBox.StandardButton.Yes
+
+        @staticmethod
+        def information(*a, **k):
+            pass
+
+        @staticmethod
+        def critical(_p, t, m, *a, **k):
+            raise AssertionError(f"{t}: {m}")
+
+        @staticmethod
+        def warning(*a, **k):
+            pass
+
+    class _FakeImportMode:
+        mode = "merge"
+
+        def exec(self):
+            return 1
+
+    _orig = (WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog)
+    WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog = (
+        _FakeFileDialog, _FakeMsgBox, _FakeImportMode)
+    try:
+        emgr.open_export_dialog()
+        assert load_workbook(out_xlsx).sheetnames == ["보유종목", "주계좌", "연금"]
+
+        # 연금 계좌의 삼성전자 평단가만 바꿔 '갱신' 으로 잡히는지 확인
+        rwb = load_workbook(out_xlsx)
+        rws = rwb["연금"]
+        for _r in range(2, rws.max_row + 1):
+            if rws.cell(row=_r, column=1).value == "005930":
+                rws.cell(row=_r, column=3, value=55000)
+        rwb.save(out_xlsx)
+
+        emgr._rebuild_widgets([])          # 보유 종목 전부 삭제
+        assert emgr.stocks == []
+        emgr.open_import_dialog()
+    finally:
+        WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog = _orig
+
+    assert "주계좌" in seen_msgs[-1] and "연금" in seen_msgs[-1],         f"확인 메시지가 계좌별로 나뉘지 않았다: {seen_msgs[-1]}"
+    assert [a["id"] for a in emgr.accounts] == ["acc1", "acc2"], "계좌가 중복 생성됐다"
+    assert len(emgr.stocks) == 3, emgr.stocks
+    assert sum(1 for s in emgr.stocks if s["code"] == "005930") == 2,         "같은 종목 2계좌가 한 계좌로 뭉쳤다"
+    moved = next(s for s in emgr.stocks
+                 if s["code"] == "005930" and s["account_id"] == "acc2")
+    assert moved["avg_price"] == 55000, moved
+    for _w in list(emgr.widgets.values()):
+        _w.close()
+    log("[ok] 24. Windows Excel 라운드트립 — 전 종목 삭제 후에도 계좌별로 복원")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 22개 케이스 전부 통과")
+    log("\n[PASS] 24개 케이스 전부 통과")
 
 
 def main() -> int:

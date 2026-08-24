@@ -642,61 +642,132 @@ def _normalize_excel_currency(value, market: str) -> str:
     return currency or default
 
 
+def reconcile_imported_accounts(stocks: list[dict], imported_accounts: list[dict],
+                                existing_accounts: list[dict],
+                                default_account_id: str = "") -> tuple[list[dict], list[dict]]:
+    """가져온 보유분의 소속을 기존 계좌 레지스트리에 맞춘다 (병합 모드용).
+
+    - 파일에 계좌 정보가 없으면 전부 default_account_id 로 보낸다. 계좌 기능 이전
+      파일을 병합할 때 소속이 비어 있으면 기존 보유분과 키가 어긋나 전부 새 항목이
+      되고, 결국 같은 종목이 두 줄로 늘어난다.
+    - 계좌 정보가 있으면 같은 id 의 계좌 → 같은 이름의 계좌 → 새로 만들기 순으로 잇는다.
+      id 를 먼저 보는 건 계좌명을 바꿔도 내보낸 파일이 계속 붙게 하기 위해서다.
+
+    stocks 는 제자리 수정한다. 반환: (반영 후 계좌 목록, 새로 만들어진 계좌 목록)
+    """
+    accounts = normalize_accounts(existing_accounts)
+    if not imported_accounts:
+        for s in stocks or []:
+            s["account_id"] = default_account_id
+        return accounts, []
+
+    by_id = {a["id"]: a for a in accounts}
+    by_name = {a["name"]: a for a in accounts}
+    created: list[dict] = []
+    remap: dict[str, str] = {}
+    for imported in normalize_accounts(imported_accounts):
+        match = by_id.get(imported["id"]) or by_name.get(imported["name"])
+        if match is None:
+            match = imported
+            accounts.append(match)
+            created.append(match)
+            by_id[match["id"]] = match
+            by_name[match["name"]] = match
+        remap[imported["id"]] = match["id"]
+
+    fallback = default_account_id or (accounts[0]["id"] if accounts else "")
+    for s in stocks or []:
+        s["account_id"] = remap.get(s.get("account_id", ""), fallback)
+    return accounts, created
+
+
 # ─── Excel import/export ─────────────────────────────────────────────────────
-def export_stocks_to_excel(stocks: list[dict], path: str,
-                           current_prices: dict | None = None,
-                           usd_krw_rate: float | None = None) -> None:
-    """보유 종목을 .xlsx 로 내보내기.
-    - 종목코드는 텍스트 셀로 저장 (선행 0/미국 티커 보존: '005930', 'NVDA').
-    - 시장/통화/매수환율은 선택 컬럼으로 함께 저장해 미국 주식 라운드트립을 보존한다.
-    - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음.
-    - current_prices ({code: price}) 와 usd_krw_rate 가 주어지면 시트 하단에
-      포트폴리오 요약(총 매입금액 / 평가금액 / 평가손익 / 수익률)을 빈 행 한
-      줄로 분리해서 추가. 미국 주식은 원화 기준으로 합산한다.
-      import 시에는 빈 행 이후의 행을 모두 무시하므로 라운드트립에 영향 없음."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, Alignment
+# 시트 구성 (계좌를 나눠 쓸 때):
+#   1번 시트 "보유종목" — 전 계좌 합산. 계좌 기능 이전 파일과 같은 모양이라
+#                         예전 버전이나 다른 도구가 그대로 읽을 수 있다.
+#   2번 시트부터        — 계좌 하나당 한 장.
+#
+# 가져오기는 "계좌 시트 → 1번 시트의 계좌 컬럼 → 계좌 정보 없음" 순으로 내려간다.
+# 계좌를 하나만 쓰면 1번 시트만 만들고 계좌 컬럼도 넣지 않는다 — 계좌를 안 나눠 쓰는
+# 사용자의 파일이 이전과 완전히 같아야 한다.
+EXCEL_MAIN_SHEET_TITLE = "보유종목"
+EXCEL_ACCOUNT_HEADER = "계좌"          # 1번 시트에만 붙는 선택 컬럼 (값은 계좌명)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "보유종목"
+_EXCEL_INVALID_SHEET_CHARS = set("[]:*?/\\")
+_EXCEL_SHEET_TITLE_MAX = 31
 
-    # 종목별 수익 금액/수익률은 현재가·환율로 계산되는 값이라 EXCEL_COLUMNS(=import
-    # 필수 컬럼)에는 넣지 않고 export 시에만 뒤에 덧붙인다. import 은 추가 컬럼을
-    # 무시하므로 라운드트립에 영향 없음.
-    export_columns = EXCEL_COLUMNS + EXCEL_OPTIONAL_COLUMNS
+# 계좌 시트 하단(빈 줄 아래)에 남기는 계좌 메타. 행 파서는 첫 빈 줄에서 멈추므로
+# 이 블록은 데이터로 읽히지 않는다. 이름뿐 아니라 id 와 색까지 남겨야 다시 가져올 때
+# 계좌 색과 소속이 그대로 복원된다 — 이름만으로는 색을 다시 골라야 한다.
+_META_TITLE = "계좌 정보"
+_META_NAME = "계좌명"
+_META_ID = "계좌 ID"
+_META_COLOR = "색상"
+
+_SUMMARY_TITLE = "포트폴리오 요약"
+_ACCOUNT_SUMMARY_TITLE = "계좌별 요약"
+
+
+def _excel_sheet_title(name: str, used: set[str]) -> str:
+    """계좌명을 Excel 시트명으로. 금지문자 제거·31자 제한·중복 회피."""
+    title = "".join(
+        ch for ch in str(name or "").strip() if ch not in _EXCEL_INVALID_SHEET_CHARS
+    ).strip("'")[:_EXCEL_SHEET_TITLE_MAX]
+    title = title or "계좌"
+    base, n = title, 2
+    while title in used:
+        suffix = f" ({n})"
+        title = base[:_EXCEL_SHEET_TITLE_MAX - len(suffix)] + suffix
+        n += 1
+    used.add(title)
+    return title
+
+
+def _holding_row(normalized: dict, export_columns: list, account_name: str | None,
+                 prices: dict, usd_krw_rate) -> list:
+    """종목 dict 한 개를 시트 한 행으로."""
+    market = normalized["market"]
+    row = []
+    for _, key in export_columns:
+        if key == "code":
+            row.append(str(normalized.get("code", "")))
+        elif key == "name":
+            row.append(normalized.get("name", normalized.get("code", "")))
+        elif key == "account":
+            row.append(account_name or "")
+        elif key == "market":
+            row.append(_display_market(market))
+        elif key == "currency":
+            row.append(normalized.get(
+                "currency", CURRENCY_USD if market == MARKET_US else CURRENCY_KRW))
+        elif key == "buy_exchange_rate":
+            row.append(normalized.get("buy_exchange_rate", ""))
+        elif key == "quantity":
+            row.append(float(normalized.get(key, 0)))
+        elif key == "avg_price" and market == MARKET_US:
+            row.append(float(normalized.get(key, 0)))
+        else:
+            row.append(int(normalized.get(key, 0)))
+    metrics = stock_metrics(normalized, prices.get(normalized.get("code")), usd_krw_rate)
+    row.append(metrics["profit"])
+    row.append(round(metrics["profit_rate"], 2))
+    return row
+
+
+def _write_holdings_sheet(ws, stocks: list[dict], export_columns: list,
+                          account_name_of: dict | None, prices: dict, usd_krw_rate,
+                          Font, Alignment) -> None:
+    """종목 표(헤더 + 행)를 시트에 쓰고 서식을 맞춘다."""
     headers = [h for h, _ in export_columns] + ["수익금액 (원)", "수익률 (%)"]
     ws.append(headers)
     bold = Font(bold=True)
     for col_idx in range(1, len(headers) + 1):
         ws.cell(row=1, column=col_idx).font = bold
 
-    prices = current_prices or {}
     for s in stocks:
-        row = []
         normalized = normalize_stock_schema(s)
-        market = normalized["market"]
-        for _, key in export_columns:
-            if key == "code":
-                row.append(str(normalized.get("code", "")))
-            elif key == "name":
-                row.append(normalized.get("name", normalized.get("code", "")))
-            elif key == "market":
-                row.append(_display_market(market))
-            elif key == "currency":
-                row.append(normalized.get("currency", CURRENCY_USD if market == MARKET_US else CURRENCY_KRW))
-            elif key == "buy_exchange_rate":
-                row.append(normalized.get("buy_exchange_rate", ""))
-            elif key == "quantity":
-                row.append(float(normalized.get(key, 0)))
-            elif key == "avg_price" and market == MARKET_US:
-                row.append(float(normalized.get(key, 0)))
-            else:
-                row.append(int(normalized.get(key, 0)))
-        metrics = stock_metrics(normalized, prices.get(normalized.get("code")), usd_krw_rate)
-        row.append(metrics["profit"])
-        row.append(round(metrics["profit_rate"], 2))
-        ws.append(row)
+        acc_name = (account_name_of or {}).get(normalized.get("account_id"))
+        ws.append(_holding_row(normalized, export_columns, acc_name, prices, usd_krw_rate))
 
     # 수익금액/수익률 컬럼 숫자 포맷 (헤더 제외)
     profit_col_idx = len(export_columns) + 1
@@ -716,86 +787,190 @@ def export_stocks_to_excel(stocks: list[dict], path: str,
         cell.number_format = "@"
         cell.alignment = Alignment(horizontal="left")
 
-    # 컬럼 너비 자동 조정 (간단히 헤더+여유)
-    widths = {"종목코드": 12, "종목명": 28, "평단가": 12, "수량": 10,
+    widths = {"종목코드": 12, "종목명": 28, "계좌": 12, "평단가": 12, "수량": 10,
               "시장": 8, "통화": 8, "매수환율": 12,
               "수익금액 (원)": 14, "수익률 (%)": 12}
     for col_idx, header in enumerate(headers, 1):
         letter = ws.cell(row=1, column=col_idx).column_letter
         ws.column_dimensions[letter].width = widths.get(header, 14)
 
-    # ── 포트폴리오 요약 (종목이 1개 이상일 때) ────────────────────────
-    # 종목 표와 빈 행 한 줄로 분리. import 측에서 빈 행 이후를 모두 무시하므로
-    # 라운드트립 안전.
-    if stocks:
-        totals = portfolio_totals(
-            stocks,
-            current_prices=current_prices,
-            usd_krw_rate=usd_krw_rate,
-            include_hidden=True,
-        )
-        total_invest = totals["total_invest"]
-        total_eval = totals["total_eval"]
-        profit = totals["profit"]
-        prate = totals["profit_rate"]
 
-        # 빈 행 한 줄 띄우고 다음 행에 요약 헤더
-        header_row = ws.max_row + 2
-        ws.cell(row=header_row, column=1, value="포트폴리오 요약").font = bold
+def _write_summary_block(ws, title: str, stocks: list[dict], prices: dict,
+                         usd_krw_rate, Font, Alignment) -> None:
+    """표 아래 빈 줄 한 칸 띄우고 요약 4지표. 가져오기는 빈 줄 이후를 모두 무시한다."""
+    if not stocks:
+        return
+    totals = portfolio_totals(stocks, current_prices=prices,
+                              usd_krw_rate=usd_krw_rate, include_hidden=True)
+    header_row = ws.max_row + 2
+    ws.cell(row=header_row, column=1, value=title).font = Font(bold=True)
+    rows = [
+        ("총 매입금액", totals["total_invest"], "#,##0"),
+        ("평가금액",   totals["total_eval"],   "#,##0"),
+        ("평가손익",   totals["profit"],        "#,##0"),
+        ("수익률 (%)", round(totals["profit_rate"], 2), "0.00"),
+    ]
+    for i, (label, val, fmt) in enumerate(rows, 1):
+        r = header_row + i
+        ws.cell(row=r, column=1, value=label)
+        val_cell = ws.cell(row=r, column=2, value=val)
+        val_cell.number_format = fmt
+        val_cell.alignment = Alignment(horizontal="right")
 
-        rows = [
-            ("총 매입금액", total_invest, "#,##0"),
-            ("평가금액",   total_eval,   "#,##0"),
-            ("평가손익",   profit,        "#,##0"),
-            ("수익률 (%)", round(prate, 2), "0.00"),
-        ]
-        for i, (label, val, fmt) in enumerate(rows, 1):
-            r = header_row + i
-            ws.cell(row=r, column=1, value=label)
-            val_cell = ws.cell(row=r, column=2, value=val)
-            val_cell.number_format = fmt
-            val_cell.alignment = Alignment(horizontal="right")
+
+def _write_account_subtotals(ws, accounts: list[dict], stocks: list[dict],
+                             prices: dict, usd_krw_rate, Font, Alignment) -> None:
+    """1번 시트 요약 아래에 계좌별 소계 — 전체와 계좌별을 한 화면에서 비교한다."""
+    bold = Font(bold=True)
+    header_row = ws.max_row + 2
+    ws.cell(row=header_row, column=1, value=_ACCOUNT_SUMMARY_TITLE).font = bold
+    labels = ["계좌", "총 매입금액", "평가금액", "평가손익", "수익률 (%)"]
+    for col_idx, label in enumerate(labels, 1):
+        ws.cell(row=header_row + 1, column=col_idx, value=label).font = bold
+    for i, acc in enumerate(accounts, 1):
+        owned = [s for s in stocks if s.get("account_id") == acc.get("id")]
+        totals = portfolio_totals(owned, current_prices=prices,
+                                  usd_krw_rate=usd_krw_rate, include_hidden=True)
+        r = header_row + 1 + i
+        ws.cell(row=r, column=1, value=acc.get("name", ""))
+        for col_idx, (val, fmt) in enumerate((
+            (totals["total_invest"], "#,##0"),
+            (totals["total_eval"],   "#,##0"),
+            (totals["profit"],       "#,##0"),
+            (round(totals["profit_rate"], 2), "0.00"),
+        ), 2):
+            cell = ws.cell(row=r, column=col_idx, value=val)
+            cell.number_format = fmt
+            cell.alignment = Alignment(horizontal="right")
+
+
+def _write_account_meta(ws, account: dict, Font) -> None:
+    """계좌 시트 하단에 계좌 id/이름/색. 다시 가져올 때 계좌를 그대로 복원한다."""
+    header_row = ws.max_row + 2
+    ws.cell(row=header_row, column=1, value=_META_TITLE).font = Font(bold=True)
+    for i, (label, value) in enumerate((
+        (_META_NAME, account.get("name", "")),
+        (_META_ID, account.get("id", "")),
+        (_META_COLOR, account.get("color", DEFAULT_ACCOUNT_COLOR)),
+    ), 1):
+        ws.cell(row=header_row + i, column=1, value=label)
+        ws.cell(row=header_row + i, column=2, value=str(value))
+
+
+def export_stocks_to_excel(stocks: list[dict], path: str,
+                           current_prices: dict | None = None,
+                           usd_krw_rate: float | None = None,
+                           accounts: list[dict] | None = None) -> None:
+    """보유 종목을 .xlsx 로 내보내기.
+
+    - 종목코드는 텍스트 셀로 저장 (선행 0/미국 티커 보존: '005930', 'NVDA').
+    - 시장/통화/매수환율은 선택 컬럼으로 함께 저장해 미국 주식 라운드트립을 보존한다.
+    - 위젯 위치(pos)는 제외 — 다른 PC에서는 화면 좌표가 달라 의미가 없음.
+    - current_prices ({code: price}) 와 usd_krw_rate 가 주어지면 시트 하단에
+      포트폴리오 요약을 빈 행 한 줄로 분리해서 추가. 미국 주식은 원화 기준으로 합산한다.
+      가져오기는 빈 행 이후의 행을 모두 무시하므로 라운드트립에 영향 없음.
+    - accounts 가 2개 이상이면 1번 시트에 계좌 컬럼과 계좌별 소계가 붙고, 계좌마다
+      시트가 하나씩 더 생긴다. 1개 이하면 계좌 기능 이전과 완전히 같은 파일이 나온다.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+
+    accounts = [a for a in (accounts or []) if isinstance(a, dict) and a.get("id")]
+    multi = len(accounts) > 1
+    prices = current_prices or {}
+    name_of = {a["id"]: a.get("name", "") for a in accounts}
+
+    # 종목별 수익 금액/수익률은 현재가·환율로 계산되는 값이라 EXCEL_COLUMNS(=가져오기
+    # 필수 컬럼)에는 넣지 않고 내보낼 때만 뒤에 덧붙인다. 가져오기는 추가 컬럼을
+    # 무시하므로 라운드트립에 영향 없음.
+    # 계좌 컬럼은 종목 다음, 금액 앞 — 앱의 종목 관리 표와 같은 순서다.
+    # 계좌 시트는 시트 하나가 곧 한 계좌라 계좌 컬럼을 넣지 않는다.
+    code_col, name_col, avg_col, qty_col = EXCEL_COLUMNS
+    account_columns = EXCEL_COLUMNS + EXCEL_OPTIONAL_COLUMNS
+    main_columns = (
+        [code_col, name_col, (EXCEL_ACCOUNT_HEADER, "account"), avg_col, qty_col]
+        + EXCEL_OPTIONAL_COLUMNS
+    ) if multi else account_columns
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = EXCEL_MAIN_SHEET_TITLE
+    _write_holdings_sheet(ws, stocks, main_columns, name_of if multi else None,
+                          prices, usd_krw_rate, Font, Alignment)
+    _write_summary_block(ws, _SUMMARY_TITLE, stocks, prices, usd_krw_rate, Font, Alignment)
+    if multi and stocks:
+        _write_account_subtotals(ws, accounts, stocks, prices, usd_krw_rate, Font, Alignment)
+
+    if multi:
+        used = {EXCEL_MAIN_SHEET_TITLE}
+        for acc in accounts:
+            owned = [s for s in stocks if s.get("account_id") == acc.get("id")]
+            sheet = wb.create_sheet(_excel_sheet_title(acc.get("name", ""), used))
+            _write_holdings_sheet(sheet, owned, account_columns, None,
+                                  prices, usd_krw_rate, Font, Alignment)
+            # 계좌 메타를 요약보다 먼저 — 이 시트가 무엇인지부터 읽히게 한다.
+            _write_account_meta(sheet, acc, Font)
+            _write_summary_block(sheet, _SUMMARY_TITLE, owned, prices, usd_krw_rate,
+                                 Font, Alignment)
 
     wb.save(path)
 
 
-def import_stocks_from_excel(path: str) -> list[dict]:
-    """Excel 파일에서 보유 종목을 읽어 stocks.json 형식 dict 리스트로 반환.
-    검증 실패 시 ValueError 를 발생시킨다 (메시지는 사용자에게 그대로 표시 가능)."""
-    from openpyxl import load_workbook
+# ─── 가져오기 ────────────────────────────────────────────────────────────────
+def _sheet_header(ws) -> list[str]:
+    return [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
 
-    wb = load_workbook(path, data_only=True)
-    ws = wb.active
+
+def _is_holdings_sheet(ws) -> bool:
+    """필수 컬럼을 모두 갖췄으면 종목 시트로 본다 (사용자가 끼워 넣은 메모 시트는 제외)."""
     if ws.max_row < 1:
-        raise ValueError("시트가 비어 있습니다.")
+        return False
+    header = _sheet_header(ws)
+    return all(h in header for h in (h for h, _ in EXCEL_COLUMNS))
 
-    # 1행 헤더 읽기 (공백/None 안전)
-    header_row = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
+
+def _read_account_meta(ws) -> dict:
+    """계좌 시트 하단의 계좌 정보 블록을 읽는다. 없으면 빈 dict."""
+    meta: dict = {}
+    for row in ws.iter_rows(min_row=2, max_col=2, values_only=True):
+        label = str(row[0]).strip() if row and row[0] is not None else ""
+        value = str(row[1]).strip() if row and len(row) > 1 and row[1] is not None else ""
+        if label == _META_NAME and value:
+            meta["name"] = value
+        elif label == _META_ID and value:
+            meta["id"] = value
+        elif label == _META_COLOR and value:
+            meta["color"] = value
+    return meta
+
+
+def _parse_holding_rows(ws, where: str) -> tuple[list[dict], list[str]]:
+    """시트 하나에서 종목 행을 읽는다. 반환: (종목 목록, 오류 메시지 목록).
+
+    종목에는 시트에 계좌 컬럼이 있으면 그 값이 "_account_name" 으로 실려 나간다
+    (호출측이 계좌 목록을 만든 뒤 실제 account_id 로 바꿔 넣는다).
+    """
+    header_row = _sheet_header(ws)
     required = [h for h, _ in EXCEL_COLUMNS]
-    missing = [h for h in required if h not in header_row]
-    if missing:
-        raise ValueError(
-            "필수 컬럼이 누락되었습니다: " + ", ".join(missing)
-            + f"\n(필요한 헤더: {', '.join(required)})"
-        )
-
-    # 헤더명 → 컬럼 인덱스. 시장/통화/매수환율은 새 export 에만 있는 선택 컬럼이다.
-    optional = [h for h, _ in EXCEL_OPTIONAL_COLUMNS]
+    optional = [h for h, _ in EXCEL_OPTIONAL_COLUMNS] + [EXCEL_ACCOUNT_HEADER]
     idx_of = {h: header_row.index(h) for h in required if h in header_row}
     idx_of.update({h: header_row.index(h) for h in optional if h in header_row})
 
     stocks: list[dict] = []
-    seen_codes: set[str] = set()
     errors: list[str] = []
+    seen: set[tuple[str, str]] = set()
 
     for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        # 빈 행을 만나면 그 이후는 모두 무시 (export 시 빈 행으로 구분한 요약 섹션 등)
+        # 빈 행을 만나면 그 이후는 모두 무시 (요약·계좌 정보 블록 등)
         if row is None or all(v is None or (isinstance(v, str) and not v.strip()) for v in row):
             break
 
         def cell(h: str):
             i = idx_of[h]
             return row[i] if i < len(row) else None
+
+        def err(msg: str) -> str:
+            return f"{where}{row_num}행: {msg}"
 
         raw_code = cell("종목코드")
         raw_name = cell("종목명")
@@ -804,10 +979,12 @@ def import_stocks_from_excel(path: str) -> list[dict]:
         raw_market = cell("시장") if "시장" in idx_of else None
         raw_currency = cell("통화") if "통화" in idx_of else None
         raw_buy_rate = cell("매수환율") if "매수환율" in idx_of else None
+        raw_account = cell(EXCEL_ACCOUNT_HEADER) if EXCEL_ACCOUNT_HEADER in idx_of else None
+        account_name = str(raw_account).strip() if raw_account is not None else ""
 
         # 종목코드: 숫자로 읽혔어도 문자열로 정규화 후 시장별로 검증 + 대문자
         if raw_code is None or str(raw_code).strip() == "":
-            errors.append(f"{row_num}행: 종목코드가 비어 있습니다.")
+            errors.append(err("종목코드가 비어 있습니다."))
             continue
         code = str(raw_code).strip().upper()
         # 엑셀이 숫자로 인식해 선행 0 손실된 경우 6자리로 패딩 (전부 숫자일 때만)
@@ -816,31 +993,32 @@ def import_stocks_from_excel(path: str) -> list[dict]:
         market = _normalize_excel_market(raw_market, code)
         currency = _normalize_excel_currency(raw_currency, market)
         if market == MARKET_KR and (len(code) != 6 or not code.isalnum()):
-            errors.append(f"{row_num}행: 한국 종목코드 '{code}' 가 6자리 영숫자가 아닙니다.")
+            errors.append(err(f"한국 종목코드 '{code}' 가 6자리 영숫자가 아닙니다."))
             continue
         if market == MARKET_US and not _US_TICKER_RE.match(code):
-            errors.append(f"{row_num}행: 미국 종목코드 '{code}' 가 올바른 티커 형식이 아닙니다.")
+            errors.append(err(f"미국 종목코드 '{code}' 가 올바른 티커 형식이 아닙니다."))
             continue
-        if code in seen_codes:
-            errors.append(f"{row_num}행: 종목코드 '{code}' 가 중복되었습니다.")
+        # 중복은 계좌 안에서만 따진다 — 다른 계좌가 같은 종목을 갖는 것은 정상이다.
+        if (account_name, code) in seen:
+            errors.append(err(f"종목코드 '{code}' 가 같은 계좌 안에서 중복되었습니다."))
             continue
 
         # 평단가/수량 변환. 수량은 소수점 3자리까지 허용한다.
         try:
             avg_price = float(raw_avg) if raw_avg is not None and str(raw_avg).strip() != "" else 0
         except (TypeError, ValueError):
-            errors.append(f"{row_num}행: 평단가 '{raw_avg}' 가 숫자가 아닙니다.")
+            errors.append(err(f"평단가 '{raw_avg}' 가 숫자가 아닙니다."))
             continue
         try:
             quantity = round(float(raw_qty), 3) if raw_qty is not None and str(raw_qty).strip() != "" else 0
         except (TypeError, ValueError):
-            errors.append(f"{row_num}행: 수량 '{raw_qty}' 가 숫자가 아닙니다.")
+            errors.append(err(f"수량 '{raw_qty}' 가 숫자가 아닙니다."))
             continue
         if avg_price < 1:
-            errors.append(f"{row_num}행: 평단가가 1 이상이어야 합니다.")
+            errors.append(err("평단가가 1 이상이어야 합니다."))
             continue
         if quantity <= 0:
-            errors.append(f"{row_num}행: 수량이 0보다 커야 합니다.")
+            errors.append(err("수량이 0보다 커야 합니다."))
             continue
 
         name = str(raw_name).strip() if raw_name is not None and str(raw_name).strip() else code
@@ -856,13 +1034,100 @@ def import_stocks_from_excel(path: str) -> list[dict]:
             try:
                 buy_exchange_rate = float(raw_buy_rate)
             except (TypeError, ValueError):
-                errors.append(f"{row_num}행: 매수환율 '{raw_buy_rate}' 가 숫자가 아닙니다.")
+                errors.append(err(f"매수환율 '{raw_buy_rate}' 가 숫자가 아닙니다."))
                 continue
             if buy_exchange_rate > 0:
                 stock["buy_exchange_rate"] = buy_exchange_rate
 
-        stocks.append(normalize_stock_schema(stock))
-        seen_codes.add(code)
+        stock["_account_name"] = account_name
+        stocks.append(stock)
+        seen.add((account_name, code))
+
+    return stocks, errors
+
+
+def import_stocks_from_excel(path: str) -> tuple[list[dict], list[dict]]:
+    """Excel 파일에서 보유 종목과 계좌를 읽는다.
+
+    반환: (보유 종목 목록, 계좌 목록). 계좌 정보가 없는 파일이면 계좌 목록은 비어
+    있고 종목의 account_id 도 비어 있다 — 호출측이 자기 기본 계좌에 넣으면 된다.
+
+    계좌 정보를 찾는 순서:
+      1. 2번 시트부터의 계좌 시트 (계좌 id·색까지 그대로 복원)
+      2. 1번 시트의 '계좌' 컬럼 (이름만 있으므로 색은 기본값)
+      3. 없음 (계좌 기능 이전 파일)
+
+    검증 실패 시 ValueError 를 발생시킨다 (메시지는 사용자에게 그대로 표시 가능).
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, data_only=True)
+    sheets = list(wb.worksheets)
+    if not sheets or sheets[0].max_row < 1:
+        raise ValueError("시트가 비어 있습니다.")
+
+    main = sheets[0]
+    header_row = _sheet_header(main)
+    missing = [h for h, _ in EXCEL_COLUMNS if h not in header_row]
+    if missing:
+        raise ValueError(
+            "필수 컬럼이 누락되었습니다: " + ", ".join(missing)
+            + f"\n(필요한 헤더: {', '.join(h for h, _ in EXCEL_COLUMNS)})"
+        )
+
+    account_sheets = [ws for ws in sheets[1:] if _is_holdings_sheet(ws)]
+    stocks: list[dict] = []
+    accounts: list[dict] = []
+    errors: list[str] = []
+
+    if account_sheets:
+        # 계좌 시트가 있으면 그쪽이 정본이다 — 1번 시트는 합산본이라 계좌 구분이
+        # 흐리고, 계좌 색·id 도 계좌 시트에만 있다.
+        used_ids: set[str] = set()
+        for ws in account_sheets:
+            meta = _read_account_meta(ws)
+            aid = meta.get("id", "")
+            if not aid or aid in used_ids:
+                aid = new_account_id()
+            used_ids.add(aid)
+            account = normalize_account({
+                "id": aid,
+                "name": meta.get("name") or ws.title,
+                "color": meta.get("color") or DEFAULT_ACCOUNT_COLOR,
+            })
+            if account is None:
+                continue
+            rows, errs = _parse_holding_rows(ws, f"[{ws.title}] ")
+            errors.extend(errs)
+            for s in rows:
+                s.pop("_account_name", None)
+                s["account_id"] = account["id"]
+            stocks.extend(rows)
+            accounts.append(account)
+    else:
+        rows, errs = _parse_holding_rows(main, "")
+        errors.extend(errs)
+        # '계좌' 컬럼이 있으면 이름으로 계좌를 만든다 (처음 나온 순서대로).
+        by_name: dict[str, dict] = {}
+        for s in rows:
+            aname = s.pop("_account_name", "")
+            if not aname:
+                s["account_id"] = ""
+                continue
+            acc = by_name.get(aname)
+            if acc is None:
+                acc = normalize_account({
+                    "id": new_account_id(),
+                    "name": aname,
+                    "color": DEFAULT_ACCOUNT_COLOR,
+                })
+                if acc is None:
+                    s["account_id"] = ""
+                    continue
+                by_name[aname] = acc
+                accounts.append(acc)
+            s["account_id"] = acc["id"]
+        stocks.extend(rows)
 
     if errors:
         # 너무 길지 않게 상위 10개만 보여줌
@@ -873,4 +1138,4 @@ def import_stocks_from_excel(path: str) -> list[dict]:
     if not stocks:
         raise ValueError("가져올 종목이 없습니다. (데이터 행을 찾지 못했습니다)")
 
-    return normalize_stocks_schema(stocks)
+    return normalize_stocks_schema(stocks), accounts

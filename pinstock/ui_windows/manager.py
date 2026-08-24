@@ -48,7 +48,7 @@ from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     ACCOUNT_FILTER_ALL, ensure_accounts, normalize_account_filter,
-    merge_account_duplicates, stock_in_account,
+    merge_account_duplicates, stock_in_account, reconcile_imported_accounts,
     ConfigLoadError, read_config, write_config_atomic, rotate_daily_backup,
     export_stocks_to_excel, import_stocks_from_excel, normalize_stocks_schema,
     normalize_stock_schema,
@@ -1878,7 +1878,8 @@ class WidgetManager:
         }
 
         try:
-            export_stocks_to_excel(self.stocks, path, current_prices, self.usd_krw_rate)
+            export_stocks_to_excel(self.stocks, path, current_prices, self.usd_krw_rate,
+                                   accounts=self.accounts)
         except ImportError:
             QMessageBox.critical(
                 None, "라이브러리 없음",
@@ -1889,10 +1890,45 @@ class WidgetManager:
             QMessageBox.critical(None, "내보내기 실패", f"파일을 저장할 수 없습니다.\n\n{e}")
             return
 
+        # 계좌를 나눠 쓰면 계좌마다 시트가 하나씩 더 들어간다
+        sheets = ("\n(계좌별 시트 %d장 포함)" % len(self.accounts)
+                  if len(self.accounts) > 1 else "")
         QMessageBox.information(
             None, "내보내기 완료",
-            f"{len(self.stocks)}개 종목을 저장했습니다.\n\n{path}"
+            f"{len(self.stocks)}개 종목을 저장했습니다.{sheets}\n\n{path}"
         )
+
+    @staticmethod
+    def _holding_key(stock: dict) -> tuple:
+        """병합 매칭 키. code 만 보면 다른 계좌의 같은 종목이 서로를 덮어쓴다."""
+        return (stock.get("code", ""), stock.get("account_id", ""))
+
+    def _merge_preview_text(self, imported: list[dict], accounts: list[dict],
+                            created: list[dict]) -> str:
+        """병합 결과 미리보기. 계좌를 나눠 쓰면 계좌별로 나눠 보여준다 — 어느 계좌가
+        갱신되는지 모르면 덮어써도 되는 가져오기인지 판단할 수 없다."""
+        existing_keys = {self._holding_key(s) for s in self.stocks}
+        imported_keys = {self._holding_key(s) for s in imported}
+        kept = len(existing_keys - imported_keys)
+
+        if len(accounts) < 2:
+            updated = len(imported_keys & existing_keys)
+            return (f"• 갱신: {updated}개 (기존 종목 평단가/수량 업데이트)\n"
+                    f"• 추가: {len(imported_keys - existing_keys)}개 (새 종목)\n"
+                    f"• 유지: {kept}개 (Excel에 없는 기존 종목)\n")
+
+        created_ids = {a["id"] for a in created}
+        lines = []
+        for acc in accounts:
+            keys = {k for k in imported_keys if k[1] == acc["id"]}
+            if not keys:
+                continue
+            updated = len(keys & existing_keys)
+            added = len(keys - existing_keys)
+            tag = " (새 계좌)" if acc["id"] in created_ids else ""
+            lines.append(f"• {acc.get('name', '')}{tag}: 갱신 {updated} / 추가 {added}")
+        body = "\n".join(lines) if lines else "• 반영할 종목이 없습니다."
+        return body + f"\n\n• 유지: {kept}개 (Excel에 없는 기존 보유분)\n"
 
     # ── Excel 가져오기 ────────────────────────────────────────────────────
     def open_import_dialog(self):
@@ -1905,7 +1941,7 @@ class WidgetManager:
             return
 
         try:
-            imported = import_stocks_from_excel(path)
+            imported, imported_accounts = import_stocks_from_excel(path)
         except ImportError:
             QMessageBox.critical(
                 None, "라이브러리 없음",
@@ -1925,26 +1961,29 @@ class WidgetManager:
             return
         mode = mode_dlg.mode
 
+        # 병합은 가져온 계좌를 기존 계좌에 이어 붙인다 (id → 이름 → 새로 만들기).
+        # imported 는 지역 사본이라 여기서 소속을 고쳐도 취소하면 그대로 버려진다.
+        merged_accounts, created_accounts = ([], [])
+        if mode != "overwrite":
+            merged_accounts, created_accounts = reconcile_imported_accounts(
+                imported, imported_accounts, self.accounts,
+                default_account_id=self._default_account_for_add(),
+            )
+
         # 미리보기 / 최종 확인
         if mode == "overwrite":
+            accs = ("\n계좌도 Excel 의 %d개 구성으로 교체됩니다."
+                    % len(imported_accounts) if imported_accounts else "")
             msg = (
                 f"덮어쓰기 모드입니다.\n\n"
                 f"기존 {len(self.stocks)}개 종목이 모두 삭제되고\n"
-                f"Excel의 {len(imported)}개 종목으로 교체됩니다.\n\n"
+                f"Excel의 {len(imported)}개 종목으로 교체됩니다.{accs}\n\n"
                 "계속할까요?"
             )
         else:
-            new_codes = {s["code"] for s in imported}
-            existing_codes = {s["code"] for s in self.stocks}
-            updated = len(new_codes & existing_codes)
-            added = len(new_codes - existing_codes)
-            msg = (
-                f"병합 모드입니다.\n\n"
-                f"• 갱신: {updated}개 (기존 종목 평단가/수량 업데이트)\n"
-                f"• 추가: {added}개 (새 종목)\n"
-                f"• 유지: {len(existing_codes - new_codes)}개 (Excel에 없는 기존 종목)\n\n"
-                "계속할까요?"
-            )
+            msg = ("병합 모드입니다.\n\n"
+                   + self._merge_preview_text(imported, merged_accounts, created_accounts)
+                   + "\n계속할까요?")
         ret = QMessageBox.question(
             None, "가져오기 확인", msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1965,29 +2004,35 @@ class WidgetManager:
 
         # 새 stocks 리스트 구성
         if mode == "overwrite":
+            # 계좌 구성까지 Excel 것으로 교체. 계좌 정보가 없는 파일이면 기존 계좌를
+            # 그대로 두고 _reconcile_accounts 가 전 종목을 첫 계좌에 배정한다.
+            if imported_accounts:
+                self.accounts = imported_accounts
             new_stocks = normalize_stocks_schema(imported)   # pos 없음 → 다시 spawn 시 기본 위치
         else:
-            by_code = {s["code"]: s for s in self.stocks}
+            self.accounts = merged_accounts
+            by_key = {self._holding_key(s): s for s in self.stocks}
             new_stocks = []
             for s in imported:
-                # 기존 항목이 있으면 pos·계좌 등 부가 정보 보존
-                existing = by_code.get(s["code"])
+                # 기존 항목이 있으면 pos 등 부가 정보 보존
+                existing = by_key.get(self._holding_key(s))
                 base = dict(existing or {})
                 base.update(s)   # 평단가/수량/이름은 Excel 값으로 갱신
                 if existing and existing.get("uid"):
                     # 병합은 기존 보유분의 평단가/수량 갱신이다. Excel 행마다 새로
                     # 발급된 uid 로 덮으면 같은 보유분이 매번 다른 항목이 돼 위젯
-                    # 위치·계좌 소속이 초기화된다.
+                    # 위치가 초기화된다.
                     base["uid"] = existing["uid"]
                 new_stocks.append(base)
-            # Excel 에 없는 기존 종목은 뒤에 그대로 유지
-            imported_codes = {s["code"] for s in imported}
+            # Excel 에 없는 기존 보유분은 뒤에 그대로 유지
+            imported_keys = {self._holding_key(s) for s in imported}
             for s in self.stocks:
-                if s["code"] not in imported_codes:
+                if self._holding_key(s) not in imported_keys:
                     new_stocks.append(s)
             new_stocks = normalize_stocks_schema(new_stocks)
 
         self._rebuild_widgets(new_stocks)
+        self._sync_accounts_to_widgets()
 
         QMessageBox.information(
             None, "가져오기 완료",
