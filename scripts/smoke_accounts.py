@@ -509,6 +509,7 @@ def _run(log_fp):
     assert [a["id"] for a in wsaved["accounts"]] == ["acc1", "acc2"], "계좌가 갈렸다"
     assert wsaved["selected_account"] == "acc2"
     assert wsaved["stocks"][0]["uid"] == "u2", "저장에 uid 가 갈렸다"
+    wmgr.dispose()
     for _w in list(wmgr.widgets.values()):
         _w.close()
     log("[ok] 17. Windows 매니저 — 위젯이 uid 키 / 계좌·선택 복원 / 한쪽만 삭제")
@@ -563,6 +564,7 @@ def _run(log_fp):
     pmgr._on_delete("p1")
     assert pmgr.widgets["p2"].is_polling, "폴러가 삭제됐는데 승계되지 않았다"
     assert "005930" in price_calls, "승계한 위젯이 곧바로 폴링을 시작하지 않았다"
+    pmgr.dispose()
     for _w in list(pmgr.widgets.values()):
         _w.close()
     log("[ok] 18. Windows 폴러 — code 당 1개 / 시세 중계 / 폴러 삭제 시 승계")
@@ -657,6 +659,7 @@ def _run(log_fp):
     asaved, _ = storage.read_config()
     assert [a["id"] for a in asaved["accounts"]] == ["acc1"]
     assert asaved["stocks"][0]["uid"] == "a2"
+    amgr.dispose()
     for _w in list(amgr.widgets.values()):
         _w.close()
     log("[ok] 19. Windows 매니저 ↔ 계좌 다이얼로그 — 이동 시 위젯 유지 / 함께 삭제 / 추가 기본 계좌")
@@ -750,6 +753,7 @@ def _run(log_fp):
     assert mmgr.widgets["k1"].pos().x() == 100, "안 움직인 쪽 위젯 위치가 바뀌었다"
     msaved, _ = storage.read_config()
     assert len(msaved["stocks"]) == 1 and msaved["stocks"][0]["uid"] == "k1"
+    mmgr.dispose()
     for _w in list(mmgr.widgets.values()):
         _w.close()
     log("[ok] 20. 계좌 이동 중복 — 가중평균 병합 / 매수환율 재계산 / 취소 시 이동 되돌리기")
@@ -842,6 +846,7 @@ def _run(log_fp):
     assert master.H == _MW.GRID_H + _MW.FOOTER_H, f"카드 높이가 원래대로 안 돌아왔다: {master.H}"
     assert fmgr.account_filter == "ALL", fmgr.account_filter
     assert len(_visible()) == 3, "필터가 전체로 돌아왔는데 숨은 위젯이 있다"
+    fmgr.dispose()
     master.close()
     for _w in list(fmgr.widgets.values()):
         _w.close()
@@ -902,6 +907,7 @@ def _run(log_fp):
     bmgr._sync_account_bars()
     assert all(_bar(u) == ("", False) for u in ("b1", "b2")), "계좌 1개인데 색이 남았다"
 
+    bmgr.dispose()
     for _w in list(bmgr.widgets.values()):
         _w.close()
     log("[ok] 22. 위젯 계좌색 막대 — 전체 보기에서만 / 카드 높이 따라감 / 계좌 1개면 숨김")
@@ -1099,12 +1105,119 @@ def _run(log_fp):
     moved = next(s for s in emgr.stocks
                  if s["code"] == "005930" and s["account_id"] == "acc2")
     assert moved["avg_price"] == 55000, moved
+    emgr.dispose()
     for _w in list(emgr.widgets.values()):
         _w.close()
     log("[ok] 24. Windows Excel 라운드트립 — 전 종목 삭제 후에도 계좌별로 복원")
 
+    # ── 25. 위젯 묶어 옮기기 ───────────────────────────────────────────────
+    # 위젯은 각자 top-level 윈도우라 부모 하나 위에서 고무줄 선택을 할 수 없다.
+    # 오버레이가 영역만 알려 주고, 묶는 것과 함께 옮기는 것은 매니저가 한다.
+    from PyQt6.QtCore import Qt, QRect, QPoint, QPointF
+
+    gcfg = tmpdir / "group_stocks.json"
+    storage.CONFIG_FILE = str(gcfg)
+    storage.PREV_FILE = str(gcfg) + ".prev"
+    storage.BACKUP_FILE = str(gcfg) + ".bak"
+    WM.CONFIG_FILE = str(gcfg)
+    WM.BACKUP_FILE = str(gcfg) + ".bak"
+    gcfg.write_text(json.dumps({
+        "accounts": [{"id": "a1", "name": "기본 계좌", "color": "#89b4fa"}],
+        "selected_account": "ALL",
+        "stocks": [
+            {"code": "005930", "uid": "g1", "account_id": "a1", "name": "삼성전자",
+             "avg_price": 70000, "quantity": 10, "pos": [100, 100]},
+            {"code": "000660", "uid": "g2", "account_id": "a1", "name": "SK하이닉스",
+             "avg_price": 100000, "quantity": 2, "pos": [100, 170]},
+            {"code": "035420", "uid": "g3", "account_id": "a1", "name": "NAVER",
+             "avg_price": 200000, "quantity": 1, "pos": [600, 400]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    for _n in ("fetch_stock", "fetch_us_stock", "fetch_minute_chart",
+               "fetch_daily_chart", "fetch_us_minute_chart", "fetch_us_daily_chart"):
+        setattr(WFW, _n, lambda _c: None)
+    WM.fetch_usd_krw_rate = lambda: None
+
+    gmgr = WM.WidgetManager(app)
+    for _w in gmgr.widgets.values():
+        _w.show()
+
+    # 영역에 걸친 위젯만 묶인다 (완전히 감싸지 않아도 잡힌다)
+    gmgr._on_region_selected(QRect(80, 80, 260, 160))
+    assert sorted(gmgr._selected_uids) == ["g1", "g2"], sorted(gmgr._selected_uids)
+    assert gmgr.widgets["g1"].is_selected and not gmgr.widgets["g3"].is_selected
+
+    pos_before = {u: (w.pos().x(), w.pos().y()) for u, w in gmgr.widgets.items()}
+    gmgr._on_widget_dragged("g1", QPoint(40, 25))
+    pos_after = {u: (w.pos().x(), w.pos().y()) for u, w in gmgr.widgets.items()}
+    assert pos_after["g2"] == (pos_before["g2"][0] + 40, pos_before["g2"][1] + 25),         "묶인 위젯이 같은 이동량만큼 따라오지 않았다"
+    assert pos_after["g3"] == pos_before["g3"], "묶이지 않은 위젯이 움직였다"
+    # 드래그 대상은 위젯이 스스로 움직인다 — 매니저가 또 옮기면 이동량이 두 배가 된다
+    assert pos_after["g1"] == pos_before["g1"]
+
+    # 드래그가 끝나면 바로 저장한다 (여러 개를 한꺼번에 옮긴 뒤라 유실이 아깝다)
+    gmgr.widgets["g1"].move(pos_before["g1"][0] + 40, pos_before["g1"][1] + 25)
+    gmgr._on_widget_drag_finished("g1")
+    gsaved, _ = storage.read_config()
+    gpos = {s["uid"]: s["pos"] for s in gsaved["stocks"]}
+    assert gpos["g2"] == [pos_before["g2"][0] + 40, pos_before["g2"][1] + 25], gpos
+
+    # 묶음 밖 위젯을 누르면 풀린다 — 판단은 앱 전역 이벤트 필터가 한다.
+    # (위젯별 시그널로는 자식 라벨·차트로 가는 클릭을 흘리는 경로가 있었다)
+    from PyQt6.QtGui import QMouseEvent, QKeyEvent
+
+    def _press(widget):
+        pos = QPointF(widget.width() / 2, widget.height() / 2)
+        return QMouseEvent(
+            QMouseEvent.Type.MouseButtonPress, pos,
+            QPointF(widget.mapToGlobal(pos.toPoint())),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier)
+
+    # 묶인 위젯 위를 누르면 유지된다 — 여기서 풀리면 끌려고 누르는 순간 묶음이
+    # 날아가 그룹 이동 자체가 동작하지 않는다.
+    app.sendEvent(gmgr.widgets["g1"], _press(gmgr.widgets["g1"]))
+    assert gmgr._selected_uids, "묶인 위젯을 눌렀는데 풀렸다"
+    # 같은 누름이 자식·네이티브 창으로도 전달된다. 어느 객체가 받든 판단이 같아야 한다.
+    app.sendEvent(gmgr.widgets["g1"].name_lbl, _press(gmgr.widgets["g1"]))
+    assert gmgr._selected_uids, "자식으로 전달된 누름에서 묶음이 풀렸다"
+    app.sendEvent(gmgr.widgets["g1"].window(), _press(gmgr.widgets["g1"]))
+    assert gmgr._selected_uids, "창 객체로 전달된 누름에서 묶음이 풀렸다"
+    # 묶음 밖 위젯을 누르면 풀린다 (자식으로 가는 클릭도 마찬가지)
+    app.sendEvent(gmgr.widgets["g3"].name_lbl, _press(gmgr.widgets["g3"]))
+    assert not gmgr._selected_uids and not gmgr.widgets["g1"].is_selected,         "묶음 밖 위젯을 눌렀는데 안 풀렸다"
+
+    # Esc 로도 풀린다
+    gmgr._on_region_selected(QRect(80, 80, 900, 900))
+    assert gmgr._selected_uids
+    app.sendEvent(gmgr.widgets["g1"], QKeyEvent(
+        QKeyEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+    assert not gmgr._selected_uids, "Esc 로 묶음이 풀리지 않았다"
+
+    # 영역에 아무것도 없으면 안내만 하고 묶지 않는다
+    gmsgs: list = []
+    _orig_info = WM.QMessageBox.information
+    WM.QMessageBox.information = staticmethod(
+        lambda _p, _t, m, *a, **k: gmsgs.append(m))
+    try:
+        gmgr._on_region_selected(QRect(4000, 4000, 50, 50))
+    finally:
+        WM.QMessageBox.information = _orig_info
+    assert not gmgr._selected_uids and gmsgs, gmsgs
+
+    # 자동 배치(위치 초기화)가 돌면 묶음은 의미가 없어지므로 푼다
+    gmgr._on_region_selected(QRect(80, 80, 900, 900))
+    assert gmgr._selected_uids
+    gmgr.reset_positions()
+    assert not gmgr._selected_uids, "자동 배치 뒤에도 묶음이 남았다"
+
+    gmgr.dispose()
+    for _w in list(gmgr.widgets.values()):
+        _w.close()
+    log("[ok] 25. 위젯 묶어 옮기기 — 영역 선택 / 같은 이동량으로 따라옴 / 해제 조건")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 24개 케이스 전부 통과")
+    log("\n[PASS] 25개 케이스 전부 통과")
 
 
 def main() -> int:

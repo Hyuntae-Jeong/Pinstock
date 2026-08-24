@@ -88,6 +88,12 @@ class StockWidget(QWidget):
     # 시세는 시장 데이터라 계좌와 무관하므로 키는 uid 가 아니라 code 다.
     price_fetched  = pyqtSignal(str, object)   # code, 시세 result
     chart_fetched  = pyqtSignal(str, object)   # code, (kind, payload) 또는 None
+    # 묶어 옮기기 — 매니저가 선택 상태를 들고 있고, 여기서는 조작만 알린다.
+    # 묶음 해제 조건(밖을 누름 · Esc)은 위젯이 판단하지 않는다. 위젯이 각자
+    # top-level 창이고 자식이 많아 놓치는 경로가 생기므로 매니저가 앱 전역
+    # 이벤트 필터로 한 곳에서 처리한다.
+    dragged        = pyqtSignal(str, QPoint)   # uid, 이번 이동량 (묶인 위젯도 같이 옮김)
+    drag_finished  = pyqtSignal(str)           # uid — 드래그 끝 (위치 저장)
 
     MIN_W      = 240    # 기본(최소) 가로폭
     COMPACT_H  = 58     # 축소 높이 (2줄 레이아웃, 압축)
@@ -115,6 +121,7 @@ class StockWidget(QWidget):
         self._fetch_started: bool = False
         # 우클릭 → 수정 창의 계좌 선택 행에 쓸 계좌 목록. 매니저가 넣어 준다.
         self._accounts: list[dict] = []
+        self._selected: bool = False   # '위젯 묶어 옮기기' 로 묶인 상태
         # 수정 창에서 계좌를 옮기기 직전의 소속. 매니저가 "같은 계좌에 같은 종목이
         # 겹쳤는지"를 판단하고, 사용자가 합치기를 취소하면 여기로 되돌린다.
         self.prev_account_id: str = ""
@@ -219,19 +226,15 @@ class StockWidget(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # 클릭하면 포커스를 갖는다 — Esc 로 묶음을 풀려면 앱 창 하나는 활성이어야 한다.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.setFixedSize(self.W, self.COMPACT_H)
 
         # ── 카드 배경 프레임
         self.card = QFrame(self)
         self.card.setObjectName("card")
         self.card.setGeometry(0, 0, self.W, self.COMPACT_H)
-        self.card.setStyleSheet(f"""
-            QFrame#card {{
-                background: {C['bg']};
-                border: 1px solid {C['border']};
-                border-radius: {self.RADIUS}px;
-            }}
-        """)
+        self._apply_card_style()
 
         # ── 상단 compact 영역 (좌: 정보 / 우: 당일 sparkline) ──────────
         self.compact = QWidget(self.card)
@@ -416,6 +419,30 @@ class StockWidget(QWidget):
         self._prev_close = float(result["price"] - result["change_price"])
         self._apply_price(result)
         self.price_updated.emit(self.uid)
+
+    def _apply_card_style(self):
+        """묶인 위젯은 테두리를 강조색으로 바꾼다. 테두리 두께는 그대로 1px 라
+        선택/해제로 카드 안쪽 내용이 1px 씩 밀리지 않는다."""
+        border = C["blue"] if self._selected else C["border"]
+        background = C["surface"] if self._selected else C["bg"]
+        self.card.setStyleSheet(f"""
+            QFrame#card {{
+                background: {background};
+                border: 1px solid {border};
+                border-radius: {self.RADIUS}px;
+            }}
+        """)
+
+    def set_selected(self, selected: bool):
+        selected = bool(selected)
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self._apply_card_style()
+
+    @property
+    def is_selected(self) -> bool:
+        return self._selected
 
     def set_account_color(self, color: str | None):
         """계좌색 막대 표시. 빈 값이면 감춘다 — 특정 계좌를 보는 중이면 전 위젯이
@@ -695,12 +722,19 @@ class StockWidget(QWidget):
                 if abs(delta.x()) > self.DRAG_THRESHOLD or abs(delta.y()) > self.DRAG_THRESHOLD:
                     self._moved = True
             if self._moved:
+                before = self.pos()
                 self.move(event.globalPosition().toPoint() - self._drag_pos)
+                if self._selected:
+                    # 묶인 위젯들은 이 위젯이 움직인 만큼 따라 움직인다. 절대 좌표가
+                    # 아니라 이동량을 보내야 서로의 간격이 그대로 유지된다.
+                    self.dragged.emit(self.uid, self.pos() - before)
 
     def mouseReleaseEvent(self, event):
         # 드래그가 아니었으면(거의 안 움직임) = 클릭 → 확장/축소 토글
         if event.button() == Qt.MouseButton.LeftButton and not self._moved:
             self.toggle_expand()
+        elif event.button() == Qt.MouseButton.LeftButton and self._selected:
+            self.drag_finished.emit(self.uid)
         self._drag_pos  = None
         self._press_pos = None
         self._moved     = False

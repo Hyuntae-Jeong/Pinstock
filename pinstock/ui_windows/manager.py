@@ -11,7 +11,7 @@ from datetime import datetime, date
 from PyQt6.QtWidgets import (
     QApplication, QMenu, QSystemTrayIcon, QMessageBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QTimer, QObject, pyqtSignal
 from PyQt6.QtGui import (
     QIcon, QAction, QPixmap, QPainter, QFont, QColor, QBrush, QPen,
 )
@@ -21,6 +21,38 @@ from PyQt6.QtGui import (
 # 하루 1회 — 오늘 이미 확인했으면(last_check_date == 오늘) 껐다 켜도 다시 확인하지 않는다.
 _AUTO_CHECK_STARTUP_DELAY_MS = 5 * 1000        # 앱 시작 후 5초 뒤 (차트 다 뜬 뒤)
 _PREV_ERROR_CHECK_DELAY_MS = 1500              # 시작 직후 1.5초
+
+
+class _SelectionEventFilter(QObject):
+    """'위젯 묶어 옮기기' 의 묶음 해제 조건을 앱 전역에서 한 곳으로 모아 처리한다.
+
+    위젯이 각자 top-level 창이고 라벨·차트 같은 자식이 많아, 위젯별 시그널로는
+    '묶음 밖을 눌렀다' 와 Esc 를 흘리는 경로가 생긴다. QApplication 에 걸어 두면
+    어느 창의 어느 자식으로 가는 이벤트든 여기를 먼저 지난다.
+    """
+
+    def __init__(self, manager):
+        super().__init__()
+        self._manager = manager
+
+    def eventFilter(self, obj, event):
+        m = self._manager
+        if not m._selected_uids:
+            return False
+        etype = event.type()
+        if etype == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            m.clear_widget_selection()
+            return True
+        if (etype == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+                and hasattr(event, "globalPosition")):
+            # 어느 객체가 받았는지로 판단하면 안 된다. 같은 누름이 위젯·자식·네이티브
+            # 창으로 여러 번 전달되는데, 창 객체 차례에는 소속 위젯을 찾지 못해
+            # 묶인 위젯을 끌려고 누른 순간 묶음이 풀렸다. 좌표로 보면 어느 객체가
+            # 받았든 답이 같다.
+            if not m._point_on_selected(event.globalPosition().toPoint()):
+                m.clear_widget_selection()
+        return False
 
 
 class _UpdateCheckSignals(QObject):
@@ -59,6 +91,7 @@ from .theme import C, TRAY_MENU_STYLE
 from .floating_widget import StockWidget, TagGroupWidget
 from .chart_widget import PinController
 from .master_widget import MasterWidget
+from .selection_overlay import RegionSelectOverlay
 from .manage_dialog import (
     AccountManagerDialog,
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
@@ -101,6 +134,12 @@ class WidgetManager:
         self.watch_groups: dict[str, TagGroupWidget] = {}
         # 그룹별 위치/고정 상태 {key: {"pos":[x,y], "pinned":bool}}
         self.watch_group_state: dict[str, dict] = {}
+        # '위젯 묶어 옮기기' 로 묶인 위젯들. 한 번 옮겨도 유지돼 여러 번 미세조정할
+        # 수 있고, Esc · 묶음 밖 위젯 클릭 · 메뉴 재실행 · 우클릭 해제로 풀린다.
+        self._selected_uids: set[str] = set()
+        self._select_overlay: RegionSelectOverlay | None = None
+        self._selection_filter = _SelectionEventFilter(self)
+        app.installEventFilter(self._selection_filter)
         self.uniform_w: int = StockWidget.MIN_W
         self.uniform_watch_w: int = TagGroupWidget.WIDTH   # 관심 그룹 고정 너비 (보유와 별개)
         self.is_hidden: bool = False    # 위젯 전체 숨김 상태
@@ -233,6 +272,8 @@ class WidgetManager:
         - 첫 column이 화면 세로 영역을 넘어가면 그 왼쪽에 새 column을 시작
         - 마스터 위젯이 표시 중이면 자기 모니터의 우상단 첫 자리에 두고,
           모든 column은 마스터 아래 y부터 시작 (마스터보다 위로는 가지 않음)"""
+        # 자동 배치가 돌고 나면 아까 묶어 둔 구성이 더는 의미가 없다
+        self.clear_widget_selection()
         MARGIN_X      = 20   # 화면 우측 여백
         MARGIN_Y      = 60   # 화면 상단 여백
         MARGIN_BOTTOM = 20   # 화면 하단 여백 (이 안쪽으로만 위젯 배치)
@@ -368,6 +409,101 @@ class WidgetManager:
         if self.is_hidden:
             self.toggle_visibility()
 
+    # ── 위젯 묶어 옮기기 ──────────────────────────────────────────────────
+    def start_group_move(self):
+        """영역을 드래그해 위젯을 묶는다. 묶인 위젯 하나를 끌면 함께 움직인다."""
+        if self.is_hidden:
+            QMessageBox.information(
+                None, "위젯 묶어 옮기기",
+                "위젯이 숨겨져 있습니다.\n먼저 위젯을 표시한 뒤 다시 시도해주세요.")
+            return
+        if self._is_click_through_opacity(self.popover_opacity):
+            # 이 투명도에서는 위젯이 클릭 통과 모드라 애초에 끌 수가 없다. 묶기만
+            # 되면 강조 표시만 남고 옮기지 못해 갇힌 것처럼 보인다.
+            QMessageBox.information(
+                None, "위젯 묶어 옮기기",
+                f"투명도가 {int(self.CLICK_THROUGH_OPACITY * 100)}% 이하일 때는"
+                " 위젯이 클릭을 통과시켜 옮길 수 없습니다.\n"
+                "마스터 위젯의 투명도 슬라이더를 올린 뒤 다시 시도해주세요.")
+            return
+        if not any(w.isVisible() for w in self.widgets.values()):
+            QMessageBox.information(
+                None, "위젯 묶어 옮기기", "화면에 표시된 위젯이 없습니다.")
+            return
+
+        self.clear_widget_selection()
+        overlay = RegionSelectOverlay()
+        overlay.region_selected.connect(self._on_region_selected)
+        overlay.cancelled.connect(self._on_region_cancelled)
+        self._select_overlay = overlay
+        overlay.show()
+
+    def _on_region_cancelled(self):
+        self._select_overlay = None
+
+    def _on_region_selected(self, rect):
+        self._select_overlay = None
+        # 영역에 걸치기만 해도 잡는다 — 완전히 감싸도록 요구하면 긴 위젯을 고르기가
+        # 번거롭고, 사용자가 기대하는 고무줄 선택 동작과도 다르다.
+        uids = [uid for uid, w in self.widgets.items()
+                if w.isVisible() and rect.intersects(w.frameGeometry())]
+        if not uids:
+            QMessageBox.information(
+                None, "위젯 묶어 옮기기", "선택한 영역에 위젯이 없습니다.")
+            return
+        self._selected_uids = set(uids)
+        for uid in uids:
+            self.widgets[uid].set_selected(True)
+        # Esc 는 앱 창 하나가 활성일 때만 들어온다. 방금 묶은 위젯에 포커스를 줘
+        # 선택 직후에도 Esc 가 바로 먹히게 한다.
+        first = self.widgets[uids[0]]
+        first.activateWindow()
+        first.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def dispose(self):
+        """앱에 걸어 둔 이벤트 필터를 떼어낸다.
+
+        실사용에서는 매니저가 앱과 수명이 같아 부를 일이 없다. 다만 떼지 않은 채
+        필터 객체가 파괴되면 앱에는 설치된 채로 남아 다음 이벤트에서 죽은 객체를
+        부른다 — 한 프로세스에서 매니저를 여러 번 만드는 테스트에서 실제로 그렇게
+        간헐적 크래시가 났다.
+        """
+        self.clear_widget_selection()
+        if self._selection_filter is not None:
+            self.app.removeEventFilter(self._selection_filter)
+            self._selection_filter = None
+
+    def _point_on_selected(self, global_pos) -> bool:
+        """전역 좌표가 묶인 위젯 위인지. 묶음을 유지할지 풀지의 기준이다."""
+        for uid in self._selected_uids:
+            w = self.widgets.get(uid)
+            if w is not None and w.isVisible() and w.frameGeometry().contains(global_pos):
+                return True
+        return False
+
+    def clear_widget_selection(self):
+        for uid in self._selected_uids:
+            w = self.widgets.get(uid)
+            if w is not None:
+                w.set_selected(False)
+        self._selected_uids.clear()
+
+    def _on_widget_dragged(self, uid: str, delta):
+        if uid not in self._selected_uids:
+            return
+        for other in self._selected_uids:
+            if other == uid:
+                continue
+            w = self.widgets.get(other)
+            if w is not None:
+                w.move(w.pos() + delta)
+
+    def _on_widget_drag_finished(self, uid: str):
+        if uid not in self._selected_uids:
+            return
+        # 여러 개를 한꺼번에 옮긴 뒤라 위치를 바로 저장한다
+        self.save_positions()
+
     # ── 통일 너비 계산/적용 ───────────────────────────────────────────────
     def _calc_uniform_width(self) -> int:
         """모든 종목명 중 가장 긴 이름 기준 통일 너비."""
@@ -490,6 +626,8 @@ class WidgetManager:
 
     def _apply_filters(self):
         """계좌·시장 필터를 위젯 표시와 배치에 반영한다 (필터를 바꿨을 때)."""
+        # 숨겨진 위젯이 묶인 채로 남으면 보이지 않는 것이 따라 움직인다
+        self.clear_widget_selection()
         self._apply_visibility()
         # 관심 그룹도 같은 시장 필터를 적용 — 멤버 구성이 바뀌므로 그룹을 다시 구성
         # (관심종목은 계좌를 타지 않는다 — 전 계좌가 하나의 목록을 공유한다)
@@ -523,6 +661,7 @@ class WidgetManager:
         reset_act  = QAction("📐   위치 초기화", menu)
         watch_reset_act = QAction("📐   관심 위치 초기화", menu)
         gather_act = QAction("🎯   마스터 화면에 정렬", menu)
+        group_move_act = QAction("🔲   위젯 묶어 옮기기", menu)
         self.autostart_act = QAction("🚀   시작 시 자동 실행", menu)
         self.autostart_act.setCheckable(True)
         memo_act   = QAction("📝   메모장",      menu)
@@ -543,6 +682,7 @@ class WidgetManager:
         reset_act.triggered.connect(self.reset_positions)
         watch_reset_act.triggered.connect(self.reset_watch_positions)
         gather_act.triggered.connect(self.gather_to_master_screen)
+        group_move_act.triggered.connect(self.start_group_move)
         self.autostart_act.triggered.connect(self.toggle_autostart)
         memo_act.triggered.connect(self.open_memo_dialog)
         memo_list_act.triggered.connect(self.open_stock_memo_list_dialog)
@@ -573,6 +713,7 @@ class WidgetManager:
         layout_menu.addAction(reset_act)
         layout_menu.addAction(watch_reset_act)
         layout_menu.addAction(gather_act)
+        layout_menu.addAction(group_move_act)
         settings_menu = menu.addMenu("⚙️   설정")
         settings_menu.setStyleSheet(TRAY_MENU_STYLE)
         settings_menu.addAction(self.us_basis_act)
@@ -1068,6 +1209,8 @@ class WidgetManager:
         w.price_updated.connect(lambda _: self._recompute_master())
         w.price_fetched.connect(self._relay_price)
         w.chart_fetched.connect(self._relay_chart)
+        w.dragged.connect(self._on_widget_dragged)
+        w.drag_finished.connect(self._on_widget_drag_finished)
         w.layout_changed.connect(lambda _: self._schedule_visible_widgets_reflow())
         w.set_accounts(self.accounts)
         w.set_account_color(self._account_bar_color(stock))
@@ -1270,6 +1413,9 @@ class WidgetManager:
 
     def _on_opacity_settle(self):
         self._apply_click_through(self.popover_opacity)
+        # 클릭 통과 구간으로 내려가면 묶어 둬도 옮길 수 없다 — 강조만 남지 않게 푼다
+        if self._is_click_through_opacity(self.popover_opacity):
+            self.clear_widget_selection()
         self._save_config()
 
     def _master_toggle_text(self) -> str:
@@ -2043,6 +2189,7 @@ class WidgetManager:
     # ── 종목 리스트 전체 교체 후 위젯 재구성 ─────────────────────────────
     def _rebuild_widgets(self, new_stocks: list[dict]):
         """기존 위젯을 모두 닫고 new_stocks 기준으로 위젯을 다시 생성한다."""
+        self.clear_widget_selection()
         for w in list(self.widgets.values()):
             w.close()
         self.widgets.clear()
@@ -2077,6 +2224,7 @@ class WidgetManager:
         target = self._holding(uid)
         if target is None:
             return
+        self._selected_uids.discard(uid)
         code = target["code"]
         self.stocks = [s for s in self.stocks if s.get("uid") != uid]
         self.widgets.pop(uid, None)
