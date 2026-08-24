@@ -1,7 +1,5 @@
 """포트폴리오 요약 마스터 위젯."""
 
-import sys
-
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QApplication,
     QComboBox, QPushButton, QSlider, QStyle, QStyleOptionSlider,
@@ -11,57 +9,9 @@ from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap
 
 from ..core.storage import ACCOUNT_FILTER_ALL
 from .theme import C
+from .win_chrome import disable_win11_dwm_chrome
 
 
-# ─── Win11 DWM 자동 테두리/그림자/둥근 모서리 차단 ───────────────────────────
-def _disable_win11_dwm_chrome(hwnd: int) -> None:
-    """Windows 가 top-level 윈도우에 기본 적용하는
-    그림자(드롭 섀도) · 얇은 테두리 · 둥근 모서리 효과를 끈다."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        # 1. 윈도우 클래스의 CS_DROPSHADOW 비트 제거 → 시스템 드롭 섀도 차단.
-        #    (이 클래스의 다른 Qt 윈도우들도 함께 그림자 빠짐 — 일반적으로 무난)
-        GCL_STYLE = -26
-        CS_DROPSHADOW = 0x00020000
-        user32 = ctypes.windll.user32
-        try:
-            get_long = user32.GetClassLongPtrW
-            set_long = user32.SetClassLongPtrW
-        except AttributeError:
-            get_long = user32.GetClassLongW
-            set_long = user32.SetClassLongW
-        get_long.restype = ctypes.c_size_t
-        set_long.restype = ctypes.c_size_t
-        cur = get_long(hwnd, GCL_STYLE)
-        if cur & CS_DROPSHADOW:
-            set_long(hwnd, GCL_STYLE, cur & ~CS_DROPSHADOW)
-
-        # 2. DWM NC 렌더링 정책 비활성화 — 일부 환경에서 추가 그림자/테두리 차단.
-        # DWMWA_NCRENDERING_POLICY = 2, DWMNCRP_DISABLED = 1
-        v = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, 2, ctypes.byref(v), ctypes.sizeof(v)
-        )
-        # 3. Win11 둥근 모서리 끔
-        # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_DONOTROUND = 1
-        v = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, 33, ctypes.byref(v), ctypes.sizeof(v)
-        )
-        # 4. Win11 테두리 색 없음
-        # DWMWA_BORDER_COLOR = 34, DWMWA_COLOR_NONE = 0xFFFFFFFE
-        v = ctypes.c_uint32(0xFFFFFFFE)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, 34, ctypes.byref(v), ctypes.sizeof(v)
-        )
-    except Exception:
-        pass
-
-
-# ─── 잠금 상태에서 핸들이 자물쇠로 변하는 슬라이더 ──────────────────────────
 class _OpacitySlider(QSlider):
     """`set_locked(True)` 일 때 기본 동그란 핸들 대신 자물쇠 모양을 그린다.
     슬라이더 자체 상호작용은 그대로 유지 (사용자가 잠금 상태에서도 끌어올릴 수 있음)."""
@@ -129,7 +79,7 @@ class _LockOverlay(QWidget):
     별도 top-level 윈도우라 마스터의 setWindowOpacity 영향을 받지 않아 위젯이
     반투명해져도 자물쇠는 항상 선명히 보인다.
     - 배경: `WA_TranslucentBackground` 로 완전 투명, 자물쇠 픽셀만 보임.
-    - Win11 DWM 의 자동 테두리/둥근 모서리는 `_disable_win11_dwm_chrome` 으로 차단.
+    - Win11 DWM 의 자동 테두리/둥근 모서리는 `disable_win11_dwm_chrome` 으로 차단.
     - `WindowTransparentForInput` 이라 오버레이 위 클릭은 그대로 슬라이더에 떨어짐."""
 
     # 홀수 사이즈 — 픽셀 격자에 정확히 한가운데가 존재해야 자물쇠가 좌상단으로 안 밀림.
@@ -157,7 +107,7 @@ class _LockOverlay(QWidget):
         super().showEvent(event)
         # hide → show 사이에 Windows 가 per-window DWM 속성을 기본값으로 되돌리는
         # 경우가 있어서 (그림자/테두리 부활) 매 show 마다 다시 적용. 호출 비용은 매우 가벼움.
-        _disable_win11_dwm_chrome(int(self.winId()))
+        disable_win11_dwm_chrome(int(self.winId()))
 
 
 # ─── 투명도 슬라이더 전용 윈도우 ──────────────────────────────────────────────
@@ -208,7 +158,7 @@ class _SliderWindow(QFrame):
 
     def showEvent(self, event):
         super().showEvent(event)
-        _disable_win11_dwm_chrome(int(self.winId()))
+        disable_win11_dwm_chrome(int(self.winId()))
 
 
 class _AccountCombo(QComboBox):
@@ -614,6 +564,9 @@ class MasterWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # 카드 모서리 바깥에 Win11 이 그리는 회색 테두리를 막는다. hide → show 나
+        # 투명도 잠금(setWindowFlag) 으로 윈도우가 재생성되면 되살아나므로 매번 적용.
+        disable_win11_dwm_chrome(int(self.winId()))
         self.sync_aux_windows()
 
     def hideEvent(self, event):

@@ -15,6 +15,7 @@ from ..core.api import (
 )
 from ..core.portfolio import is_us_stock, is_index, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
+from .win_chrome import disable_win11_dwm_chrome
 from .chart_widget import SparklineWidget, ChartPopup, aggregate_candles
 from .manage_dialog import StockDialog
 
@@ -181,6 +182,12 @@ class StockWidget(QWidget):
     @property
     def is_polling(self) -> bool:
         return self._polling
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 카드 모서리 바깥에 Win11 이 그리는 회색 테두리를 막는다. 투명도 잠금
+        # (setWindowFlag) 으로 윈도우가 재생성되면 되살아나므로 매번 적용.
+        disable_win11_dwm_chrome(int(self.winId()))
 
     def closeEvent(self, event):
         """닫힌 위젯의 타이머를 멈춘다.
@@ -1134,6 +1141,11 @@ class TagGroupWidget(QWidget):
         self._relayout()
         if self.pinned:
             self.header.set_pinned(True)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 종목 위젯과 같은 이유 — Win11 이 카드 바깥에 그리는 회색 테두리 차단
+        disable_win11_dwm_chrome(int(self.winId()))
 
     def _panel_h(self) -> int:
         return self.PANEL_TOP + len(self.rows) * CompactWatchRow.ROW_H + self.PANEL_BOTTOM

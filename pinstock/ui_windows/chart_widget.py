@@ -8,6 +8,7 @@ from PyQt6.QtGui import (QPainter, QColor, QBrush, QPainterPath, QPen, QFont, QF
                          QShortcut, QKeySequence)
 
 from .theme import C, MA_COLORS
+from .win_chrome import disable_win11_dwm_chrome
 
 
 # ─── 일봉 → 주봉/월봉 집계 ────────────────────────────────────────────────────
@@ -629,6 +630,11 @@ class ChartPopup(QWidget):
     PAD = 2   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
 
     close_requested = pyqtSignal()   # ✕ 클릭 (고정 모드 전용)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 팝업도 프레임리스라 Win11 이 모서리 바깥에 회색 테두리를 그린다
+        disable_win11_dwm_chrome(int(self.winId()))
 
     def __init__(self, chart_w: int, chart_h: int, parent=None, interactive: bool = False):
         super().__init__(parent)
