@@ -1241,9 +1241,10 @@ class WideEditorDelegate(QStyledItemDelegate):
 class ManageStocksDialog(QDialog):
     """현재 보유 종목들을 표 형태로 일괄 관리하는 다이얼로그."""
 
-    COLS = ["종목명", "종목코드", "계좌", "매입단가", "수량", "평가손익", "표시"]
+    # 0번 칸 헤더는 비워두고(라벨 ""), 그 자리에 '전체 선택' 체크박스를 올린다.
+    COLS = ["", "종목명", "종목코드", "계좌", "매입단가", "수량", "평가손익", "표시"]
     # 컬럼이 늘어나도 인덱스를 손으로 세지 않도록 이름을 붙여 둔다.
-    COL_NAME, COL_CODE, COL_ACCOUNT, COL_AVG, COL_QTY, COL_PROFIT, COL_SHOW = range(7)
+    COL_CHECK, COL_NAME, COL_CODE, COL_ACCOUNT, COL_AVG, COL_QTY, COL_PROFIT, COL_SHOW = range(8)
 
     def __init__(self, stocks: list[dict], current_prices: dict | None = None,
                  usd_krw_rate: float | None = None, accounts: list[dict] | None = None,
@@ -1259,9 +1260,10 @@ class ManageStocksDialog(QDialog):
         # 계좌가 1개면 고르고 옮길 대상이 없다 — 컬럼과 필터를 통째로 감춘다.
         self._accounts_enabled: bool = len(self._accounts) > 1
         self._row_stock_indexes: list[int] = []
+        self._check_boxes: list[QCheckBox] = []   # 행별 선택 체크박스 (여러 개 한 번에 삭제용)
 
         self.setWindowTitle("종목 관리")
-        self.setMinimumSize(700, 400)
+        self.setMinimumSize(740, 400)
         self.setStyleSheet(DIALOG_STYLE)
 
         root = QVBoxLayout(self)
@@ -1321,6 +1323,8 @@ class ManageStocksDialog(QDialog):
 
         # 컬럼 너비 정책
         hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(self.COL_CHECK, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(self.COL_CHECK, 44)
         hdr.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
         for col in (self.COL_CODE, self.COL_AVG, self.COL_QTY, self.COL_PROFIT):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
@@ -1357,31 +1361,49 @@ class ManageStocksDialog(QDialog):
 
         root.addWidget(self.table, 1)
 
+        # '선택' 헤더 칸에 올려두는 전체 선택 체크박스 (관심종목 관리와 같은 방식).
+        # 헤더는 위젯 배치를 직접 지원하지 않아 오버레이로 얹고 위치를 따라 맞춘다.
+        self._header_check = QCheckBox()
+        self._header_check.setToolTip("전체 선택 / 해제")
+        self._header_check.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
+        self._header_check.toggled.connect(self._toggle_all_checks)
+        self._header_check_holder = self._centered(self._header_check)
+        self._header_check_holder.setParent(hdr)
+        hdr.sectionResized.connect(lambda *a: self._reposition_header_check())
+        hdr.geometriesChanged.connect(self._reposition_header_check)
+
         # ── 행 액션 버튼 (추가 / 수정 / 삭제) ─────────────────────────────
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
 
-        add_btn = QPushButton("➕  추가")
-        add_btn.clicked.connect(self._add)
-        action_row.addWidget(add_btn)
+        self.add_btn = QPushButton("➕  추가")
+        self.add_btn.clicked.connect(self._add)
+        action_row.addWidget(self.add_btn)
 
-        edit_btn = QPushButton("✏  수정")
-        edit_btn.setProperty("flat", "true")
-        edit_btn.clicked.connect(self._edit_selected)
-        action_row.addWidget(edit_btn)
+        self.edit_btn = QPushButton("✏  수정")
+        self.edit_btn.setProperty("flat", "true")
+        self.edit_btn.clicked.connect(self._edit_selected)
+        action_row.addWidget(self.edit_btn)
 
-        del_btn = QPushButton("🗑  삭제")
-        del_btn.setProperty("flat", "true")
-        del_btn.clicked.connect(self._delete_selected)
-        action_row.addWidget(del_btn)
+        self.del_btn = QPushButton("🗑  삭제")
+        self.del_btn.setProperty("flat", "true")
+        self.del_btn.setToolTip("체크한 종목을 모두 삭제합니다. 체크가 없으면 선택한 행을 삭제합니다.")
+        self.del_btn.clicked.connect(self._delete_selected)
+        action_row.addWidget(self.del_btn)
+
+        # 여러 개 체크했을 때 왜 추가/수정/정렬이 잠겼는지 알려 주는 안내
+        self._multi_hint = QLabel("")
+        self._multi_hint.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
+        self._multi_hint.setVisible(False)
+        action_row.addWidget(self._multi_hint)
 
         action_row.addStretch()
 
         # 평가손익 내림차순 정렬 (명시적 버튼, 자동 정렬은 안 함)
-        sort_btn = QPushButton("📊  평가손익 정렬")
-        sort_btn.setProperty("flat", "true")
-        sort_btn.clicked.connect(self._sort_by_profit_desc)
-        action_row.addWidget(sort_btn)
+        self.sort_btn = QPushButton("📊  평가손익 정렬")
+        self.sort_btn.setProperty("flat", "true")
+        self.sort_btn.clicked.connect(self._sort_by_profit_desc)
+        action_row.addWidget(self.sort_btn)
 
         root.addLayout(action_row)
 
@@ -1424,7 +1446,10 @@ class ManageStocksDialog(QDialog):
     def _sync_drag_enabled(self):
         """행 순서 드래그는 표가 전체 목록일 때만 허용한다. 걸러진 표에서 끌면
         화면에 없는 종목을 건너뛴 자리로 옮겨져 순서가 엉뚱해진다."""
-        filtered = self._market_filter != "ALL" or self._account_filter != ACCOUNT_FILTER_ALL
+        # 체크로 여러 종목을 고른 동안에도 잠근다 — 표를 다시 그리면 체크가 다 풀린다.
+        filtered = (self._market_filter != "ALL"
+                    or self._account_filter != ACCOUNT_FILTER_ALL
+                    or self._checked_count() > 0)
         self.table.setDragEnabled(not filtered)
         self.table.setAcceptDrops(not filtered)
         self.table.viewport().setAcceptDrops(not filtered)
@@ -1486,6 +1511,7 @@ class ManageStocksDialog(QDialog):
         try:
             self.table.setRowCount(0)
             self._row_stock_indexes = []
+            self._check_boxes = []
             for stock_idx, s in enumerate(self._stocks):
                 if not self._matches_filter(s):
                     continue
@@ -1499,10 +1525,95 @@ class ManageStocksDialog(QDialog):
 
         self._sync_account_col_width()
 
+        # 표를 다시 그리면 모든 체크가 풀리므로 헤더 '전체 선택'도 초기화(신호 차단)
+        if getattr(self, "_header_check", None) is not None:
+            self._header_check.blockSignals(True)
+            self._header_check.setChecked(False)
+            self._header_check.blockSignals(False)
+        self._sync_multi_select_ui()
+
         if select_row is not None and select_row in self._row_stock_indexes:
             self.table.selectRow(self._row_stock_indexes.index(select_row))
 
+    @staticmethod
+    def _centered(widget: QWidget) -> QWidget:
+        """셀 위젯을 가운데 정렬해 감싸는 컨테이너."""
+        box = QWidget()
+        hl = QHBoxLayout(box)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addStretch()
+        hl.addWidget(widget)
+        hl.addStretch()
+        return box
+
+    def _reposition_header_check(self):
+        """전체 선택 체크박스 오버레이를 헤더 0번 칸과 같은 영역에 맞춘다.
+        오버레이 내부 _centered 레이아웃이 체크박스를 가운데로 둬 행 체크박스와
+        좌우가 정확히 정렬된다 (sizeHint 의존 픽셀 계산을 쓰지 않는다)."""
+        holder = getattr(self, "_header_check_holder", None)
+        if holder is None:
+            return
+        hdr = self.table.horizontalHeader()
+        holder.setGeometry(hdr.sectionViewportPosition(self.COL_CHECK), 0,
+                           hdr.sectionSize(self.COL_CHECK), hdr.height())
+        holder.show()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reposition_header_check()
+
+    # ── 체크 선택 (여러 종목 = 삭제 전용 모드) ────────────────────────────
+    def _toggle_all_checks(self, checked: bool):
+        for cb in self._check_boxes:
+            cb.setChecked(checked)
+
+    def _checked_count(self) -> int:
+        return sum(1 for cb in getattr(self, "_check_boxes", []) if cb.isChecked())
+
+    def _checked_stock_indexes(self) -> list[int]:
+        """체크된 행 → self._stocks 인덱스. 필터가 걸리면 행 번호와 다르다."""
+        out: list[int] = []
+        for row, cb in enumerate(self._check_boxes):
+            if not cb.isChecked():
+                continue
+            idx = self._stock_index_for_row(row)
+            if idx is not None:
+                out.append(idx)
+        return sorted(set(out))
+
+    def _sync_multi_select_ui(self):
+        """여러 종목을 체크하면 '삭제만' 남긴다.
+
+        추가·수정·정렬 버튼을 비활성으로 돌리고 인라인 편집(평단가/수량)과 드래그
+        정렬도 잠근다 — 어느 종목에 적용되는지 모호한 동작을 아예 못 하게 막는 것이다.
+        하나 이하면 원래대로: 체크한 한 개, 체크가 없으면 선택한 행이 대상이다."""
+        count = self._checked_count()
+        multi = count >= 2
+        for btn in (self.add_btn, self.edit_btn, self.sort_btn):
+            btn.setEnabled(not multi)
+        self.del_btn.setEnabled(True)
+        self._multi_hint.setText(f"{count}개 선택 — 삭제만 가능" if multi else "")
+        self._multi_hint.setVisible(multi)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers if multi else (
+                QAbstractItemView.EditTrigger.DoubleClicked
+                | QAbstractItemView.EditTrigger.EditKeyPressed
+                | QAbstractItemView.EditTrigger.AnyKeyPressed
+            )
+        )
+        self._sync_drag_enabled()
+
     def _fill_row(self, row: int, s: dict, stock_idx: int):
+        # 0번: 선택 체크박스 (여러 개 골라 한 번에 삭제 — 관심종목 관리와 같은 방식)
+        check = QCheckBox()
+        check.setStyleSheet("QCheckBox::indicator { width: 16px; height: 16px; }")
+        check.toggled.connect(lambda _c: self._sync_multi_select_ui())
+        ph_check = QTableWidgetItem("")
+        ph_check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled)
+        self.table.setItem(row, self.COL_CHECK, ph_check)
+        self.table.setCellWidget(row, self.COL_CHECK, self._centered(check))
+        self._check_boxes.append(check)
+
         name  = s.get("name", s["code"])
         code  = s["code"]
         us_stock = is_us_stock(s)
@@ -1571,12 +1682,7 @@ class ManageStocksDialog(QDialog):
             lambda checked, idx=stock_idx: self._on_visibility_toggled(idx, checked)
         )
         # 셀 가운데 정렬용 컨테이너 (드래그-드롭 정렬 시 시각 일관성 유지)
-        container = QWidget()
-        hl = QHBoxLayout(container)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.addStretch()
-        hl.addWidget(toggle)
-        hl.addStretch()
+        container = self._centered(toggle)
         # 셀에 비선택 빈 item 을 깔아 토글 옆 영역 클릭 시 focus/selection
         # 표시가 그려지지 않게 차단 (ItemIsSelectable 제외)
         placeholder = QTableWidgetItem("")
@@ -1663,8 +1769,10 @@ class ManageStocksDialog(QDialog):
 
     # ── 더블클릭: 평단가/수량/계좌/표시는 인라인 처리, 그 외는 종목 수정 팝업 ─
     def _on_double_clicked(self, index):
-        if index.column() in (self.COL_AVG, self.COL_QTY,
+        if index.column() in (self.COL_CHECK, self.COL_AVG, self.COL_QTY,
                               self.COL_ACCOUNT, self.COL_SHOW):
+            return
+        if self._checked_count() >= 2:      # 여러 종목 선택 중엔 삭제만
             return
         self._edit_selected()
 
@@ -1828,8 +1936,14 @@ class ManageStocksDialog(QDialog):
         self._rebuild_table(select_row=len(self._stocks) - 1)
 
     def _edit_selected(self):
-        row = self.table.currentRow()
-        stock_idx = self._stock_index_for_row(row)
+        # 버튼은 비활성이지만 키보드/더블클릭 등 다른 경로가 있어 여기서도 한 번 더 막는다.
+        checked = self._checked_stock_indexes()
+        if len(checked) >= 2:
+            QMessageBox.information(
+                self, "수정", "여러 종목을 선택한 상태에서는 삭제만 할 수 있습니다."
+            )
+            return
+        stock_idx = checked[0] if checked else self._stock_index_for_row(self.table.currentRow())
         if stock_idx is None:
             return
         dlg = StockDialog(parent=self, data=self._stocks[stock_idx],
@@ -1849,21 +1963,33 @@ class ManageStocksDialog(QDialog):
         self._rebuild_table(select_row=stock_idx)
 
     def _delete_selected(self):
-        row = self.table.currentRow()
-        stock_idx = self._stock_index_for_row(row)
-        if stock_idx is None:
+        # 체크된 행이 있으면 그 전부를, 없으면 지금 선택된 행 하나를 지운다.
+        targets = self._checked_stock_indexes()
+        if not targets:
+            idx = self._stock_index_for_row(self.table.currentRow())
+            if idx is not None:
+                targets = [idx]
+        if not targets:
+            QMessageBox.information(self, "삭제", "삭제할 종목을 체크하거나 선택하세요.")
             return
-        name = self._stocks[stock_idx].get("name", self._stocks[stock_idx]["code"])
+
+        if len(targets) == 1:
+            s = self._stocks[targets[0]]
+            msg = f"'{s.get('name', s['code'])}' 을(를) 삭제할까요?"
+        else:
+            msg = f"선택한 종목 {len(targets)}개를 삭제할까요?"
         ret = QMessageBox.question(
-            self, "삭제 확인",
-            f"'{name}' 을(를) 삭제할까요?",
+            self, "삭제 확인", msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if ret != QMessageBox.StandardButton.Yes:
             return
-        self._stocks.pop(stock_idx)
-        next_sel = min(stock_idx, len(self._stocks) - 1) if self._stocks else None
+
+        for i in sorted(targets, reverse=True):   # 뒤에서부터 지워 인덱스 밀림 방지
+            if 0 <= i < len(self._stocks):
+                self._stocks.pop(i)
+        next_sel = min(targets[0], len(self._stocks) - 1) if self._stocks else None
         self._rebuild_table(select_row=next_sel)
 
     def get_stocks(self) -> list[dict]:

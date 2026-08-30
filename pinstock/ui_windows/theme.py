@@ -136,6 +136,17 @@ QPushButton[flat="true"] {{
 QPushButton[flat="true"]:hover {{
     background: {C['surface2']};
 }}
+/* 비활성 버튼 — 배경·글자를 함께 죽여 '지금은 못 누른다'가 눈에 보이게 한다.
+   :disabled 규칙이 없으면 setEnabled(False) 를 해도 겉모습이 그대로라 사용자는
+   버튼이 고장 난 줄 안다. */
+QPushButton:disabled {{
+    background: {C['surface']};
+    color: {C['surface2']};
+}}
+QPushButton[flat="true"]:disabled {{
+    background: {C['bg2']};
+    color: {C['surface2']};
+}}
 QTableWidget {{
     background: {C['bg2']};
     color: {C['text']};

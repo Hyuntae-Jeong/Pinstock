@@ -1216,8 +1216,75 @@ def _run(log_fp):
         _w.close()
     log("[ok] 25. 위젯 묶어 옮기기 — 영역 선택 / 같은 이동량으로 따라옴 / 해제 조건")
 
+    # ── 26. 종목 관리 — 체크박스로 여러 종목 선택 = 삭제 전용 ────────────────
+    # 여러 종목을 골라 놓고 '수정'이나 인라인 편집이 열려 있으면 어느 보유분에
+    # 적용되는지 정할 수 없다. 그래서 2개 이상 체크한 동안에는 삭제만 남긴다.
+    EDIT_ON = (md.QAbstractItemView.EditTrigger.DoubleClicked
+               | md.QAbstractItemView.EditTrigger.EditKeyPressed
+               | md.QAbstractItemView.EditTrigger.AnyKeyPressed)
+    NO_EDIT = md.QAbstractItemView.EditTrigger.NoEditTriggers
+
+    ms = md.ManageStocksDialog([dict(s) for s in mixed])   # acc1·acc2·acc3 각 1종목
+    assert len(ms._check_boxes) == ms.table.rowCount() == 3, len(ms._check_boxes)
+    assert ms.table.cellWidget(0, ms.COL_CHECK) is not None, "행 체크박스가 없다"
+    assert ms.add_btn.isEnabled() and ms.edit_btn.isEnabled() and ms.sort_btn.isEnabled()
+    assert ms.table.editTriggers() == EDIT_ON, "체크가 없는데 인라인 편집이 잠겼다"
+
+    ms._check_boxes[0].setChecked(True)                    # 1개 = 평소대로
+    assert ms.edit_btn.isEnabled() and ms.table.editTriggers() == EDIT_ON
+    ms._check_boxes[2].setChecked(True)                    # 2개 = 삭제만
+    assert not ms.add_btn.isEnabled(),  "여러 개 선택인데 추가가 열려 있다"
+    assert not ms.edit_btn.isEnabled(), "여러 개 선택인데 수정이 열려 있다"
+    assert not ms.sort_btn.isEnabled(), "여러 개 선택인데 정렬이 열려 있다"
+    assert ms.del_btn.isEnabled(),      "삭제까지 잠겼다"
+    assert ms.table.editTriggers() == NO_EDIT, "여러 개 선택인데 인라인 편집이 열려 있다"
+    assert ms.table.dragDropMode() != INTERNAL, "체크 중엔 순서 드래그를 잠가야 한다"
+
+    # 버튼만 잠그면 더블클릭/키보드로 새어 들어간다 — 코드 경로도 막혔는지 확인
+    _opened: list = []
+    md.StockDialog.exec = lambda self: _opened.append(1) or 0
+    _q, _i = md.QMessageBox.question, md.QMessageBox.information
+    md.QMessageBox.question = classmethod(lambda cls, *a, **k: md.QMessageBox.StandardButton.Yes)
+    md.QMessageBox.information = classmethod(lambda cls, *a, **k: None)
+    try:
+        ms._edit_selected()
+        assert not _opened, "여러 개 선택인데 수정 창이 떴다"
+
+        # 헤더 체크박스 = 전체 선택 / 해제
+        ms._header_check.setChecked(True)
+        assert ms._checked_stock_indexes() == [0, 1, 2], ms._checked_stock_indexes()
+        ms._header_check.setChecked(False)
+        assert ms._checked_count() == 0
+
+        # 시장 필터가 걸려도 '표의 행'이 아니라 '종목'을 지운다
+        ms._set_market_filter(md.MARKET_US)                # mixed 중 NVDA 1건
+        assert [ms.table.item(r, ms.COL_CODE).text()
+                for r in range(ms.table.rowCount())] == ["NVDA"]
+        ms._check_boxes[0].setChecked(True)
+        ms._delete_selected()
+        assert "NVDA" not in [s["code"] for s in ms.get_stocks()], \
+            [s["code"] for s in ms.get_stocks()]
+        assert len(ms.get_stocks()) == 2
+
+        # 삭제하고 나면 체크가 풀리고 버튼도 되돌아온다
+        assert ms._checked_count() == 0 and not ms._header_check.isChecked()
+        assert ms.add_btn.isEnabled() and ms.table.editTriggers() == EDIT_ON
+
+        # 체크가 하나도 없으면 예전처럼 '선택한 행' 하나만 지운다
+        ms._set_market_filter("ALL")
+        before = [s["uid"] for s in ms.get_stocks()]
+        ms.table.setCurrentCell(0, ms.COL_NAME)            # selectRow 는 current 를 안 옮긴다
+        ms._delete_selected()
+        assert [s["uid"] for s in ms.get_stocks()] == before[1:], \
+            "체크가 없을 때 선택한 행 하나만 지워지지 않았다"
+    finally:
+        del md.StockDialog.exec
+        md.QMessageBox.question, md.QMessageBox.information = _q, _i
+    ms.deleteLater()
+    log("[ok] 26. 종목 관리 — 체크 여러 개면 삭제만 / 체크 삭제 / 체크 없으면 선택 행")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 25개 케이스 전부 통과")
+    log("\n[PASS] 26개 케이스 전부 통과")
 
 
 def main() -> int:
