@@ -38,6 +38,50 @@ LEGACY = {
 }
 
 
+_CONFIRM_ORIG: dict = {}
+
+
+def _press_button(label: str) -> None:
+    """다음에 뜨는 확인 팝업에서 label 이 들어간 버튼을 누른 것으로 처리한다.
+
+    확인창은 QMessageBox 가 아니라 ui_common.confirm.ConfirmDialog 다 — 예전처럼
+    QMessageBox.question 을 가로채면 잡히지 않고 실제 모달이 떠서 테스트가 멈춘다."""
+    from pinstock.ui_common import confirm as cf
+    _CONFIRM_ORIG.setdefault(
+        "own", {"exec": cf.ConfirmDialog.__dict__["exec"]}
+        if "exec" in cf.ConfirmDialog.__dict__ else {}
+    )
+
+    def _fake_exec(self):
+        for key, btn in self._buttons:
+            if label in btn.text():
+                self._result_key = key
+                return 1 if key is not None else 0
+        self._result_key = None          # 못 찾으면 취소한 셈 (모달로 안 멈춘다)
+        return 0
+
+    cf.ConfirmDialog.exec = _fake_exec
+
+
+def _restore_msgbox() -> None:
+    """_press_button 이 걸어 둔 가로채기를 걷어낸다.
+
+    ConfirmDialog 는 exec 를 직접 정의하지 않고 QDialog 것을 물려받는다. 그래서
+    `ConfirmDialog.exec = QDialog.exec` 로 되돌리면 sip 이 "unbound method 의 첫
+    인자는 QDialog 여야 한다"며 다음 호출을 거부한다 — 지워서 상속을 되살린다."""
+    from pinstock.ui_common import confirm as cf
+    own = _CONFIRM_ORIG.pop("own", None)
+    if own is None:
+        return
+    if "exec" in own:
+        cf.ConfirmDialog.exec = own["exec"]
+    else:
+        try:
+            del cf.ConfirmDialog.exec
+        except AttributeError:
+            pass
+
+
 def _run(log_fp):
     def log(msg: str) -> None:
         log_fp.write(msg + "\n")
@@ -299,21 +343,8 @@ def _run(log_fp):
     # '이동'과 '함께 삭제'가 각각 정확히 동작하는지 모달을 흉내 내 확인한다.
     from pinstock.ui_windows import manage_dialog as md
 
-    _orig_exec = md.QMessageBox.exec
-    _orig_clicked = md.QMessageBox.clickedButton
-    _orig_question = md.QMessageBox.question
     _orig_info = md.QMessageBox.information
-
-    def _press(label: str):
-        """다음 QMessageBox 에서 label 이 들어간 버튼을 누른 것으로 처리."""
-        md.QMessageBox.exec = lambda self: 0
-        md.QMessageBox.clickedButton = lambda self: next(
-            (b for b in self.buttons() if label in b.text()), None
-        )
-
-    md.QMessageBox.question = classmethod(
-        lambda cls, *a, **k: md.QMessageBox.StandardButton.Yes
-    )
+    _press_button("삭제")          # 따로 지정하지 않은 팝업의 기본 응답
     info_calls: list[str] = []
     md.QMessageBox.information = classmethod(
         lambda cls, _p, _t, text, *a, **k: info_calls.append(text)
@@ -338,7 +369,7 @@ def _run(log_fp):
         md.AccountPickDialog.exec = lambda self: 1
         md.AccountPickDialog.selected_id = lambda self: "acc3"
         dlg.table.selectRow(0)                      # acc1 — 종목 2개
-        _press("이동")
+        _press_button("이동")
         dlg._delete_selected()
         left = dlg.get_stocks()
         assert [a["id"] for a in dlg.get_accounts()] == ["acc2", "acc3"], dlg.get_accounts()
@@ -350,7 +381,7 @@ def _run(log_fp):
         # 같은 상황에서 '종목도 함께 삭제'
         dlg, _, _ = fresh_dialog()
         dlg.table.selectRow(0)
-        _press("함께 삭제")
+        _press_button("함께 삭제")
         dlg._delete_selected()
         left = dlg.get_stocks()
         assert len(left) == 1 and left[0]["account_id"] == "acc2", left
@@ -359,7 +390,7 @@ def _run(log_fp):
         # 취소하면 계좌도 종목도 그대로
         dlg, _, _ = fresh_dialog()
         dlg.table.selectRow(0)
-        _press("취소")
+        _press_button("취소")
         dlg._delete_selected()
         assert len(dlg.get_accounts()) == 3 and len(dlg.get_stocks()) == 3, "취소인데 바뀌었다"
         dlg.deleteLater()
@@ -373,9 +404,7 @@ def _run(log_fp):
         assert info_calls and "최소 1개" in info_calls[0], info_calls
         solo.deleteLater()
     finally:
-        md.QMessageBox.exec = _orig_exec
-        md.QMessageBox.clickedButton = _orig_clicked
-        md.QMessageBox.question = _orig_question
+        _restore_msgbox()
         md.QMessageBox.information = _orig_info
     log("[ok] 14. 계좌 관리 — 순서 변경 / 삭제 시 이동·함께삭제·취소 / 마지막 계좌 보호")
 
@@ -728,12 +757,8 @@ def _run(log_fp):
         setattr(WFW, _n, lambda _c: None)
 
     mmgr = WM.WidgetManager(app)
-    _YES = md.QMessageBox.StandardButton.Yes
-    _NO = md.QMessageBox.StandardButton.No
-    _orig_wm_question = WM.QMessageBox.question
-
     wk2 = mmgr.widgets["k2"]
-    WM.QMessageBox.question = staticmethod(lambda *a, **k: _NO)
+    _press_button("취소")
     try:
         wk2.prev_account_id = "acc2"
         wk2.data["account_id"] = "acc1"          # 수정 창에서 계좌를 옮긴 상태
@@ -741,12 +766,12 @@ def _run(log_fp):
         assert sorted(mmgr.widgets) == ["k1", "k2"], "취소했는데 위젯이 사라졌다"
         assert wk2.data["account_id"] == "acc2", "취소했는데 계좌가 되돌아가지 않았다"
 
-        WM.QMessageBox.question = staticmethod(lambda *a, **k: _YES)
+        _press_button("합치기")
         wk2.prev_account_id = "acc2"
         wk2.data["account_id"] = "acc1"
         mmgr._on_edited("k2")
     finally:
-        WM.QMessageBox.question = _orig_wm_question
+        _restore_msgbox()
 
     assert list(mmgr.widgets) == ["k1"], f"흡수된 위젯이 안 닫혔다: {list(mmgr.widgets)}"
     assert mmgr.stocks[0]["avg_price"] == 66667 and mmgr.stocks[0]["quantity"] == 15
@@ -834,13 +859,12 @@ def _run(log_fp):
         return 1
 
     md.AccountManagerDialog.exec = _keep_one
-    _orig_q = WM.QMessageBox.question
-    WM.QMessageBox.question = staticmethod(lambda *a, **k: md.QMessageBox.StandardButton.Yes)
+    _press_button("합치기")
     try:
         fmgr.open_account_dialog()
     finally:
         md.AccountManagerDialog.exec = _orig_acct_exec2
-        WM.QMessageBox.question = _orig_q
+        _restore_msgbox()
 
     assert not master.account_row.isVisible(), "계좌 1개인데 계좌 줄이 남아 있다"
     assert master.H == _MW.GRID_H + _MW.FOOTER_H, f"카드 높이가 원래대로 안 돌아왔다: {master.H}"
@@ -1077,9 +1101,14 @@ def _run(log_fp):
         def exec(self):
             return 1
 
-    _orig = (WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog)
-    WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog = (
-        _FakeFileDialog, _FakeMsgBox, _FakeImportMode)
+    def _fake_confirm(_parent, _title, text, *a, **k):
+        """가져오기 확인은 ui_common.confirm 을 쓴다 — 본문만 챙기고 '가져오기'."""
+        seen_msgs.append(text)
+        return True
+
+    _orig = (WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog, WM.confirm)
+    WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog, WM.confirm = (
+        _FakeFileDialog, _FakeMsgBox, _FakeImportMode, _fake_confirm)
     try:
         emgr.open_export_dialog()
         assert load_workbook(out_xlsx).sheetnames == ["보유종목", "주계좌", "연금"]
@@ -1096,7 +1125,7 @@ def _run(log_fp):
         assert emgr.stocks == []
         emgr.open_import_dialog()
     finally:
-        WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog = _orig
+        WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog, WM.confirm = _orig
 
     assert "주계좌" in seen_msgs[-1] and "연금" in seen_msgs[-1],         f"확인 메시지가 계좌별로 나뉘지 않았다: {seen_msgs[-1]}"
     assert [a["id"] for a in emgr.accounts] == ["acc1", "acc2"], "계좌가 중복 생성됐다"
@@ -1243,8 +1272,8 @@ def _run(log_fp):
     # 버튼만 잠그면 더블클릭/키보드로 새어 들어간다 — 코드 경로도 막혔는지 확인
     _opened: list = []
     md.StockDialog.exec = lambda self: _opened.append(1) or 0
-    _q, _i = md.QMessageBox.question, md.QMessageBox.information
-    md.QMessageBox.question = classmethod(lambda cls, *a, **k: md.QMessageBox.StandardButton.Yes)
+    _i = md.QMessageBox.information
+    _press_button("삭제")
     md.QMessageBox.information = classmethod(lambda cls, *a, **k: None)
     try:
         ms._edit_selected()
@@ -1279,7 +1308,8 @@ def _run(log_fp):
             "체크가 없을 때 선택한 행 하나만 지워지지 않았다"
     finally:
         del md.StockDialog.exec
-        md.QMessageBox.question, md.QMessageBox.information = _q, _i
+        _restore_msgbox()
+        md.QMessageBox.information = _i
     ms.deleteLater()
     log("[ok] 26. 종목 관리 — 체크 여러 개면 삭제만 / 체크 삭제 / 체크 없으면 선택 행")
 

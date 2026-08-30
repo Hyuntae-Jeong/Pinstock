@@ -33,6 +33,7 @@ from .form_widgets import (
     ArrowDoubleSpinBox, AutoSelectDoubleSpinBox, AutoSelectLineEdit, SearchLineEdit,
     QuantitySpinBox, ToggleSwitch,
 )
+from ..ui_common.confirm import confirm, confirm_delete, choose
 
 _NUMBER_FONT_FAMILY = "Arial"
 
@@ -1978,12 +1979,7 @@ class ManageStocksDialog(QDialog):
             msg = f"'{s.get('name', s['code'])}' 을(를) 삭제할까요?"
         else:
             msg = f"선택한 종목 {len(targets)}개를 삭제할까요?"
-        ret = QMessageBox.question(
-            self, "삭제 확인", msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not confirm_delete(self, "삭제 확인", msg):
             return
 
         for i in sorted(targets, reverse=True):   # 뒤에서부터 지워 인덱스 밀림 방지
@@ -2285,30 +2281,20 @@ class TagManagerDialog(QDialog):
 
         if cnt == 0:
             # 부여된 관심종목이 없으면 단순 확인만
-            ret = QMessageBox.question(
-                self, "태그 삭제",
-                f"태그 '{name}' 을(를) 삭제할까요?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if ret != QMessageBox.StandardButton.Yes:
+            if not confirm_delete(self, "태그 삭제", f"태그 '{name}' 을(를) 삭제할까요?"):
                 return
         else:
             # 부여된 관심종목 처리 방식을 묻는다: 종목도 삭제 / 태그만 해제 / 취소
-            box = QMessageBox(self)
-            box.setWindowTitle("태그 삭제")
-            box.setIcon(QMessageBox.Icon.Question)
-            box.setText(f"태그 '{name}' 을(를) 삭제합니다.")
-            box.setInformativeText(f"이 태그가 부여된 관심종목 {cnt}개를 어떻게 할까요?")
-            del_btn = box.addButton("관심종목도 삭제", QMessageBox.ButtonRole.DestructiveRole)
-            untag_btn = box.addButton("태그만 해제 (종목 유지)", QMessageBox.ButtonRole.AcceptRole)
-            cancel_btn = box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(untag_btn)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked is cancel_btn or clicked is None:
+            picked = choose(
+                self, "태그 삭제",
+                f"태그 '{name}' 을(를) 삭제합니다.",
+                [("delete", "관심종목도 삭제"), ("untag", "태그만 해제")],
+                informative=f"이 태그가 부여된 관심종목 {cnt}개를 어떻게 할까요?",
+                default="untag",
+            )
+            if picked is None:
                 return
-            if clicked is del_btn:
+            if picked == "delete":
                 # 태그가 부여된 관심종목까지 함께 삭제
                 self._watchlist[:] = [
                     w for w in self._watchlist if str(w.get("tag") or "") != tag_id
@@ -2620,31 +2606,21 @@ class AccountManagerDialog(QDialog):
         members = [s for s in self._stocks if s.get("account_id") == account_id]
 
         if not members:
-            ret = QMessageBox.question(
-                self, "계좌 삭제",
-                f"계좌 '{name}' 을(를) 삭제할까요?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if ret != QMessageBox.StandardButton.Yes:
+            if not confirm_delete(self, "계좌 삭제", f"계좌 '{name}' 을(를) 삭제할까요?"):
                 return
         else:
             # 종목이 남아 있으면 어떻게 할지 반드시 물어본다 — 조용히 지우면
             # 평단가/수량은 일일 백업에서만 되살릴 수 있다.
-            box = QMessageBox(self)
-            box.setWindowTitle("계좌 삭제")
-            box.setIcon(QMessageBox.Icon.Question)
-            box.setText(f"계좌 '{name}' 을(를) 삭제합니다.")
-            box.setInformativeText(f"이 계좌의 보유 종목 {len(members)}개를 어떻게 할까요?")
-            move_btn = box.addButton("다른 계좌로 이동", QMessageBox.ButtonRole.AcceptRole)
-            del_btn = box.addButton("종목도 함께 삭제", QMessageBox.ButtonRole.DestructiveRole)
-            cancel_btn = box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(move_btn)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked is cancel_btn or clicked is None:
+            picked = choose(
+                self, "계좌 삭제",
+                f"계좌 '{name}' 을(를) 삭제합니다.",
+                [("delete", "종목도 함께 삭제"), ("move", "다른 계좌로 이동")],
+                informative=f"이 계좌의 보유 종목 {len(members)}개를 어떻게 할까요?",
+                default="move",
+            )
+            if picked is None:
                 return
-            if clicked is del_btn:
+            if picked == "delete":
                 self._stocks[:] = [
                     s for s in self._stocks if s.get("account_id") != account_id
                 ]
@@ -3211,16 +3187,15 @@ class ManageWatchlistDialog(QDialog):
             QMessageBox.information(self, "보유종목 동기화", "보유 중인 종목이 없습니다.")
             return
 
-        ret = QMessageBox.question(
+        if not confirm(
             self, "보유종목 동기화",
-            f"보유 종목 중 태그가 없는 종목을 '{self.HOLDING_TAG_NAME}' 태그로 추가합니다.\n\n"
-            f"· 관심종목에 없으면 추가\n"
-            f"· 이미 있고 태그가 없으면 '{self.HOLDING_TAG_NAME}' 지정\n"
-            f"· 이미 다른 태그가 있으면 그대로 둠\n\n진행할까요?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+            f"보유 종목 중 태그가 없는 종목을 '{self.HOLDING_TAG_NAME}' 태그로 추가할까요?",
+            ok_label="동기화",
+            informative=(f"· 관심종목에 없으면 추가\n"
+                         f"· 이미 있고 태그가 없으면 '{self.HOLDING_TAG_NAME}' 지정\n"
+                         f"· 이미 다른 태그가 있으면 그대로 둠"),
+            default_ok=True,
+        ):
             return
 
         by_code = {str(w.get("code") or "").upper(): w for w in self._items}
@@ -3316,12 +3291,7 @@ class ManageWatchlistDialog(QDialog):
             msg = f"'{nm}' 을(를) 관심종목에서 삭제할까요?"
         else:
             msg = f"선택한 관심종목 {len(targets)}개를 삭제할까요?"
-        ret = QMessageBox.question(
-            self, "삭제 확인", msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not confirm_delete(self, "삭제 확인", msg):
             return
 
         for i in sorted(targets, reverse=True):   # 뒤에서부터 지워 인덱스 밀림 방지

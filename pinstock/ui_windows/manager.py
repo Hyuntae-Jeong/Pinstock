@@ -99,6 +99,7 @@ from .manage_dialog import (
 )
 from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
 from ..ui_common.help_dialog import HelpDialog
+from ..ui_common.confirm import confirm, confirm_delete
 from ..ui_common.memo_dialog import MemoDialog
 from ..ui_common.stock_memo_list_dialog import StockMemoListDialog
 
@@ -1558,16 +1559,15 @@ class WidgetManager:
             f"• {s.get('name') or s['code']} ({names.get(s.get('account_id'), '')})"
             for s in dups
         )
-        ret = QMessageBox.question(
+        ret_ok = confirm(
             None, "보유분 합치기",
-            "계좌를 옮기면서 같은 계좌에 같은 종목이 겹쳤습니다.\n\n"
-            f"{lines}\n\n"
-            "겹친 보유분을 하나로 합칩니다. 평단가는 수량 가중평균으로 다시\n"
-            "계산되며 되돌릴 수 없습니다.\n\n계속할까요?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            "계좌를 옮기면서 같은 계좌에 같은 종목이 겹쳤습니다. 하나로 합칠까요?",
+            ok_label="합치기",
+            informative=(f"{lines}\n\n"
+                         "평단가는 수량 가중평균으로 다시 계산되며 되돌릴 수 없습니다."),
+            default_ok=True,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not ret_ok:
             for s in self.stocks:
                 s["account_id"] = before.get(s["uid"], s.get("account_id"))
             return False
@@ -2130,12 +2130,8 @@ class WidgetManager:
             msg = ("병합 모드입니다.\n\n"
                    + self._merge_preview_text(imported, merged_accounts, created_accounts)
                    + "\n계속할까요?")
-        ret = QMessageBox.question(
-            None, "가져오기 확인", msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not confirm(None, "가져오기 확인", msg,
+                       ok_label="가져오기", default_ok=True):
             return
 
         # 적용 직전에 위치 저장 (병합 모드에서 기존 위치 보존하려면 최신 좌표가 필요)
