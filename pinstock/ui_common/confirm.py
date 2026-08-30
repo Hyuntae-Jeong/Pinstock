@@ -8,14 +8,17 @@ QMessageBox 를 쓰면 세 가지가 딸려 온다. question() 이 자동으로 
 그래서 QDialog 로 직접 만든다. 앱의 DIALOG_STYLE 을 그대로 입혀 버튼 색·모양이
 다른 창과 같고, 버튼들은 같은 폭으로 가운데에 붙는다. 라벨 길이가 제각각이어도
 (삭제 / 가져오기 / 태그만 해제 …) 창이 한쪽으로 기울지 않는다.
+
+제목 표시줄도 뗀다(FramelessDialog). 확인창의 제목("삭제 확인")은 본문("… 삭제할
+까요?")과 같은 말을 두 번 하는 것이라 없어도 잃는 정보가 없다. 대신 닫기 버튼이
+사라져 취소·Esc 가 유일한 탈출구이고, 제목줄이 없으니 빈 곳을 끌어서 옮긴다.
 """
 
-from PyQt6.QtWidgets import (
-    QDialog, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QWidget,
-)
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QWidget
 from PyQt6.QtCore import Qt
 
 from ..ui_windows.theme import C, DIALOG_STYLE
+from .frameless import FramelessDialog, FRAMELESS_CARD_STYLE
 
 # DIALOG_STYLE 의 QLabel 은 폼 라벨용(작은 회색)이라 본문에는 따로 준다.
 _EXTRA_STYLE = f"""
@@ -35,7 +38,7 @@ _BTN_GAP = 8
 _DIALOG_MIN_W = 330
 
 
-class ConfirmDialog(QDialog):
+class ConfirmDialog(FramelessDialog):
     """가운데에 같은 폭 버튼을 나란히 놓는 확인창.
 
     buttons 는 (key, label, primary) 를 표시 순서대로 받는다. primary 인 것만
@@ -47,13 +50,15 @@ class ConfirmDialog(QDialog):
     def __init__(self, parent: QWidget | None, title: str, text: str,
                  informative: str = "", buttons: tuple = (),
                  cancel_label: str = "취소", default_key=None):
-        super().__init__(parent)
+        # 확인창은 자식 창을 띄우지 않으므로 '항상 위'를 켠다 — 늘 위에 떠 있는
+        # 종목 위젯 뒤로 숨으면 모달이라 앱이 멈춘 것처럼 보인다.
+        super().__init__(parent, resizable=False, stay_on_top=True)
         self._result_key = None
-        self.setWindowTitle(title)
-        self.setStyleSheet(DIALOG_STYLE + _EXTRA_STYLE)
+        self.setWindowTitle(title)     # 화면엔 안 보이지만 접근성용으로 남긴다
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE + _EXTRA_STYLE)
         self.setModal(True)
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(26, 24, 26, 20)
         root.setSpacing(12)
 

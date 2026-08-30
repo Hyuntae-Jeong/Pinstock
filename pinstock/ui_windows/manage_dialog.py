@@ -34,6 +34,7 @@ from .form_widgets import (
     QuantitySpinBox, ToggleSwitch,
 )
 from ..ui_common.confirm import confirm, confirm_delete, choose
+from ..ui_common.frameless import FramelessDialog, FRAMELESS_CARD_STYLE
 
 _NUMBER_FONT_FAMILY = "Arial"
 
@@ -648,11 +649,11 @@ class BuyPreviewDialog(QDialog):
 
 
 # ─── 종목 추가 / 수정 다이얼로그 ──────────────────────────────────────────────
-class StockDialog(QDialog):
+class StockDialog(FramelessDialog):
     def __init__(self, parent=None, data: dict | None = None, watch_mode: bool = False,
                  tags: list[dict] | None = None, accounts: list[dict] | None = None,
                  default_account: str | None = None):
-        super().__init__(parent)
+        super().__init__(parent, resizable=False)
         self.is_edit = data is not None
         self.watch_mode = watch_mode   # 관심종목 모드: 평단가/수량 입력 숨김
         self._tags = tags or []        # 관심종목 태그 레지스트리 (추가/수정 시 태그 지정용)
@@ -667,10 +668,10 @@ class StockDialog(QDialog):
         base_h = 270 if watch_mode else 360
         self.setFixedSize(380 if watch_mode else 410,
                           base_h + (46 if self._show_account_row else 0))
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
         self._preview_result: dict | None = None
 
-        layout = QFormLayout(self)
+        layout = QFormLayout(self.card)
         self.form_layout = layout   # _collapse_price_fields 에서 행 접기용
         layout.setSpacing(12)
         layout.setContentsMargins(24, 24, 24, 20)
@@ -1239,7 +1240,7 @@ class WideEditorDelegate(QStyledItemDelegate):
 
 
 # ─── 종목 일괄 관리 다이얼로그 ────────────────────────────────────────────────
-class ManageStocksDialog(QDialog):
+class ManageStocksDialog(FramelessDialog):
     """현재 보유 종목들을 표 형태로 일괄 관리하는 다이얼로그."""
 
     # 0번 칸 헤더는 비워두고(라벨 ""), 그 자리에 '전체 선택' 체크박스를 올린다.
@@ -1265,9 +1266,9 @@ class ManageStocksDialog(QDialog):
 
         self.setWindowTitle("종목 관리")
         self.setMinimumSize(740, 400)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
 
@@ -2434,7 +2435,7 @@ class AccountPickDialog(QDialog):
 
 
 # ─── 계좌 관리 창 ─────────────────────────────────────────────────────────────
-class AccountManagerDialog(QDialog):
+class AccountManagerDialog(FramelessDialog):
     """계좌 추가 / 수정(이름·색상) / 순서 변경 / 삭제.
 
     표의 순서가 곧 팝오버 계좌 버튼의 순서다. 계좌를 지울 때 그 계좌의 보유 종목을
@@ -2451,9 +2452,9 @@ class AccountManagerDialog(QDialog):
 
         self.setWindowTitle("계좌 관리")
         self.setMinimumSize(380, 400)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
 
@@ -2650,7 +2651,7 @@ class AccountManagerDialog(QDialog):
 
 
 # ─── 관심종목 관리 다이얼로그 ─────────────────────────────────────────────────
-class ManageWatchlistDialog(QDialog):
+class ManageWatchlistDialog(FramelessDialog):
     """관심종목을 표로 관리 — 추가 / 삭제 / 표시(ON·OFF) 토글 / 태그 부여.
 
     보유 관리(ManageStocksDialog)와 달리 평단가/수량/평가손익이 없다. 시세는
@@ -2693,9 +2694,9 @@ class ManageWatchlistDialog(QDialog):
         # 긴 종목명(예: State Street SPDR S&P …)이 잘리지 않게 기본 폭을 넉넉히.
         self.setMinimumSize(560, 400)
         self.resize(700, 470)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
 
