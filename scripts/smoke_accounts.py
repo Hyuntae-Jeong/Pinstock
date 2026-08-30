@@ -343,12 +343,10 @@ def _run(log_fp):
     # '이동'과 '함께 삭제'가 각각 정확히 동작하는지 모달을 흉내 내 확인한다.
     from pinstock.ui_windows import manage_dialog as md
 
-    _orig_info = md.QMessageBox.information
+    _orig_info = md.notify
     _press_button("삭제")          # 따로 지정하지 않은 팝업의 기본 응답
     info_calls: list[str] = []
-    md.QMessageBox.information = classmethod(
-        lambda cls, _p, _t, text, *a, **k: info_calls.append(text)
-    )
+    md.notify = lambda _p, _t, text, *a, **k: info_calls.append(text)
     try:
         def fresh_dialog():
             accounts = [dict(a) for a in accounts3]
@@ -405,7 +403,7 @@ def _run(log_fp):
         solo.deleteLater()
     finally:
         _restore_msgbox()
-        md.QMessageBox.information = _orig_info
+        md.notify = _orig_info
     log("[ok] 14. 계좌 관리 — 순서 변경 / 삭제 시 이동·함께삭제·취소 / 마지막 계좌 보호")
 
     # ── 15. 종목 추가·수정 창의 계좌 선택 ───────────────────────────────────
@@ -1074,27 +1072,6 @@ def _run(log_fp):
         def getOpenFileName(*a, **k):
             return (out_xlsx, "")
 
-    class _FakeMsgBox:
-        Icon = md.QMessageBox.Icon
-        StandardButton = md.QMessageBox.StandardButton
-
-        @staticmethod
-        def question(_p, _t, m, *a, **k):
-            seen_msgs.append(m)
-            return md.QMessageBox.StandardButton.Yes
-
-        @staticmethod
-        def information(*a, **k):
-            pass
-
-        @staticmethod
-        def critical(_p, t, m, *a, **k):
-            raise AssertionError(f"{t}: {m}")
-
-        @staticmethod
-        def warning(*a, **k):
-            pass
-
     class _FakeImportMode:
         mode = "merge"
 
@@ -1106,9 +1083,14 @@ def _run(log_fp):
         seen_msgs.append(text)
         return True
 
-    _orig = (WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog, WM.confirm)
-    WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog, WM.confirm = (
-        _FakeFileDialog, _FakeMsgBox, _FakeImportMode, _fake_confirm)
+    def _fake_notify(_parent, title, text, *a, **k):
+        # 실패 안내가 조용히 지나가면 라운드트립이 깨져도 테스트가 통과한다
+        if "실패" in title or "오류" in title:
+            raise AssertionError(f"{title}: {text}")
+
+    _orig = (WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify)
+    WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify = (
+        _FakeFileDialog, _FakeImportMode, _fake_confirm, _fake_notify)
     try:
         emgr.open_export_dialog()
         assert load_workbook(out_xlsx).sheetnames == ["보유종목", "주계좌", "연금"]
@@ -1125,7 +1107,7 @@ def _run(log_fp):
         assert emgr.stocks == []
         emgr.open_import_dialog()
     finally:
-        WM.QFileDialog, WM.QMessageBox, WM.ImportModeDialog, WM.confirm = _orig
+        WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify = _orig
 
     assert "주계좌" in seen_msgs[-1] and "연금" in seen_msgs[-1],         f"확인 메시지가 계좌별로 나뉘지 않았다: {seen_msgs[-1]}"
     assert [a["id"] for a in emgr.accounts] == ["acc1", "acc2"], "계좌가 중복 생성됐다"
@@ -1225,13 +1207,12 @@ def _run(log_fp):
 
     # 영역에 아무것도 없으면 안내만 하고 묶지 않는다
     gmsgs: list = []
-    _orig_info = WM.QMessageBox.information
-    WM.QMessageBox.information = staticmethod(
-        lambda _p, _t, m, *a, **k: gmsgs.append(m))
+    _orig_info = WM.notify
+    WM.notify = lambda _p, _t, m, *a, **k: gmsgs.append(m)
     try:
         gmgr._on_region_selected(QRect(4000, 4000, 50, 50))
     finally:
-        WM.QMessageBox.information = _orig_info
+        WM.notify = _orig_info
     assert not gmgr._selected_uids and gmsgs, gmsgs
 
     # 자동 배치(위치 초기화)가 돌면 묶음은 의미가 없어지므로 푼다
@@ -1272,9 +1253,9 @@ def _run(log_fp):
     # 버튼만 잠그면 더블클릭/키보드로 새어 들어간다 — 코드 경로도 막혔는지 확인
     _opened: list = []
     md.StockDialog.exec = lambda self: _opened.append(1) or 0
-    _i = md.QMessageBox.information
+    _i = md.notify
     _press_button("삭제")
-    md.QMessageBox.information = classmethod(lambda cls, *a, **k: None)
+    md.notify = lambda *a, **k: None
     try:
         ms._edit_selected()
         assert not _opened, "여러 개 선택인데 수정 창이 떴다"
@@ -1309,7 +1290,7 @@ def _run(log_fp):
     finally:
         del md.StockDialog.exec
         _restore_msgbox()
-        md.QMessageBox.information = _i
+        md.notify = _i
     ms.deleteLater()
     log("[ok] 26. 종목 관리 — 체크 여러 개면 삭제만 / 체크 삭제 / 체크 없으면 선택 행")
 

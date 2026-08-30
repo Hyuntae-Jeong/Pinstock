@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, date
 
 from PyQt6.QtWidgets import (
-    QApplication, QMenu, QSystemTrayIcon, QMessageBox, QFileDialog,
+    QApplication, QMenu, QSystemTrayIcon, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QEvent, QTimer, QObject, pyqtSignal
 from PyQt6.QtGui import (
@@ -97,9 +97,9 @@ from .manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog, ImportModeDialog,
     fetch_quote_for_stock,
 )
-from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
+from ..ui_common.update_dialog import UpdateDialog
 from ..ui_common.help_dialog import HelpDialog
-from ..ui_common.confirm import confirm, confirm_delete
+from ..ui_common.confirm import confirm, confirm_delete, notify
 from ..ui_common.memo_dialog import MemoDialog
 from ..ui_common.stock_memo_list_dialog import StockMemoListDialog
 
@@ -414,21 +414,21 @@ class WidgetManager:
     def start_group_move(self):
         """영역을 드래그해 위젯을 묶는다. 묶인 위젯 하나를 끌면 함께 움직인다."""
         if self.is_hidden:
-            QMessageBox.information(
+            notify(
                 None, "위젯 묶어 옮기기",
                 "위젯이 숨겨져 있습니다.\n먼저 위젯을 표시한 뒤 다시 시도해주세요.")
             return
         if self._is_click_through_opacity(self.popover_opacity):
             # 이 투명도에서는 위젯이 클릭 통과 모드라 애초에 끌 수가 없다. 묶기만
             # 되면 강조 표시만 남고 옮기지 못해 갇힌 것처럼 보인다.
-            QMessageBox.information(
+            notify(
                 None, "위젯 묶어 옮기기",
                 f"투명도가 {int(self.CLICK_THROUGH_OPACITY * 100)}% 이하일 때는"
                 " 위젯이 클릭을 통과시켜 옮길 수 없습니다.\n"
                 "마스터 위젯의 투명도 슬라이더를 올린 뒤 다시 시도해주세요.")
             return
         if not any(w.isVisible() for w in self.widgets.values()):
-            QMessageBox.information(
+            notify(
                 None, "위젯 묶어 옮기기", "화면에 표시된 위젯이 없습니다.")
             return
 
@@ -449,7 +449,7 @@ class WidgetManager:
         uids = [uid for uid, w in self.widgets.items()
                 if w.isVisible() and rect.intersects(w.frameGeometry())]
         if not uids:
-            QMessageBox.information(
+            notify(
                 None, "위젯 묶어 옮기기", "선택한 영역에 위젯이 없습니다.")
             return
         self._selected_uids = set(uids)
@@ -880,7 +880,7 @@ class WidgetManager:
         if not self._config_warning:
             return
         msg, self._config_warning = self._config_warning, None
-        show_topmost_message(QMessageBox.Icon.Warning, "설정 파일 오류", msg)
+        notify(None, "설정 파일 오류", msg)
 
     def _reconcile_accounts(self):
         """계좌 불변식을 다시 세운다 — 보유 목록이 바뀐 뒤/저장 직전에 호출.
@@ -1283,7 +1283,7 @@ class WidgetManager:
                 current_price = float(result["price"])
                 widget.current_price = current_price
         if not current_price:
-            QMessageBox.warning(
+            notify(
                 None,
                 "현재가 없음",
                 "현재가를 확인할 수 없어 예상 평단가를 계산할 수 없습니다.",
@@ -1623,13 +1623,13 @@ class WidgetManager:
         d["account_id"] = d.get("account_id") or self._default_account_for_add()
         if any(s["code"] == code and s.get("account_id") == d["account_id"]
                for s in self.stocks):
-            QMessageBox.information(None, "알림", f"'{code}'는 이미 추가되어 있습니다.")
+            notify(None, "알림", f"'{code}'는 이미 추가되어 있습니다.")
             return
 
         # 종목명 미리 조회
         result = fetch_quote_for_stock(d)
         if not result:
-            QMessageBox.warning(None, "조회 실패", f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요.")
+            notify(None, "조회 실패", f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요.")
             return
 
         d["name"] = result["name"]
@@ -1667,12 +1667,12 @@ class WidgetManager:
         if not code:
             return
         if any(w["code"] == code for w in self.watchlist):
-            QMessageBox.information(None, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
+            notify(None, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
             return
 
         result = fetch_quote_for_stock(d)
         if not result:
-            QMessageBox.warning(None, "조회 실패", f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요.")
+            notify(None, "조회 실패", f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요.")
             return
 
         d["name"] = result["name"]
@@ -1903,8 +1903,8 @@ class WidgetManager:
         """직전 실행에서 적용한 업데이트가 실제로 반영됐으면 완료 안내를 한 번 띄운다."""
         pending = updater.read_and_clear_pending_update()
         if pending and pending == __version__:
-            show_topmost_message(
-                QMessageBox.Icon.Information,
+            notify(
+                None,
                 "업데이트 완료",
                 f"버전 v{pending} 으로 업데이트되었습니다.",
             )
@@ -1914,8 +1914,8 @@ class WidgetManager:
         log = updater.read_and_clear_last_error()
         if not log:
             return
-        show_topmost_message(
-            QMessageBox.Icon.Warning,
+        notify(
+            None,
             "이전 업데이트 실패",
             updater.humanize_error(log) + "\n\n오류 원문:\n" + log,
         )
@@ -2001,7 +2001,7 @@ class WidgetManager:
     # ── Excel 내보내기 ────────────────────────────────────────────────────
     def open_export_dialog(self):
         if not self.stocks:
-            QMessageBox.information(None, "알림", "내보낼 보유 종목이 없습니다.")
+            notify(None, "알림", "내보낼 보유 종목이 없습니다.")
             return
 
         default_name = f"pinstock_holdings_{datetime.now().strftime('%Y%m%d')}.xlsx"
@@ -2027,19 +2027,19 @@ class WidgetManager:
             export_stocks_to_excel(self.stocks, path, current_prices, self.usd_krw_rate,
                                    accounts=self.accounts)
         except ImportError:
-            QMessageBox.critical(
+            notify(
                 None, "라이브러리 없음",
                 "openpyxl 패키지가 필요합니다.\n\n터미널에서 다음을 실행하세요:\n    pip install openpyxl"
             )
             return
         except Exception as e:
-            QMessageBox.critical(None, "내보내기 실패", f"파일을 저장할 수 없습니다.\n\n{e}")
+            notify(None, "내보내기 실패", f"파일을 저장할 수 없습니다.\n\n{e}")
             return
 
         # 계좌를 나눠 쓰면 계좌마다 시트가 하나씩 더 들어간다
         sheets = ("\n(계좌별 시트 %d장 포함)" % len(self.accounts)
                   if len(self.accounts) > 1 else "")
-        QMessageBox.information(
+        notify(
             None, "내보내기 완료",
             f"{len(self.stocks)}개 종목을 저장했습니다.{sheets}\n\n{path}"
         )
@@ -2089,16 +2089,16 @@ class WidgetManager:
         try:
             imported, imported_accounts = import_stocks_from_excel(path)
         except ImportError:
-            QMessageBox.critical(
+            notify(
                 None, "라이브러리 없음",
                 "openpyxl 패키지가 필요합니다.\n\n터미널에서 다음을 실행하세요:\n    pip install openpyxl"
             )
             return
         except ValueError as e:
-            QMessageBox.critical(None, "가져오기 실패", str(e))
+            notify(None, "가져오기 실패", str(e))
             return
         except Exception as e:
-            QMessageBox.critical(None, "가져오기 실패", f"파일을 읽을 수 없습니다.\n\n{e}")
+            notify(None, "가져오기 실패", f"파일을 읽을 수 없습니다.\n\n{e}")
             return
 
         # 모드 선택
@@ -2176,7 +2176,7 @@ class WidgetManager:
         self._rebuild_widgets(new_stocks)
         self._sync_accounts_to_widgets()
 
-        QMessageBox.information(
+        notify(
             None, "가져오기 완료",
             f"총 {len(new_stocks)}개 종목이 적용되었습니다.\n"
             f"이전 데이터는 다음에 백업되었습니다:\n{BACKUP_FILE}"

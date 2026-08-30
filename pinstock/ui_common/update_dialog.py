@@ -17,14 +17,15 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
-    QDialog, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
-    QProgressBar, QApplication, QMessageBox,
+    QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
+    QProgressBar, QApplication,
 )
 
 from ..__version__ import __version__
 from ..core import updater
+from .frameless import FramelessDialog, FRAMELESS_CARD_STYLE
 from ..ui_windows.theme import C, DIALOG_STYLE
 
 
@@ -41,18 +42,6 @@ _S_UP_TO_DATE = "up_to_date"
 _S_UPDATE_AVAILABLE = "update_available"
 _S_DOWNLOADING = "downloading"
 _S_ERROR = "error"
-
-
-def show_topmost_message(icon: QMessageBox.Icon, title: str, text: str) -> None:
-    """업데이트 완료/실패 안내를 바탕화면 위젯(WindowStaysOnTopHint) 위로 띄운다.
-    정적 QMessageBox.information/warning 은 창 플래그를 줄 수 없어, 인스턴스로 만들어
-    최상단 플래그를 건 뒤 표시한다."""
-    box = QMessageBox()
-    box.setIcon(icon)
-    box.setWindowTitle(title)
-    box.setText(text)
-    box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-    box.exec()
 
 
 def _fetch_error_message(error: Optional[updater.FetchError]) -> str:
@@ -87,7 +76,7 @@ def _fetch_error_message(error: Optional[updater.FetchError]) -> str:
     return "최신 버전 정보를 해석하지 못했습니다. 잠시 후 다시 시도해주세요."
 
 
-class UpdateDialog(QDialog):
+class UpdateDialog(FramelessDialog):
     """업데이트 확인 + 다운로드 + 적용을 한 모달에서 처리."""
 
     def __init__(
@@ -104,13 +93,12 @@ class UpdateDialog(QDialog):
             같은 버전을 자동으로 다시 묻지 않게 한다.
         prefetched_release: 자동 체크가 이미 받아둔 릴리즈. 주어지면 API 재호출 없이
             곧장 UPDATE_AVAILABLE 로 진입한다(manager 가 새 버전일 때만 넘기므로)."""
-        super().__init__(parent)
-        self.setWindowTitle("업데이트 확인")
-        self.setMinimumWidth(460)
-        self.setStyleSheet(DIALOG_STYLE)
         # 항상 최상단 — 바탕화면 위젯들이 WindowStaysOnTopHint 라, 업데이트 안내가
         # 그 아래로 가려지지 않게 같은 최상단 밴드로 올린다(show 때 앞으로 끌어옴).
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        super().__init__(parent, resizable=False, stay_on_top=True)
+        self.setWindowTitle("업데이트 확인")
+        self.setMinimumWidth(460)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
 
         self._signals = _Signals()
         self._signals.release_fetched.connect(self._on_release_fetched)
@@ -132,7 +120,7 @@ class UpdateDialog(QDialog):
 
     # ── UI 구성 ────────────────────────────────────────────────────────────
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(22, 20, 22, 16)
         root.setSpacing(10)
 

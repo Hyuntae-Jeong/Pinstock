@@ -13,7 +13,7 @@ import threading
 from datetime import datetime, date
 
 from PyQt6.QtCore import Qt, QObject, QTimer, QEvent, QPoint, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog, QMenu
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu
 
 from ..__version__ import __version__
 from ..core import updater, stock_index
@@ -39,9 +39,9 @@ from ..ui_windows.manage_dialog import (
     BuyPreviewDialog, StockDialog, ManageStocksDialog, ManageWatchlistDialog,
     ImportModeDialog, AccountManagerDialog, fetch_quote_for_stock,
 )
-from ..ui_common.update_dialog import UpdateDialog, show_topmost_message
+from ..ui_common.update_dialog import UpdateDialog
 from ..ui_common.help_dialog import HelpDialog
-from ..ui_common.confirm import confirm, confirm_delete
+from ..ui_common.confirm import confirm, confirm_delete, notify
 from ..ui_common.memo_dialog import MemoDialog
 from ..ui_common.stock_memo_list_dialog import StockMemoListDialog
 
@@ -995,7 +995,7 @@ class MacAppManager(QObject):
         if not self._config_warning:
             return
         msg, self._config_warning = self._config_warning, None
-        show_topmost_message(QMessageBox.Icon.Warning, "설정 파일 오류", msg)
+        notify(None, "설정 파일 오류", msg)
 
     def _account_snapshot(self) -> dict:
         """{uid: account_id} — 계좌 이동 전후를 비교하고 되돌리기 위한 스냅샷."""
@@ -1172,12 +1172,12 @@ class MacAppManager(QObject):
             if len(self.accounts) > 1:
                 name = self._account_name(account_id)
                 where = f" '{name}' 계좌에" if name else ""
-            QMessageBox.information(None, "알림", f"'{code}'는 이미{where} 추가되어 있습니다.")
+            notify(None, "알림", f"'{code}'는 이미{where} 추가되어 있습니다.")
             return
 
         result = fetch_quote_for_stock(d)
         if not result:
-            QMessageBox.warning(
+            notify(
                 None, "조회 실패",
                 f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요."
             )
@@ -1207,12 +1207,12 @@ class MacAppManager(QObject):
         if not code:
             return
         if any(w["code"] == code for w in self.watchlist):
-            QMessageBox.information(None, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
+            notify(None, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
             return
 
         result = fetch_quote_for_stock(d)
         if not result:
-            QMessageBox.warning(
+            notify(
                 None, "조회 실패",
                 f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요."
             )
@@ -1320,7 +1320,7 @@ class MacAppManager(QObject):
                 # 보유 뷰가 분리돼 있으면 그 행은 메인 팝오버가 아니라 분리 창에 있다.
                 self._holdings_window().update_stock_price(code, result)
         if not current_price:
-            QMessageBox.warning(
+            notify(
                 None,
                 "현재가 없음",
                 "현재가를 확인할 수 없어 예상 평단가를 계산할 수 없습니다.",
@@ -1403,7 +1403,7 @@ class MacAppManager(QObject):
     # ── Excel 내보내기 ────────────────────────────────────────────────────
     def open_export_dialog(self):
         if not self.stocks:
-            QMessageBox.information(None, "알림", "내보낼 보유 종목이 없습니다.")
+            notify(None, "알림", "내보낼 보유 종목이 없습니다.")
             return
 
         default_name = f"pinstock_holdings_{datetime.now().strftime('%Y%m%d')}.xlsx"
@@ -1421,19 +1421,19 @@ class MacAppManager(QObject):
             export_stocks_to_excel(self.stocks, path, self.current_prices,
                                    self.usd_krw_rate, accounts=self.accounts)
         except ImportError:
-            QMessageBox.critical(
+            notify(
                 None, "라이브러리 없음",
                 "openpyxl 패키지가 필요합니다.\n\n터미널에서 다음을 실행하세요:\n    pip install openpyxl"
             )
             return
         except Exception as e:
-            QMessageBox.critical(None, "내보내기 실패", f"파일을 저장할 수 없습니다.\n\n{e}")
+            notify(None, "내보내기 실패", f"파일을 저장할 수 없습니다.\n\n{e}")
             return
 
         # 계좌를 나눠 쓰면 계좌마다 시트가 하나씩 더 들어간다
         sheets = ("\n(계좌별 시트 %d장 포함)" % len(self.accounts)
                   if len(self.accounts) > 1 else "")
-        QMessageBox.information(
+        notify(
             None, "내보내기 완료",
             f"{len(self.stocks)}개 종목을 저장했습니다.{sheets}\n\n{path}"
         )
@@ -1483,16 +1483,16 @@ class MacAppManager(QObject):
         try:
             imported, imported_accounts = import_stocks_from_excel(path)
         except ImportError:
-            QMessageBox.critical(
+            notify(
                 None, "라이브러리 없음",
                 "openpyxl 패키지가 필요합니다.\n\n터미널에서 다음을 실행하세요:\n    pip install openpyxl"
             )
             return
         except ValueError as e:
-            QMessageBox.critical(None, "가져오기 실패", str(e))
+            notify(None, "가져오기 실패", str(e))
             return
         except Exception as e:
-            QMessageBox.critical(None, "가져오기 실패", f"파일을 읽을 수 없습니다.\n\n{e}")
+            notify(None, "가져오기 실패", f"파일을 읽을 수 없습니다.\n\n{e}")
             return
 
         mode_dlg = ImportModeDialog()
@@ -1563,7 +1563,7 @@ class MacAppManager(QObject):
         self._rebuild(new_stocks)
         self._sync_accounts_to_windows()
 
-        QMessageBox.information(
+        notify(
             None, "가져오기 완료",
             f"총 {len(new_stocks)}개 종목이 적용되었습니다.\n"
             f"이전 데이터는 다음에 백업되었습니다:\n{BACKUP_FILE}"
@@ -1770,8 +1770,8 @@ class MacAppManager(QObject):
         """직전 실행에서 적용한 업데이트가 실제로 반영됐으면 완료 안내를 한 번 띄운다."""
         pending = updater.read_and_clear_pending_update()
         if pending and pending == __version__:
-            show_topmost_message(
-                QMessageBox.Icon.Information,
+            notify(
+                None,
                 "업데이트 완료",
                 f"버전 v{pending} 으로 업데이트되었습니다.",
             )
@@ -1781,8 +1781,8 @@ class MacAppManager(QObject):
         log = updater.read_and_clear_last_error()
         if not log:
             return
-        show_topmost_message(
-            QMessageBox.Icon.Warning,
+        notify(
+            None,
             "이전 업데이트 실패",
             updater.humanize_error(log) + "\n\n오류 원문:\n" + log,
         )

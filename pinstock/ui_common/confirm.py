@@ -44,12 +44,13 @@ class ConfirmDialog(FramelessDialog):
     buttons 는 (key, label, primary) 를 표시 순서대로 받는다. primary 인 것만
     파랑이고 나머지는 회색이다. 취소는 호출측이 넣지 않아도 맨 왼쪽에 자동으로
     붙고, 취소·Esc·창 닫기는 모두 result_key() 가 None 이다 — 어떻게 빠져나가든
-    '아무 일도 하지 않음'이 기본값이다.
+    '아무 일도 하지 않음'이 기본값이다. cancel_label=None 이면 취소를 빼는데,
+    고를 것 없이 알리기만 하는 안내창(notify)이 그 경우다.
     """
 
     def __init__(self, parent: QWidget | None, title: str, text: str,
                  informative: str = "", buttons: tuple = (),
-                 cancel_label: str = "취소", default_key=None):
+                 cancel_label: str | None = "취소", default_key=None):
         # 확인창은 자식 창을 띄우지 않으므로 '항상 위'를 켠다 — 늘 위에 떠 있는
         # 종목 위젯 뒤로 숨으면 모달이라 앱이 멈춘 것처럼 보인다.
         super().__init__(parent, resizable=False, stay_on_top=True)
@@ -82,7 +83,8 @@ class ConfirmDialog(FramelessDialog):
         row.setSpacing(_BTN_GAP)
         row.addStretch()
         self._buttons: list[tuple] = []
-        for key, label, primary in ((None, cancel_label, False), *buttons):
+        row_specs = buttons if cancel_label is None else ((None, cancel_label, False), *buttons)
+        for key, label, primary in row_specs:
             btn = QPushButton(label)
             if not primary:
                 btn.setProperty("flat", "true")
@@ -135,6 +137,19 @@ def confirm_delete(parent: QWidget | None, title: str, text: str,
                    ok_label: str = "삭제", informative: str = "") -> bool:
     """삭제 확인 — Enter 는 취소라 실수로 지워지지 않는다."""
     return confirm(parent, title, text, ok_label=ok_label, informative=informative)
+
+
+def notify(parent: QWidget | None, title: str, text: str,
+           informative: str = "", ok_label: str = "확인") -> None:
+    """안내창 — 버튼 하나짜리. QMessageBox.information / warning 을 대신한다.
+
+    Qt 기본 안내창은 ⓘ·⚠ 아이콘과 영문 OK 버튼이 붙고 제목 표시줄까지 달려 나온다.
+    title 은 창 제목으로만 쓰이던 값이라 화면에는 보이지 않는다 — 본문이 문장 하나로
+    할 말을 다 하고 있어서(예: "종목코드 '005930'를 찾을 수 없습니다") 잃는 정보가 없다.
+    """
+    ConfirmDialog(parent, title, text, informative,
+                  buttons=(("ok", ok_label, True),),
+                  cancel_label=None, default_key="ok").exec()
 
 
 def choose(parent: QWidget | None, title: str, text: str, options: list,

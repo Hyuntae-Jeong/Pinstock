@@ -4,7 +4,7 @@ import copy
 
 from PyQt6.QtWidgets import (
     QDialog, QLabel, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
-    QSpinBox, QDialogButtonBox, QPushButton, QMessageBox,
+    QSpinBox, QDialogButtonBox, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyledItemDelegate, QRadioButton, QButtonGroup, QWidget,
     QCompleter, QComboBox, QColorDialog, QFrame, QCheckBox,
@@ -33,7 +33,7 @@ from .form_widgets import (
     ArrowDoubleSpinBox, AutoSelectDoubleSpinBox, AutoSelectLineEdit, SearchLineEdit,
     QuantitySpinBox, ToggleSwitch,
 )
-from ..ui_common.confirm import confirm, confirm_delete, choose
+from ..ui_common.confirm import confirm, confirm_delete, choose, notify
 from ..ui_common.frameless import FramelessDialog, FRAMELESS_CARD_STYLE
 
 _NUMBER_FONT_FAMILY = "Arial"
@@ -115,17 +115,17 @@ def format_quantity(value) -> str:
 
 
 # ─── Excel import 모드 선택 다이얼로그 ───────────────────────────────────────
-class ImportModeDialog(QDialog):
+class ImportModeDialog(FramelessDialog):
     """덮어쓰기 / 병합 모드 선택. accept 시 self.mode 에 'overwrite' 또는 'merge'."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, resizable=False)
         self.setWindowTitle("가져오기 모드")
         self.setFixedSize(360, 220)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
         self.mode: str = "merge"
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(24, 22, 24, 18)
         root.setSpacing(10)
 
@@ -272,7 +272,7 @@ class _CurrencySegmentControl(QWidget):
         painter.end()
 
 
-class BuyPreviewDialog(QDialog):
+class BuyPreviewDialog(FramelessDialog):
     """보유 종목의 현재가 기준 추가 매수 예상 평단가/수익률을 보여준다."""
 
     def __init__(
@@ -282,7 +282,7 @@ class BuyPreviewDialog(QDialog):
         usd_krw_rate: float | int | None = None,
         parent=None,
     ):
-        super().__init__(parent)
+        super().__init__(parent, resizable=False)
         self.stock = dict(stock)
         self.current_price = current_price
         self.usd_krw_rate = usd_krw_rate
@@ -295,9 +295,9 @@ class BuyPreviewDialog(QDialog):
         action_icon = "💧" if profit_rate < 0 else "🔥"
         self.setWindowTitle(f"{action_icon} {action_word} 매수")
         self.setFixedSize(560, 430)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(24, 22, 24, 18)
         root.setSpacing(12)
 
@@ -628,7 +628,7 @@ class BuyPreviewDialog(QDialog):
 
     def accept(self):
         if self._effective_add_quantity() <= 0:
-            QMessageBox.information(
+            notify(
                 self,
                 "매수 수량 확인",
                 "추가 매수 수량이 1주 이상이 되도록 수량 또는 금액을 입력하세요.",
@@ -1171,7 +1171,7 @@ class StockDialog(FramelessDialog):
     def accept(self):
         self._preview_name()
         if self._preview_result is None:
-            QMessageBox.warning(
+            notify(
                 self,
                 "조회 실패",
                 "종목을 찾을 수 없습니다.\n코드 또는 티커를 다시 확인해 주세요.",
@@ -1919,12 +1919,12 @@ class ManageStocksDialog(FramelessDialog):
         d["account_id"] = d.get("account_id") or self._default_account()
         if any(s["code"] == code and s.get("account_id") == d["account_id"]
                for s in self._stocks):
-            QMessageBox.information(self, "알림", f"'{code}'는 이미 추가되어 있습니다.")
+            notify(self, "알림", f"'{code}'는 이미 추가되어 있습니다.")
             return
 
         result = fetch_quote_for_stock(d)
         if not result:
-            QMessageBox.warning(
+            notify(
                 self, "조회 실패",
                 f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요."
             )
@@ -1941,7 +1941,7 @@ class ManageStocksDialog(FramelessDialog):
         # 버튼은 비활성이지만 키보드/더블클릭 등 다른 경로가 있어 여기서도 한 번 더 막는다.
         checked = self._checked_stock_indexes()
         if len(checked) >= 2:
-            QMessageBox.information(
+            notify(
                 self, "수정", "여러 종목을 선택한 상태에서는 삭제만 할 수 있습니다."
             )
             return
@@ -1972,7 +1972,7 @@ class ManageStocksDialog(FramelessDialog):
             if idx is not None:
                 targets = [idx]
         if not targets:
-            QMessageBox.information(self, "삭제", "삭제할 종목을 체크하거나 선택하세요.")
+            notify(self, "삭제", "삭제할 종목을 체크하거나 선택하세요.")
             return
 
         if len(targets) == 1:
@@ -1994,7 +1994,7 @@ class ManageStocksDialog(FramelessDialog):
 
 
 # ─── 색상 선택 창 ─────────────────────────────────────────────────────────────
-class ColorPickerDialog(QDialog):
+class ColorPickerDialog(FramelessDialog):
     """프리셋 스와치 그리드로 색을 고르고, 필요하면 '직접 선택'으로 임의 색까지.
 
     선택 결과는 selected_color() 로 '#rrggbb' 소문자 문자열을 돌려준다.
@@ -2004,12 +2004,12 @@ class ColorPickerDialog(QDialog):
     COLS = 8
 
     def __init__(self, current: str = DEFAULT_TAG_COLOR, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, resizable=False)
         self.setWindowTitle("색상 선택")
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
         self._color = current.lower() if _is_hex_color(current) else DEFAULT_TAG_COLOR
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(14)
 
@@ -2081,20 +2081,20 @@ class ColorPickerDialog(QDialog):
 
 
 # ─── 태그 추가/수정 창 ────────────────────────────────────────────────────────
-class TagEditDialog(QDialog):
+class TagEditDialog(FramelessDialog):
     """태그명 + 색상(색상 선택 창 연동)을 입력받는다."""
 
     def __init__(self, parent=None, tag: dict | None = None):
-        super().__init__(parent)
+        super().__init__(parent, resizable=False)
         self.is_edit = tag is not None
         self.setWindowTitle("태그 수정" if self.is_edit else "태그 추가")
         self.setFixedSize(340, 190)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
         self._color = (tag or {}).get("color", DEFAULT_TAG_COLOR)
         if not _is_hex_color(self._color):
             self._color = DEFAULT_TAG_COLOR
 
-        layout = QFormLayout(self)
+        layout = QFormLayout(self.card)
         layout.setSpacing(14)
         layout.setContentsMargins(24, 24, 24, 18)
         layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -2145,7 +2145,7 @@ class TagEditDialog(QDialog):
 
     def _on_ok(self):
         if not self.name_edit.text().strip():
-            QMessageBox.warning(self, "입력 오류", "태그명을 입력하세요.")
+            notify(self, "입력 오류", "태그명을 입력하세요.")
             return
         self.accept()
 
@@ -2154,7 +2154,7 @@ class TagEditDialog(QDialog):
 
 
 # ─── 태그 관리 창 ─────────────────────────────────────────────────────────────
-class TagManagerDialog(QDialog):
+class TagManagerDialog(FramelessDialog):
     """태그 신규 추가 / 수정(이름·색상) / 삭제. get_tags() 로 갱신된 목록 반환."""
 
     COLS = ["색상", "태그명"]
@@ -2167,9 +2167,9 @@ class TagManagerDialog(QDialog):
 
         self.setWindowTitle("태그 관리")
         self.setMinimumSize(360, 380)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(20, 20, 20, 16)
         root.setSpacing(12)
 
@@ -2318,7 +2318,7 @@ class TagManagerDialog(QDialog):
 
 
 # ─── 계좌 추가/수정 창 ────────────────────────────────────────────────────────
-class AccountEditDialog(QDialog):
+class AccountEditDialog(FramelessDialog):
     """계좌명 + 색상을 입력받는다 (태그 편집창과 같은 구성).
 
     계좌명은 팝오버의 계좌 버튼 한 줄에 들어가야 해서 ACCOUNT_NAME_MAX 자로 막는다.
@@ -2326,16 +2326,16 @@ class AccountEditDialog(QDialog):
     """
 
     def __init__(self, parent=None, account: dict | None = None):
-        super().__init__(parent)
+        super().__init__(parent, resizable=False)
         self.is_edit = account is not None
         self.setWindowTitle("계좌 수정" if self.is_edit else "계좌 추가")
         self.setFixedSize(340, 190)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
         self._color = (account or {}).get("color", DEFAULT_ACCOUNT_COLOR)
         if not _is_hex_color(self._color):
             self._color = DEFAULT_ACCOUNT_COLOR
 
-        layout = QFormLayout(self)
+        layout = QFormLayout(self.card)
         layout.setSpacing(14)
         layout.setContentsMargins(24, 24, 24, 18)
         layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -2387,7 +2387,7 @@ class AccountEditDialog(QDialog):
 
     def _on_ok(self):
         if not self.name_edit.text().strip():
-            QMessageBox.warning(self, "입력 오류", "계좌명을 입력하세요.")
+            notify(self, "입력 오류", "계좌명을 입력하세요.")
             return
         self.accept()
 
@@ -2396,16 +2396,16 @@ class AccountEditDialog(QDialog):
 
 
 # ─── 계좌 이동 대상 선택 창 ───────────────────────────────────────────────────
-class AccountPickDialog(QDialog):
+class AccountPickDialog(FramelessDialog):
     """보유 종목을 옮길 대상 계좌 하나를 고른다 (계좌 삭제 시)."""
 
     def __init__(self, accounts: list[dict], count: int, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, resizable=False)
         self.setWindowTitle("계좌 이동")
         self.setFixedSize(340, 170)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
 
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(24, 22, 24, 18)
         root.setSpacing(14)
 
@@ -2595,7 +2595,7 @@ class AccountManagerDialog(FramelessDialog):
         if not (0 <= row < len(self._accounts)):
             return
         if len(self._accounts) <= 1:
-            QMessageBox.information(
+            notify(
                 self, "계좌 삭제",
                 "계좌는 최소 1개가 필요합니다.\n마지막 계좌는 삭제할 수 없습니다."
             )
@@ -3185,7 +3185,7 @@ class ManageWatchlistDialog(FramelessDialog):
         - 이미 다른 태그가 있는 종목: 그대로 둠(옮기지 않음)
         보유에서 빠진 종목을 관심에서 지우진 않는다(수동 정리)."""
         if not self._holdings:
-            QMessageBox.information(self, "보유종목 동기화", "보유 중인 종목이 없습니다.")
+            notify(self, "보유종목 동기화", "보유 중인 종목이 없습니다.")
             return
 
         if not confirm(
@@ -3233,7 +3233,7 @@ class ManageWatchlistDialog(FramelessDialog):
         self._populate_filter_combo()
         self._update_drag_enabled()  # '전체'로 돌아왔으니 드래그는 끈다
         self._rebuild_table()
-        QMessageBox.information(
+        notify(
             self, "보유종목 동기화",
             f"'{self.HOLDING_TAG_NAME}' 태그로 추가했습니다.\n신규 추가 {added}개 · 태그 지정 {tagged}개",
         )
@@ -3247,11 +3247,11 @@ class ManageWatchlistDialog(FramelessDialog):
         if not code:
             return
         if any(w["code"] == code for w in self._items):
-            QMessageBox.information(self, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
+            notify(self, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
             return
         result = fetch_quote_for_stock(d)
         if not result:
-            QMessageBox.warning(
+            notify(
                 self, "조회 실패",
                 f"종목코드 '{code}'를 찾을 수 없습니다.\n코드를 다시 확인해 주세요.",
             )
@@ -3284,7 +3284,7 @@ class ManageWatchlistDialog(FramelessDialog):
                 targets = [idx]
         targets = sorted(set(targets))
         if not targets:
-            QMessageBox.information(self, "삭제", "삭제할 항목을 체크하거나 선택하세요.")
+            notify(self, "삭제", "삭제할 항목을 체크하거나 선택하세요.")
             return
 
         if len(targets) == 1:

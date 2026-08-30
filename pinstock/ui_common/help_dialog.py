@@ -7,11 +7,12 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDialog, QVBoxLayout, QHBoxLayout,
+    QAbstractItemView, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QTextBrowser, QPushButton,
 )
 
 from ..__version__ import __version__
+from .frameless import FramelessDialog, FRAMELESS_CARD_STYLE
 from ..ui_windows.theme import C, DIALOG_STYLE
 
 
@@ -50,6 +51,9 @@ HELP_SECTIONS: list[tuple[str, str, str]] = [
         <p>보유 종목 시세는 5초마다, 미니 차트는 60초마다 자동 갱신됩니다.
         관심종목은 일봉 기준으로 60초마다 갱신돼요.
         (국내는 네이버 금융, 미국은 Yahoo Finance / 인터넷 연결 필요)</p>
+        <p><b>창 다루기</b> — 관리·설정 창에는 제목 표시줄이 없습니다.
+        <b>빈 곳을 끌어</b> 옮기고, <b>오른쪽 아래 모서리</b>로 크기를 바꿔요.
+        닫을 때는 창 안의 <b>취소·닫기</b> 버튼이나 <b>Esc</b> 를 씁니다.</p>
         """,
     ),
     (
@@ -439,7 +443,7 @@ def _content_default_style() -> str:
     """
 
 
-class HelpDialog(QDialog):
+class HelpDialog(FramelessDialog):
     """좌측 카테고리 + 우측 본문의 단일 도움말 모달."""
 
     def __init__(self, parent=None, on_check_update=None):
@@ -453,7 +457,7 @@ class HelpDialog(QDialog):
         self._on_check_update = on_check_update
         self.setWindowTitle("Pinstock 도움말")
         self.resize(780, 560)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
         # 정적 카테고리 + 런타임에 만드는 'Pinstock 정보'(버전·업데이트 확인 노출
         # 여부가 가변) 섹션. 마지막에 붙여 '시작하기' 가 기본 선택으로 남게 한다.
         self._sections = list(HELP_SECTIONS) + [self._about_section()]
@@ -501,7 +505,7 @@ class HelpDialog(QDialog):
             QDesktopServices.openUrl(url)
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(10)
 
