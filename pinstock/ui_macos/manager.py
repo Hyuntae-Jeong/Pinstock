@@ -26,6 +26,7 @@ from ..core.api import (
 from ..ui_windows.chart_widget import aggregate_candles, PinController
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.portfolio import is_us_stock, portfolio_totals
+from ..core.reveal import reveal_in_file_manager
 from ..core.storage import (
     CONFIG_FILE, BACKUP_FILE,
     ConfigLoadError, read_config, write_config_atomic, rotate_daily_backup,
@@ -1428,6 +1429,12 @@ class MacAppManager(QObject):
             return
         except Exception as e:
             notify(None, "내보내기 실패", f"파일을 저장할 수 없습니다.\n\n{e}")
+            return
+
+        # 저장한 파일을 선택한 채로 Finder / 파일 탐색기를 띄운다. 창이 뜨는 것
+        # 자체가 저장 완료 표시라 안내창은 띄우지 못했을 때만 보인다 — 모달 안내창이
+        # 파일 관리자 창 뒤로 깔리면 앱이 멈춘 것처럼 보인다.
+        if reveal_in_file_manager(path):
             return
 
         # 계좌를 나눠 쓰면 계좌마다 시트가 하나씩 더 들어간다

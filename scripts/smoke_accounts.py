@@ -1088,12 +1088,22 @@ def _run(log_fp):
         if "실패" in title or "오류" in title:
             raise AssertionError(f"{title}: {text}")
 
-    _orig = (WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify)
-    WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify = (
-        _FakeFileDialog, _FakeImportMode, _fake_confirm, _fake_notify)
+    revealed: list = []
+
+    def _fake_reveal(path):
+        """테스트 중에 Finder / 파일 탐색기가 실제로 뜨지 않게 경로만 받아 둔다."""
+        revealed.append(path)
+        return True
+
+    _orig = (WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify,
+             WM.reveal_in_file_manager)
+    (WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify,
+     WM.reveal_in_file_manager) = (
+        _FakeFileDialog, _FakeImportMode, _fake_confirm, _fake_notify, _fake_reveal)
     try:
         emgr.open_export_dialog()
         assert load_workbook(out_xlsx).sheetnames == ["보유종목", "주계좌", "연금"]
+        assert revealed == [out_xlsx], f"저장한 파일을 파일 관리자로 띄우지 않았다: {revealed}"
 
         # 연금 계좌의 삼성전자 평단가만 바꿔 '갱신' 으로 잡히는지 확인
         rwb = load_workbook(out_xlsx)
@@ -1107,7 +1117,8 @@ def _run(log_fp):
         assert emgr.stocks == []
         emgr.open_import_dialog()
     finally:
-        WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify = _orig
+        (WM.QFileDialog, WM.ImportModeDialog, WM.confirm, WM.notify,
+         WM.reveal_in_file_manager) = _orig
 
     assert "주계좌" in seen_msgs[-1] and "연금" in seen_msgs[-1],         f"확인 메시지가 계좌별로 나뉘지 않았다: {seen_msgs[-1]}"
     assert [a["id"] for a in emgr.accounts] == ["acc1", "acc2"], "계좌가 중복 생성됐다"
