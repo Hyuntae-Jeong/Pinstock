@@ -2199,6 +2199,10 @@ class WidgetManager:
 
         self.stocks = normalize_stocks_schema(new_stocks)
         self._reconcile_accounts()
+        # 위젯을 만들기 전에 환율부터 — 가져오기 전에 미국 주식이 하나도 없었으면
+        # 환율 타이머가 꺼져 있어 usd_krw_rate 가 None 이다. 그대로 두면 현재환율이
+        # 매수환율로 대체돼 환차손익이 계속 0 으로 보인다.
+        self._sync_fx_timer()
         self.uniform_w = self._calc_uniform_width()
 
         for i, s in enumerate(self.stocks):
