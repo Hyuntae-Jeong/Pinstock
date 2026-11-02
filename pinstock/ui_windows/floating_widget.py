@@ -13,7 +13,7 @@ from ..core.api import (
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
     fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES, WATCH_POPUP_CANDLES_LONG,
 )
-from ..core.portfolio import is_us_stock, is_index, stock_metrics
+from ..core.portfolio import is_us_stock, format_watch_price, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .win_chrome import disable_win11_dwm_chrome
 from .chart_widget import SparklineWidget, ChartPopup, aggregate_candles
@@ -1007,12 +1007,7 @@ class CompactWatchRow(QWidget):
         self.current_price = result["price"]
         price = result["price"]
         rate  = result["change_rate"]
-        if is_index(self.data):
-            self.price_lbl.setText(f"{price:,.2f}")   # 지수는 소수 2자리
-        elif is_us_stock(self.data):
-            self.price_lbl.setText(f"{price:,.4f}")
-        else:
-            self.price_lbl.setText(f"{price:,.0f}")
+        self.price_lbl.setText(format_watch_price(self.data, price))
         if rate > 0:
             color, sign = C["red"], "▲"
         elif rate < 0:

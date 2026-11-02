@@ -16,12 +16,13 @@ from PyQt6.QtGui import (
 )
 
 from ..core.api import (
-    fetch_stock, fetch_us_stock, fetch_index,
+    fetch_stock, fetch_us_stock, fetch_index, fetch_fx,
     search_us_stocks, search_korean_stocks,
 )
 from ..core.indices import index_by_code, search_indices, index_exact_match
+from ..core.fx import fx_by_code, search_fx, fx_exact_match
 from ..core import stock_index
-from ..core.portfolio import buy_preview, is_us_stock, stock_metrics
+from ..core.portfolio import buy_preview, is_fx, is_us_stock, stock_metrics
 from ..core.storage import (
     MARKET_KR, MARKET_US, CURRENCY_KRW, CURRENCY_USD,
     DEFAULT_TAG_COLOR, new_tag_id, normalize_tags, prune_watch_tags,
@@ -99,6 +100,8 @@ def fetch_quote_for_stock(stock: dict) -> dict | None:
     code = str(stock.get("code") or "").strip().upper()
     if str(stock.get("type") or "").strip().lower() == "index":
         return fetch_index(code, stock.get("market"))
+    if is_fx(stock):
+        return fetch_fx(code)
     market = str(stock.get("market") or MARKET_KR).upper()
     if market == MARKET_US:
         return fetch_us_stock(code)
@@ -900,6 +903,19 @@ class StockDialog(FramelessDialog):
                 else:
                     self._set_preview_error("지수 조회 실패")
                 return
+            # 환율도 같은 방식 — 드롭다운 선택이면 코드(USDKRW), 직접 입력이면
+            # '달러'·'엔화' 같은 한글 이름 정확일치로 잡는다. 시장 라디오와 무관.
+            fx = fx_by_code(code) or fx_exact_match(raw)
+            if fx:
+                if fetch_fx(fx["code"]):
+                    self.code_edit.blockSignals(True)
+                    self.code_edit.setText(fx["code"])
+                    self.code_edit.blockSignals(False)
+                    self._set_preview_found(fx["name"])
+                    self._preview_result = fx
+                else:
+                    self._set_preview_error("환율 조회 실패")
+                return
         # 1) 입력을 그대로 코드/티커로 보고 시세 API 호출.
         # 2) 실패하면 이름 검색으로 폴백해 첫 매칭의 코드/티커로 자동 채움.
         #    (사용자가 드롭다운에서 안 고르고 그냥 엔터/포커스 아웃 한 경우 안전망)
@@ -1002,9 +1018,10 @@ class StockDialog(FramelessDialog):
                 if m["code"] not in seen_codes:
                     matches.append(m)
                     seen_codes.add(m["code"])
-        # 관심종목 모드: 현재 시장의 지수도 후보 맨 앞에 더한다 (보유엔 지수 없음)
+        # 관심종목 모드: 현재 시장의 지수와 환율도 후보 맨 앞에 더한다 (보유엔 없음).
+        # 환율은 시장과 무관하게 항상 넣는다.
         if self.watch_mode:
-            matches = search_indices(query, market=market) + matches
+            matches = search_fx(query) + search_indices(query, market=market) + matches
         self._search_model.clear()
         for m in matches:
             code = m.get("code") or m.get("symbol")
@@ -1085,9 +1102,14 @@ class StockDialog(FramelessDialog):
             self.avg_spin.setSuffix("  원")
             self.basis_label.setVisible(False)
             self.basis_field.setVisible(False)
-        # 관심종목 모드에서는 시장이 바뀌어도 가격/수량 행을 항상 접어둔다
+        # 관심종목 모드에서는 시장이 바뀌어도 가격/수량 행을 항상 접어둔다.
+        # 지수·환율도 검색된다는 걸 입력 힌트로 알린다.
         if getattr(self, "watch_mode", False):
             self._collapse_price_fields()
+            self.code_edit.setPlaceholderText(
+                "예: Apple / 나스닥 / 달러" if market == MARKET_US
+                else "예: 삼성전자 / 코스피 / 달러"
+            )
 
     def _on_basis_changed(self):
         """매수 기준 선택에 따라 값 입력칸의 단위/소수점/표시를 바꾼다."""
@@ -1189,13 +1211,16 @@ class StockDialog(FramelessDialog):
             if idx is None and isinstance(self._preview_result, dict) \
                     and self._preview_result.get("type") == "index":
                 idx = self._preview_result
+            # 환율도 카탈로그 메타를 그대로 저장한다 (원화 표시라 KR/KRW).
+            if idx is None:
+                idx = fx_by_code(code)
             if idx:
                 return {
                     "code":     idx["code"],
                     "name":     idx["name"],
                     "market":   idx["market"],
                     "currency": idx["currency"],
-                    "type":     "index",
+                    "type":     idx["type"],
                     "tag":      self._selected_tag(),
                 }
             # 관심종목(개별 종목): 평단가/수량/손익 없음 — 코드·시장·태그만.
@@ -3061,7 +3086,10 @@ class ManageWatchlistDialog(FramelessDialog):
 
         name = item.get("name", item.get("code", ""))
         code = item.get("code", "")
-        market = "미국" if str(item.get("market", "")).upper() == MARKET_US else "한국"
+        if is_fx(item):
+            market = "환율"
+        else:
+            market = "미국" if str(item.get("market", "")).upper() == MARKET_US else "한국"
         for offset, text in enumerate([name, code, market]):
             col = offset + 1                    # 0번은 체크박스 칸이라 한 칸 밀림
             cell = QTableWidgetItem(text)

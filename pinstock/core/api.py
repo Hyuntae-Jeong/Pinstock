@@ -5,8 +5,9 @@ from datetime import datetime, timedelta
 from time import time
 from urllib.parse import quote
 
+from .fx import fx_meta
 from .indices import index_by_code
-from .portfolio import is_us_stock
+from .portfolio import is_fx, is_index, is_us_stock
 
 # ─── 공용 HTTP 세션 (TCP/TLS 연결 재사용으로 호출당 100~300ms 절감) ─────────
 _SESSION = requests.Session()
@@ -312,44 +313,93 @@ def fetch_daily_chart(code: str, days: int = 45, max_candles: int = 30) -> dict 
         return None
 
 
-# ─── Yahoo Finance 원달러 환율 API ─────────────────────────────────────────
+# ─── 환율 현재가 (Yahoo 기본, 네이버 폴백) ─────────────────────────────────
+def _fx_quote_yahoo(symbol: str, scale: float = 1.0) -> dict | None:
+    """Yahoo chart API 로 환율 현재가를 조회한다. 값에 scale 을 곱해 돌려준다
+    (엔화는 1엔 기준이라 100 을 곱해 100엔 기준으로 맞춘다).
+    반환: {'rate', 'change_price', 'change_rate'} or None"""
+    result = _parse_yahoo_chart(symbol, range_="1d", interval="5m")
+    if not result:
+        return None
+    meta = result.get("meta", {}) or {}
+    rate = _to_float(meta.get("regularMarketPrice"))
+    prev_close = _to_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
+    if rate <= 0:
+        closes = [
+            _to_float(v)
+            for v in (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [])
+            if v is not None
+        ]
+        closes = [v for v in closes if v > 0]
+        rate = closes[-1] if closes else 0.0
+    if rate <= 0:
+        return None
+    change_price = rate - prev_close if prev_close else 0.0
+    change_rate = (change_price / prev_close * 100.0) if prev_close else 0.0
+    return {
+        "rate":         rate * scale,
+        "change_price": change_price * scale,
+        "change_rate":  change_rate,
+    }
+
+
+def _fx_quote_naver(code: str) -> dict | None:
+    """네이버 환율 API(FX_USDKRW 등)로 현재가를 조회한다. 엔화는 이미 100엔 기준.
+    반환: {'rate', 'change_price', 'change_rate'} or None"""
+    url = f"https://api.stock.naver.com/marketindex/exchange/{quote(code)}"
+    try:
+        r = _SESSION.get(url, timeout=5)
+        if r.status_code != 200:
+            return None
+        info = (r.json().get("exchangeInfo") or {})
+        rate = _to_float(info.get("closePrice"))
+        if rate <= 0:
+            return None
+        change_price = _to_float(info.get("fluctuations"))
+        change_rate = _to_float(info.get("fluctuationsRatio"))
+        fluct_type = (info.get("fluctuationsType") or {}).get("code")
+        if str(fluct_type) in {"5", "FALLING"}:
+            change_price = -abs(change_price)
+            change_rate = -abs(change_rate)
+        return {"rate": rate, "change_price": change_price, "change_rate": change_rate}
+    except Exception as e:
+        print(f"[_fx_quote_naver] {code} 오류: {e}")
+        return None
+
+
+def _fx_quote(yahoo_symbol: str, naver_code: str, scale: float = 1.0) -> dict | None:
+    """환율 현재가 — Yahoo 를 먼저 보고, 실패하면 네이버로 폴백한다.
+    반환: {'rate', 'change_price', 'change_rate', 'source'} or None"""
+    try:
+        result = _fx_quote_yahoo(yahoo_symbol, scale)
+        if result:
+            result["source"] = "Yahoo Finance"
+            return result
+    except Exception as e:
+        print(f"[_fx_quote] {yahoo_symbol} 오류: {e}")
+    result = _fx_quote_naver(naver_code)
+    if result:
+        result["source"] = "Naver Finance"
+    return result
+
+
 def fetch_usd_krw_rate() -> dict | None:
-    """Yahoo Finance API로 원달러 환율(USD/KRW)을 조회한다.
+    """원달러 환율(USD/KRW)을 조회한다 (보유 미국 주식 원화 환산용).
 
     반환:
     {'pair', 'rate', 'change_rate', 'change_price', 'currency', 'source'}
     """
-    try:
-        result = _parse_yahoo_chart("USDKRW=X", range_="1d", interval="5m")
-        if not result:
-            return _fetch_usd_krw_rate_naver()
-        meta = result.get("meta", {}) or {}
-        rate = _to_float(meta.get("regularMarketPrice"))
-        prev_close = _to_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
-        if rate <= 0:
-            closes = [
-                _to_float(v)
-                for v in (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [])
-                if v is not None
-            ]
-            closes = [v for v in closes if v > 0]
-            rate = closes[-1] if closes else 0.0
-        if rate <= 0:
-            return _fetch_usd_krw_rate_naver()
-
-        change_price = rate - prev_close if prev_close else 0.0
-        change_rate = (change_price / prev_close * 100.0) if prev_close else 0.0
-        return {
-            "pair":         "USD/KRW",
-            "rate":         rate,
-            "change_rate":  change_rate,
-            "change_price": change_price,
-            "currency":     "KRW",
-            "source":       "Yahoo Finance",
-        }
-    except Exception as e:
-        print(f"[fetch_usd_krw_rate] 오류: {e}")
-        return _fetch_usd_krw_rate_naver()
+    result = _fx_quote("USDKRW=X", "FX_USDKRW")
+    if not result:
+        return None
+    return {
+        "pair":         "USD/KRW",
+        "rate":         result["rate"],
+        "change_rate":  result["change_rate"],
+        "change_price": result["change_price"],
+        "currency":     "KRW",
+        "source":       result["source"],
+    }
 
 
 def fetch_usd_krw_chart(range_: str = "1d", interval: str = "5m") -> dict | None:
@@ -372,35 +422,6 @@ def fetch_usd_krw_chart(range_: str = "1d", interval: str = "5m") -> dict | None
         }
     except Exception as e:
         print(f"[fetch_usd_krw_chart] 오류: {e}")
-        return None
-
-
-def _fetch_usd_krw_rate_naver() -> dict | None:
-    url = "https://api.stock.naver.com/marketindex/exchange/FX_USDKRW"
-    try:
-        r = _SESSION.get(url, timeout=5)
-        if r.status_code != 200:
-            return None
-        info = (r.json().get("exchangeInfo") or {})
-        rate = _to_float(info.get("closePrice"))
-        if rate <= 0:
-            return None
-        change_price = _to_float(info.get("fluctuations"))
-        change_rate = _to_float(info.get("fluctuationsRatio"))
-        fluct_type = (info.get("fluctuationsType") or {}).get("code")
-        if str(fluct_type) in {"5", "FALLING"}:
-            change_price = -abs(change_price)
-            change_rate = -abs(change_rate)
-        return {
-            "pair":         "USD/KRW",
-            "rate":         rate,
-            "change_rate":  change_rate,
-            "change_price": change_price,
-            "currency":     "KRW",
-            "source":       "Naver Finance",
-        }
-    except Exception as e:
-        print(f"[_fetch_usd_krw_rate_naver] 오류: {e}")
         return None
 
 
@@ -828,12 +849,161 @@ def fetch_index_daily(code: str, market: str | None = None, max_candles: int = 3
     )
 
 
-# ─── 관심종목 시세 디스패치 (지수/국내/해외 통합) ─────────────────────────────
+# ─── 환율 (관심종목 전용: 원/달러 · 원/100엔 · 원/유로 · 원/위안) ──────────────
+# 현재가는 보유 환산용 원달러와 같은 _fx_quote(Yahoo → 네이버)를 쓴다. 일봉은
+# Yahoo 를 기본으로, 실패하면 네이버 일별 종가로 캔들을 만들어 폴백한다.
+_NAVER_FX_PAGE_SIZE = 60      # 네이버 환율 일별 시세 API 의 pageSize 상한
+_NAVER_FX_MAX_PAGES = 5       # 폴백 시 최대 300 거래일 (폴러가 UI 스레드라 요청 수 제한)
+
+
+def _fx_bar_date(ts, gmtoffset: int) -> str:
+    """Yahoo 환율 일봉 timestamp → 'YYYYMMDD'.
+
+    환율 일봉은 런던 자정에 시작해 서머타임 기간엔 UTC 전날 23:00 으로 찍힌다.
+    정시에 맞춘 봉 시작값은 1시간 밀어 날짜를 맞추고, 진행 중인 마지막 봉(현재
+    시각)은 거래소 현재 UTC 오프셋으로 날짜를 낸다.
+    """
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return ""
+    return _epoch_to_date(ts + (3600 if ts % 3600 == 0 else gmtoffset))
+
+
+def _fx_daily_yahoo(symbol: str, range_: str, scale: float = 1.0,
+                    inverted: bool = False) -> list[dict]:
+    """Yahoo 환율 일봉 캔들. inverted 면 역방향 쌍(KRWCNY 등)을 1/x 로 뒤집는다
+    (뒤집으면 고가↔저가가 바뀐다). 환율은 거래량이 없어 volume 은 0."""
+    result = _parse_yahoo_chart(symbol, range_=range_, interval="1d")
+    if not result:
+        return []
+    meta = result.get("meta", {}) or {}
+    gmtoffset = int(_to_float(meta.get("gmtoffset")))
+    quote_data = (result.get("indicators", {}).get("quote") or [{}])[0]
+    rows = zip(
+        result.get("timestamp") or [],
+        quote_data.get("open") or [],
+        quote_data.get("high") or [],
+        quote_data.get("low") or [],
+        quote_data.get("close") or [],
+    )
+    candles: list[dict] = []
+    for ts, *ohlc in rows:
+        o, h, l, c = (_to_float(v) for v in ohlc)
+        if min(o, h, l, c) <= 0:
+            continue
+        if inverted:
+            o, h, l, c = 1 / o, 1 / l, 1 / h, 1 / c
+        candle = {
+            "date":   _fx_bar_date(ts, gmtoffset),
+            "open":   o * scale,
+            "high":   h * scale,
+            "low":    l * scale,
+            "close":  c * scale,
+            "volume": 0.0,
+        }
+        # 진행 중인 봉이 같은 날짜로 한 번 더 오면 최신 값으로 덮는다
+        if candles and candles[-1]["date"] == candle["date"]:
+            candles[-1] = candle
+        else:
+            candles.append(candle)
+    return candles
+
+
+def _fx_daily_naver(code: str, max_candles: int) -> list[dict]:
+    """네이버 환율 일별 종가로 캔들을 만든다 (Yahoo 일봉 실패 시 폴백).
+
+    네이버는 일별 종가만 주므로 시가 = 전일 종가, 고가/저가 = 둘 중 큰/작은 값으로
+    채운다(꼬리 없는 캔들). 60개씩 페이지로 받고 최신 → 과거 순으로 온다.
+    """
+    pages = max(1, min(_NAVER_FX_MAX_PAGES, -(-max(max_candles, 1) // _NAVER_FX_PAGE_SIZE)))
+    closes: dict[str, float] = {}
+    for page in range(1, pages + 1):
+        url = (
+            f"https://api.stock.naver.com/marketindex/exchange/{quote(code)}/prices"
+            f"?page={page}&pageSize={_NAVER_FX_PAGE_SIZE}"
+        )
+        try:
+            r = _SESSION.get(url, timeout=3)
+            if r.status_code != 200:
+                break
+            rows = r.json() or []
+        except Exception as e:
+            print(f"[_fx_daily_naver] {code} 오류: {e}")
+            break
+        for row in rows:
+            date = str(row.get("localTradedAt") or "").replace("-", "")
+            close = _to_float(row.get("closePrice"))
+            if len(date) == 8 and close > 0:
+                closes.setdefault(date, close)
+        if len(rows) < _NAVER_FX_PAGE_SIZE:
+            break
+    candles: list[dict] = []
+    prev = None
+    for date in sorted(closes):
+        close = closes[date]
+        open_ = prev if prev is not None else close
+        candles.append({
+            "date": date, "open": open_, "high": max(open_, close),
+            "low": min(open_, close), "close": close, "volume": 0.0,
+        })
+        prev = close
+    return candles
+
+
+def fetch_fx(code: str) -> dict | None:
+    """환율 현재가 — fetch_stock 과 같은 형태로 반환한다. 이름은 카탈로그 이름."""
+    meta = fx_meta(code)
+    if not meta:
+        return None
+    result = _fx_quote(meta["yahoo"], meta["naver"], meta.get("scale", 1))
+    if not result:
+        return None
+    return {
+        "name":          meta["name"],
+        "price":         result["rate"],
+        "change_rate":   result["change_rate"],
+        "change_price":  result["change_price"],
+        "currency":      "KRW",
+        "regular_price": result["rate"],
+        "market_state":  "REGULAR",
+        "extended":      None,
+    }
+
+
+def fetch_fx_daily(code: str, max_candles: int = 30) -> dict | None:
+    """환율 일봉 캔들 — Yahoo 기본, 실패하면 네이버 일별 종가로 폴백."""
+    meta = fx_meta(code)
+    if not meta:
+        return None
+    candles: list[dict] = []
+    try:
+        inverse = meta.get("yahoo_daily_inverse")
+        candles = _fx_daily_yahoo(
+            inverse or meta["yahoo"], _yahoo_range_for_candles(max_candles),
+            scale=meta.get("scale", 1), inverted=bool(inverse),
+        )
+    except Exception as e:
+        print(f"[fetch_fx_daily] {code} 오류: {e}")
+    if len(candles) < 2:
+        fallback = _fx_daily_naver(meta["naver"], max_candles)
+        if len(fallback) > len(candles):
+            candles = fallback
+    if not candles:
+        return None
+    if max_candles > 0:
+        candles = candles[-max_candles:]
+    return {"candles": candles}
+
+
+# ─── 관심종목 시세 디스패치 (지수/환율/국내/해외 통합) ────────────────────────
 def fetch_watch_quote(item: dict) -> dict | None:
     """관심종목 한 항목의 현재가를 타입·시장에 맞게 조회한다 (폴러 공용)."""
     code = str(item.get("code") or "").strip()
-    if str(item.get("type") or "").strip().lower() == "index":
+    if is_index(item):
         return fetch_index(code, item.get("market"))
+    if is_fx(item):
+        return fetch_fx(code)
     return fetch_us_stock(code) if is_us_stock(item) else fetch_stock(code)
 
 
@@ -841,8 +1011,10 @@ def fetch_watch_daily(item: dict, max_candles: int = 30) -> dict | None:
     """관심종목 한 항목의 일봉 캔들을 타입·시장에 맞게 조회한다 (폴러 공용).
     max_candles 를 키우면 더 긴 이력(확대 팝업의 3개월 + 이동평균선용)을 받는다."""
     code = str(item.get("code") or "").strip()
-    if str(item.get("type") or "").strip().lower() == "index":
+    if is_index(item):
         return fetch_index_daily(code, item.get("market"), max_candles=max_candles)
+    if is_fx(item):
+        return fetch_fx_daily(code, max_candles=max_candles)
     if is_us_stock(item):
         return fetch_us_daily_chart(
             code, range_=_yahoo_range_for_candles(max_candles), max_candles=max_candles

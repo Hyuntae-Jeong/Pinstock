@@ -10,6 +10,7 @@ import shutil
 from datetime import date
 from pathlib import Path
 
+from .fx import fx_by_code
 from .portfolio import merge_holdings, portfolio_totals, stock_metrics
 
 
@@ -382,10 +383,14 @@ def normalize_watch_item(item: dict) -> dict:
     currency = str(normalized.get("currency") or default_currency).strip().upper()
     normalized["currency"] = currency or default_currency
 
-    # 타입: 'index'(지수) 또는 'stock'(개별 종목). 지수는 시세 라우팅·표시 포맷이
-    # 다르므로 구분해 보존한다. 알 수 없는 값은 종목으로 본다.
+    # 타입: 'index'(지수) · 'fx'(환율) · 'stock'(개별 종목). 지수·환율은 시세
+    # 라우팅·표시 포맷이 다르므로 구분해 보존한다. 알 수 없는 값은 종목으로 본다.
+    # 환율 코드(USDKRW 등)는 실제 종목 코드와 겹치지 않으므로, 타입이 빠졌거나
+    # 구버전 앱이 'stock' 으로 덮어쓴 경우에도 코드로 환율 타입을 되살린다.
     item_type = str(normalized.get("type") or "").strip().lower()
-    normalized["type"] = "index" if item_type == "index" else "stock"
+    if item_type not in ("index", "fx"):
+        item_type = "fx" if fx_by_code(str(normalized.get("code") or "")) else "stock"
+    normalized["type"] = item_type
 
     # 태그: 종목당 1개. 태그 레지스트리(watch_tags)의 id 를 참조한다. 없으면 "".
     tag = normalized.get("tag")

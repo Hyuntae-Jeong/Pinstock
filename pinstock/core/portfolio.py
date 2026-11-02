@@ -15,6 +15,21 @@ def is_index(item: dict) -> bool:
     return str(item.get("type") or "").strip().lower() == "index"
 
 
+def is_fx(item: dict) -> bool:
+    """관심종목 항목이 환율(원/달러 등)인지 여부. 지수처럼 관심종목에만 존재한다."""
+    return str(item.get("type") or "").strip().lower() == "fx"
+
+
+def format_watch_price(item: dict, price: float) -> str:
+    """관심종목 현재가 표시 포맷 (macOS 팝오버·Windows 위젯 공용).
+    지수·환율은 소수 2자리, 해외 종목은 4자리, 국내 종목은 정수."""
+    if is_index(item) or is_fx(item):
+        return f"{price:,.2f}"
+    if is_us_stock(item):
+        return f"{price:,.4f}"
+    return f"{price:,.0f}"
+
+
 def _to_float(value, default: float = 0.0) -> float:
     try:
         if value is None:
