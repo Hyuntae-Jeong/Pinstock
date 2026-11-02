@@ -673,6 +673,8 @@ class StockDialog(FramelessDialog):
                           base_h + (46 if self._show_account_row else 0))
         self.setStyleSheet(DIALOG_STYLE + FRAMELESS_CARD_STYLE)
         self._preview_result: dict | None = None
+        # 드롭다운에서 고른 후보. 사용자가 직접 다시 입력하거나 시장을 바꾸면 비운다.
+        self._picked: dict | None = None
 
         layout = QFormLayout(self.card)
         self.form_layout = layout   # _collapse_price_fields 에서 행 접기용
@@ -891,7 +893,16 @@ class StockDialog(FramelessDialog):
         # 관심종목 모드: 입력이 지수(코드 또는 이름/별칭 정확일치)면 지수로 검증.
         # 드롭다운에서 고른 경우 code 가 지수 코드(KOSPI/^GSPC)라 index_by_code 로,
         # 직접 '코스피'/'나스닥' 등을 타이핑한 경우 index_exact_match 로 잡는다.
-        if self.watch_mode:
+        # 단, 드롭다운에서 개별 종목을 고른 경우엔 그 선택을 그대로 따른다 — 티커가
+        # 지수 별칭과 같은 종목(예: Dow Inc. 'DOW' ↔ 다우존스 별칭 'dow')이 지수로
+        # 바뀌지 않게. 확인 버튼(accept)도 여기를 다시 거치므로 선택을 기억해 둔다.
+        picked = self._picked
+        picked_stock = (
+            isinstance(picked, dict)
+            and picked.get("type") not in ("index", "fx")
+            and str(picked.get("code") or "").upper() == code
+        )
+        if self.watch_mode and not picked_stock:
             idx = index_by_code(code) or index_exact_match(raw, market)
             if idx:
                 if fetch_index(idx["code"], idx["market"]):
@@ -970,6 +981,7 @@ class StockDialog(FramelessDialog):
     # ── 종목 이름/티커 자동완성 (KR·US 공용) ─────────────────────────────
     def _on_code_text_edited(self):
         """입력(확정/조합)이 바뀔 때마다 호출. 디바운스 후 현재 시장에 맞는 API 로 검색."""
+        self._picked = None   # 직접 다시 입력했으면 이전 드롭다운 선택은 무효
         query = self.code_edit.composedText().strip()
         if not query:
             self._clear_search()
@@ -1068,6 +1080,7 @@ class StockDialog(FramelessDialog):
         data = index.data(Qt.ItemDataRole.UserRole)
         if not data:
             return
+        self._picked = data
         self.code_edit.blockSignals(True)
         self.code_edit.setText(data["code"])
         self.code_edit.blockSignals(False)
@@ -1079,6 +1092,7 @@ class StockDialog(FramelessDialog):
     def _on_market_changed(self):
         market = self.market()
         self._preview_result = None
+        self._picked = None
         if not self.is_edit:
             self._set_preview_neutral()
         # 시장이 바뀌면 이전 시장의 후보 목록·캐시된 쿼리를 비운다
