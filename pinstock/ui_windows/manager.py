@@ -75,6 +75,7 @@ def _resolve_app_icon() -> QIcon:
 from ..__version__ import __version__
 from ..core import updater, stock_index
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
+from ..core.restart import launch_relaunch
 from ..core.api import fetch_usd_krw_rate
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.reveal import reveal_in_file_manager
@@ -669,6 +670,7 @@ class WidgetManager:
         memo_act   = QAction("📝   메모장",      menu)
         memo_list_act = QAction("🗒️   종목별 메모", menu)
         help_act   = QAction("❓   도움말",      menu)
+        restart_act = QAction("🔄   재시작",     menu)
         quit_act   = QAction("❌   종료",        menu)
         add_act.triggered.connect(self.open_add_dialog)
         manage_act.triggered.connect(self.open_manage_dialog)
@@ -689,6 +691,7 @@ class WidgetManager:
         memo_act.triggered.connect(self.open_memo_dialog)
         memo_list_act.triggered.connect(self.open_stock_memo_list_dialog)
         help_act.triggered.connect(self.open_help_dialog)
+        restart_act.triggered.connect(self.restart_app)
         quit_act.triggered.connect(self.app.quit)
 
         # ── 최상위: 자주 쓰는 토글 ──
@@ -731,8 +734,9 @@ class WidgetManager:
         menu.addAction(memo_list_act)
         menu.addSeparator()
 
-        # ── 도움말 · 종료 ──
+        # ── 도움말 · 재시작 · 종료 ──
         menu.addAction(help_act)
+        menu.addAction(restart_act)
         menu.addAction(quit_act)
 
         self.context_menu = menu   # 마스터 위젯 우클릭에서도 같은 메뉴 재사용
@@ -1845,6 +1849,24 @@ class WidgetManager:
         # 예전 '앱 정보' 메뉴를 도움말로 흡수했다 — 업데이트 확인 콜백을 넘겨
         # 도움말 'Pinstock 정보' 섹션의 '🔄 업데이트 확인' 링크를 살린다.
         HelpDialog(on_check_update=self.open_update_dialog).exec()
+
+    # ── 재시작 ────────────────────────────────────────────────────────────
+    def restart_app(self):
+        """같은 실행 명령으로 새로 띄우고 지금 프로세스는 종료한다.
+
+        새 프로세스는 이 프로세스가 aboutToQuit 저장(save_positions)까지 마치고
+        끝나기를 기다렸다가 뜬다 — core/restart.py. 새 프로세스를 못 띄웠으면
+        종료하지 않는다: 그대로 끄면 사용자에겐 앱이 그냥 꺼진 것으로 보인다.
+        macOS MacAppManager.restart_app 과 쌍.
+        """
+        try:
+            launch_relaunch()
+        except Exception as e:
+            print(f"[restart] 새 프로세스 실행 실패: {e}")
+            notify(None, "재시작", "Pinstock 을 다시 시작하지 못했습니다.",
+                   informative=str(e))
+            return
+        self.app.quit()
 
     # ── 업데이트 확인 ─────────────────────────────────────────────────────
     def open_update_dialog(self):

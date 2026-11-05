@@ -1305,8 +1305,103 @@ def _run(log_fp):
     ms.deleteLater()
     log("[ok] 26. 종목 관리 — 체크 여러 개면 삭제만 / 체크 삭제 / 체크 없으면 선택 행")
 
+    # ── 27. 재시작 — 새 프로세스 명령 / 대기 인자 / 옛 프로세스 종료 대기 ──────
+    # 새 프로세스가 옛 프로세스의 마지막 저장(aboutToQuit)보다 먼저 stocks.json 을
+    # 읽으면 직전 변경이 빠진 채 뜨고, 다시 저장하며 그걸 덮어쓴다. 그래서 새 쪽은
+    # 옛 PID 가 끝날 때까지 기다린다. 재시작을 거듭해도 대기 인자가 쌓이면 안 된다.
+    import subprocess
+    import threading
+    import time
+    from pinstock.core import restart as rs
+
+    FLAG = rs.WAIT_PID_FLAG
+    _orig_argv = sys.orig_argv
+    sys.orig_argv = ["python", "-X", "utf8", "-m", "pinstock", f"{FLAG}=99"]
+    try:   # 개발 모드: 인터프리터 옵션·-m 유지, 실행 파일은 sys.executable, 옛 대기 인자 제거
+        assert rs.relaunch_command(pid=7) == [
+            sys.executable, "-X", "utf8", "-m", "pinstock", f"{FLAG}=7"
+        ], rs.relaunch_command(pid=7)
+    finally:
+        sys.orig_argv = _orig_argv
+    sys.frozen = True
+    try:   # 설치본: 실행 파일 + 대기 인자만
+        assert rs.relaunch_command(pid=7) == [sys.executable, f"{FLAG}=7"]
+    finally:
+        del sys.frozen
+    assert rs.relaunch_command()[-1] == f"{FLAG}={os.getpid()}"
+
+    argv = ["Pinstock.exe", f"{FLAG}=123", "-x"]
+    assert rs.pop_wait_pid_arg(argv) == 123 and argv == ["Pinstock.exe", "-x"], argv
+    for bad in ("abc", "0", "-1"):   # 0/-1 은 POSIX kill 에서 그룹·전체를 가리킨다
+        argv = ["p", f"{FLAG}={bad}"]
+        assert rs.pop_wait_pid_arg(argv) is None and argv == ["p"], (bad, argv)
+    argv = [f"{FLAG}=5"]             # argv[0] 은 실행 파일 자리 — 건드리지 않는다
+    assert rs.pop_wait_pid_arg(argv) is None and argv == [f"{FLAG}=5"]
+
+    # 테스트용 자식은 '지금 실제로 도는 인터프리터' 로 띄운다. Windows venv 의
+    # python.exe 는 기본 인터프리터를 자식으로 띄우는 런처라, 그걸로 띄우면 PID 의
+    # 이미지가 달라 PID 재사용 방어가 '이미 끝남' 으로 판정한다.
+    py = getattr(sys, "_base_executable", None) or sys.executable
+    quick = subprocess.Popen([py, "-c", "import time; time.sleep(0.6)"])
+    threading.Thread(target=quick.wait, daemon=True).start()   # POSIX 좀비 수거
+    t0 = time.monotonic()
+    assert rs.wait_for_exit(quick.pid, timeout=10), "끝난 프로세스를 못 알아챘다"
+    assert 0.3 < time.monotonic() - t0 < 5, time.monotonic() - t0
+    slow = subprocess.Popen([py, "-c", "import time; time.sleep(30)"])
+    try:
+        assert not rs.wait_for_exit(slow.pid, timeout=0.3), "안 끝났는데 끝났다고 했다"
+    finally:
+        slow.kill()
+        slow.wait()
+    assert rs.wait_for_exit(slow.pid, timeout=1), "없어진 PID 를 기다렸다"
+    if sys.platform == "win32":
+        # PID 재사용 방어: 다른 프로그램이 그 PID 를 가져갔으면 기다리지 않는다
+        other = subprocess.Popen(
+            [os.path.join(os.environ["SystemRoot"], "System32", "PING.EXE"),
+             "-n", "30", "127.0.0.1"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            t0 = time.monotonic()
+            assert rs.wait_for_exit(other.pid, timeout=5), "다른 프로그램을 기다렸다"
+            assert time.monotonic() - t0 < 1
+        finally:
+            other.kill()
+            other.wait()
+
+    # 끝까지: 옛 프로세스가 launch_relaunch 로 새 프로세스를 띄우고 0.8초 뒤 끝난다.
+    # 새 프로세스는 옛 프로세스가 '끝났다' 고 적은 다음에야 진행해야 한다.
+    out_old, out_new = tmpdir / "restart_old.txt", tmpdir / "restart_new.txt"
+    new_code = (
+        "import sys, time; sys.path.insert(0, {repo!r})\n"
+        "from pinstock.core import restart as rs\n"
+        "pid = rs.pop_wait_pid_arg(sys.argv)\n"
+        "ok = rs.wait_for_exit(pid, 10)\n"
+        "open({out!r}, 'w').write(f'{{ok}} {{time.time()}} {{sys.argv[1:]}}')\n"
+    ).format(repo=str(_REPO_ROOT), out=str(out_new))
+    old_code = (
+        "import os, sys, time; sys.path.insert(0, {repo!r})\n"
+        "from pinstock.core import restart as rs\n"
+        "rs.relaunch_command = lambda pid=None: "
+        "[{py!r}, '-c', {new!r}, rs.WAIT_PID_FLAG + '=' + str(os.getpid())]\n"
+        "rs.launch_relaunch()\n"
+        "time.sleep(0.8)\n"
+        "open({out!r}, 'w').write(str(time.time()))\n"
+    ).format(repo=str(_REPO_ROOT), py=py, new=new_code, out=str(out_old))
+    subprocess.Popen([py, "-c", old_code]).wait()   # wait = POSIX 에서 바로 수거
+    deadline = time.monotonic() + 15
+    while not out_new.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert out_old.exists(), "옛 프로세스가 끝 표시를 남기지 않았다"
+    assert out_new.exists(), "새 프로세스가 뜨지 않았다"
+    ok, t_new, rest = out_new.read_text(encoding="utf-8").split(" ", 2)
+    assert ok == "True", out_new.read_text(encoding="utf-8")
+    assert float(t_new) >= float(out_old.read_text(encoding="utf-8")), \
+        "새 프로세스가 옛 프로세스 종료 전에 진행했다"
+    assert rest == "[]", f"대기 인자가 argv 에 남았다: {rest}"
+    log("[ok] 27. 재시작 — 명령 조립 / 대기 인자 / 종료 대기 / PID 재사용 / 끝까지")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
-    log("\n[PASS] 26개 케이스 전부 통과")
+    log("\n[PASS] 27개 케이스 전부 통과")
 
 
 def main() -> int:

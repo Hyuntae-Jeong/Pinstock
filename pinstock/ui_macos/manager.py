@@ -25,6 +25,7 @@ from ..core.api import (
 )
 from ..ui_windows.chart_widget import aggregate_candles, PinController
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
+from ..core.restart import launch_relaunch
 from ..core.portfolio import is_us_stock, portfolio_totals
 from ..core.reveal import reveal_in_file_manager
 from ..core.storage import (
@@ -346,7 +347,7 @@ class MacAppManager(QObject):
     # ── 트레이 아이콘 우클릭 컨텍스트 메뉴 ────────────────────────────────
     def _build_tray_menu(self):
         """메뉴바 아이콘 우클릭 컨텍스트 메뉴 — 종목 추가/관리, Excel,
-        자산 숨김, 도움말, 종료. 메뉴바 전용 앱(LSUIElement)이라 상단
+        자산 숨김, 도움말, 재시작, 종료. 메뉴바 전용 앱(LSUIElement)이라 상단
         네이티브 메뉴바가 없으므로, 모든 메뉴 액션의 단일 진입점이다.
         """
         menu = QMenu()
@@ -377,6 +378,7 @@ class MacAppManager(QObject):
         menu.addSeparator()
         menu.addAction("도움말", self.open_help_dialog)
         menu.addSeparator()
+        menu.addAction("재시작", self.restart_app)
         menu.addAction("종료", self.app.quit)
         self.tray_menu = menu
 
@@ -1717,6 +1719,24 @@ class MacAppManager(QObject):
         # 예전 'Pinstock 정보' 메뉴를 도움말로 흡수했다 — 업데이트 확인 콜백을
         # 넘겨 도움말 'Pinstock 정보' 섹션의 '🔄 업데이트 확인' 링크를 살린다.
         HelpDialog(on_check_update=self.open_update_dialog).exec()
+
+    # ── 재시작 ────────────────────────────────────────────────────────────
+    def restart_app(self):
+        """같은 실행 명령으로 새로 띄우고 지금 프로세스는 종료한다.
+
+        새 프로세스는 이 프로세스가 aboutToQuit 저장(_save_config)까지 마치고
+        끝나기를 기다렸다가 뜬다 — core/restart.py. 새 프로세스를 못 띄웠으면
+        종료하지 않는다: 그대로 끄면 사용자에겐 앱이 그냥 꺼진 것으로 보인다.
+        Windows WidgetManager.restart_app 과 쌍.
+        """
+        try:
+            launch_relaunch()
+        except Exception as e:
+            print(f"[restart] 새 프로세스 실행 실패: {e}")
+            notify(None, "재시작", "Pinstock 을 다시 시작하지 못했습니다.",
+                   informative=str(e))
+            return
+        self.app.quit()
 
     # ── 업데이트 확인 ─────────────────────────────────────────────────────
     # Windows WidgetManager 와 1:1 대응되는 패턴 — 다이얼로그가 결과를 manager 에
