@@ -3256,14 +3256,18 @@ class ManageWatchlistDialog(FramelessDialog):
                 tag_id = self._ensure_holding_tag()
             if existing is None:
                 market = str(s.get("market") or MARKET_KR).upper()
-                self._items.append({
+                item = {
                     "code":     code,
                     "name":     s.get("name", code),
                     "market":   market,
                     "currency": CURRENCY_USD if is_us_stock(s) else CURRENCY_KRW,
                     "type":     "stock",
                     "tag":      tag_id,
-                })
+                }
+                self._items.append(item)
+                # 같은 종목이 여러 계좌에 있으면 holdings 에 여러 번 나오므로,
+                # 방금 추가한 것도 by_code 에 등록해 두 번째부터는 건너뛰게 한다
+                by_code[code] = item
                 added += 1
             else:                                # 있지만 태그가 비어 있던 경우
                 existing["tag"] = tag_id
