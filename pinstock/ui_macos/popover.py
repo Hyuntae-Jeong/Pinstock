@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QPoint, QTimer, QEvent, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QScreen
 
 from ..ui_windows.theme import C, TRAY_MENU_STYLE
-from ..ui_windows.chart_widget import SparklineWidget, ChartPopup
+from ..ui_windows.chart_widget import SparklineWidget, ChartPopup, aggregate_candles
 from ..core.portfolio import is_us_stock, format_watch_price, stock_metrics
 from ..core.storage import ACCOUNT_FILTER_ALL, stock_in_account
 
@@ -674,6 +674,8 @@ class WatchRow(QWidget):
         self._prev_close: float = 0.0
         self._chart_popup: ChartPopup | None = None
         self._pin = pin_controller   # 확대 팝업 고정/hover 조율자 (공유, 매니저가 주입)
+        self._raw_daily: list[dict] = []      # 집계 전 일봉 — 팝업에서 봉주기를 바꿀 때 다시 집계
+        self._popup_unit: str | None = None   # 고정 팝업에서 D/W/M 로 임시 변경한 주기 (None=기본)
         # 확대 팝업 이동평균선 표시 설정 — 매니저가 넘긴 공유 dict 참조(제자리 갱신).
         self._ma_settings = ma_settings if ma_settings is not None else {
             "ma5": True, "ma20": True, "ma60": True,
@@ -725,12 +727,29 @@ class WatchRow(QWidget):
         return u if u in ("day", "week", "month") else "day"
 
     def show_chart_popup(self, pinned: bool = False):
-        # 미니 차트가 보유한 (이미 집계된) 캔들을 재사용 — 새 네트워크 호출은 하지 않는다
-        candles = getattr(self.sparkline, "candles", None)
-        if not candles or self.sparkline.mode != "candle":
+        # 새로 열리거나 고정/hover 가 바뀔 때마다 기본 주기에서 시작한다
+        self._popup_unit = None
+        self._render_chart_popup(pinned)
+
+    def _on_popup_unit_cycle(self):
+        """고정 팝업의 D/W/M 라벨 클릭 → 다음 주기로 다시 그린다 (이 팝업에만 임시 적용).
+        show_with → set_candles 가 줌·스크롤도 기본으로 되돌린다."""
+        cur = self._popup_unit or self._candle_unit()
+        self._popup_unit = {"day": "week", "week": "month", "month": "day"}[cur]
+        self._render_chart_popup(pinned=True)
+
+    def _render_chart_popup(self, pinned: bool):
+        if self.sparkline.mode != "candle":
+            return
+        unit = self._popup_unit or self._candle_unit()
+        # 보관해 둔 일봉을 해당 주기로 집계 — 새 네트워크 호출은 하지 않는다
+        if self._raw_daily:
+            candles = aggregate_candles(self._raw_daily, unit)
+        else:
+            candles = getattr(self.sparkline, "candles", None)
+        if not candles:
             return
         # 일봉은 기간(개월)이 늘수록 가로 폭만 비례 확장. 주/월봉은 고정 개수 + 3개월 기준 고정 폭.
-        unit = self._candle_unit()
         if unit == "day":
             # 일봉: 뷰포트 3개월 고정폭 + 나머지 구간은 드래그로 스크롤(기간=스크롤 범위).
             months = self._popup_months()                                   # 3~12
@@ -751,6 +770,7 @@ class WatchRow(QWidget):
             self._chart_popup = ChartPopup(chart_w, chart_h, parent=self, interactive=pinned)
             if pinned:
                 self._chart_popup.close_requested.connect(self._on_popup_close)
+                self._chart_popup.unit_cycle_requested.connect(self._on_popup_unit_cycle)
         s = self._ma_settings or {}
         # '종목명표시'가 켜져 있으면 확대 차트 배경에 깔 종목명을 넘긴다(꺼져 있으면 빈 값).
         show_name = bool(s.get("show_name", True))
@@ -768,6 +788,7 @@ class WatchRow(QWidget):
         )
 
     def hide_chart_popup(self):
+        self._popup_unit = None   # 닫히면 임시 주기 해제 — 다시 열면 기본 주기
         if self._chart_popup is not None:
             self._chart_popup.hide()
 
@@ -831,7 +852,10 @@ class WatchRow(QWidget):
         self.rate_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
 
     def apply_daily(self, candles: list):
-        self.sparkline.set_candles(candles, display_count=self.MINI_CANDLES)
+        """집계 전 일봉을 받아 보관하고, 기본 봉주기로 집계해 미니 차트에 그린다."""
+        self._raw_daily = candles
+        self.sparkline.set_candles(aggregate_candles(candles, self._candle_unit()),
+                                   display_count=self.MINI_CANDLES)
 
 
 # ─── 관심 뷰 태그 그룹 헤더 (클릭하면 펼침/접힘) ──────────────────────────────

@@ -159,15 +159,12 @@ class WatchFetcher(QObject):
         result = fetch_watch_quote(self.item)
         if result:
             self.price_updated.emit(self.code, result)
-        # 확대 팝업의 이동평균선까지 그릴 수 있게 긴 이력을 받는다. 주/월봉이면 더 긴
-        # 이력을 받아 집계 후 넘긴다. (미니·팝업은 최근 일부만 표시)
-        unit = self._ma_settings.get("candle_unit", "day")
-        if unit not in ("day", "week", "month"):
-            unit = "day"
-        max_c = WATCH_POPUP_CANDLES_LONG if unit != "day" else WATCH_POPUP_CANDLES
-        daily = fetch_watch_daily(self.item, max_candles=max_c)
+        # 확대 팝업의 이동평균선까지 그릴 수 있게 긴 이력을 받는다. 고정 팝업에서 주/월봉으로
+        # 바꿔 볼 수 있어 기본 주기와 상관없이 긴 이력을 받고, 집계 전 일봉 그대로 넘긴다
+        # (봉주기 집계는 행 WatchRow.apply_daily 가 한다).
+        daily = fetch_watch_daily(self.item, max_candles=WATCH_POPUP_CANDLES_LONG)
         if daily and daily.get("candles"):
-            self.daily_updated.emit(self.code, aggregate_candles(daily["candles"], unit))
+            self.daily_updated.emit(self.code, daily["candles"])
 
     def stop(self):
         self.timer.stop()

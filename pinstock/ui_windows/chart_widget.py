@@ -59,6 +59,8 @@ class SparklineWidget(QWidget):
     - line  : 당일 1분봉 라인 + area, 시초가 대비 색상 결정, 전일 종가 점선
     - candle: 최근 N일 일봉 캔들 (양봉=빨강, 음봉=파랑)"""
 
+    unit_clicked = pyqtSignal()   # 고정 팝업 상단바의 봉주기(D/W/M) 라벨 클릭
+
     W = 100   # 차트 너비 (기본값 — 인스턴스에서 재정의 가능)
     H = 40    # 차트 높이
     PRICE_AXIS_W = 40   # 우측 가격 보조축 라벨 폭 (확대 팝업, 가격축 ON 시)
@@ -109,6 +111,9 @@ class SparklineWidget(QWidget):
         # 안에서 display_count 를 바꾸고, 남는 만큼을 scroll_limit 으로 돌려 팬 범위를 맞춘다.
         self.zoom_span: int = 0             # 0 이면 줌 비활성
         self._zoom_level: float = 0.0       # display_count 의 실수값 — 트랙패드 작은 델타도 누적되게
+        # 봉주기 라벨(D/W/M) 버튼 영역 — 고정 팝업에서 paint 시 캐시, 클릭하면 unit_clicked
+        self._unit_rect: QRectF | None = None
+        self._unit_hover: bool = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -175,7 +180,16 @@ class SparklineWidget(QWidget):
             self._paint_line()
 
     # ── 가로 스크롤(드래그 팬) — scroll_limit>0 인 일봉 고정 팝업 전용 ─────────────
+    def _over_unit(self, pos) -> bool:
+        return (self.interactive and self._unit_rect is not None
+                and self._unit_rect.contains(QPointF(pos)))
+
     def mousePressEvent(self, event):
+        # 봉주기 라벨 클릭 → 주기 순환 요청 (드래그 팬보다 먼저 가로챈다)
+        if event.button() == Qt.MouseButton.LeftButton and self._over_unit(event.position()):
+            self.unit_clicked.emit()
+            event.accept()
+            return
         if self.scroll_limit > 0 and self._hit_slot > 0:
             self._dragging = True
             self._drag_x = event.position().x()
@@ -270,6 +284,15 @@ class SparklineWidget(QWidget):
                 self.scroll_offset = off
                 self.update()
             return
+        # 봉주기 라벨 위 → 손가락 커서 + 강조, 벗어나면 원래 커서
+        over = self._over_unit(event.position())
+        if over != self._unit_hover:
+            self._unit_hover = over
+            if over:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self._update_pan_cursor()
+            self.update()
         if not self.interactive or self.mode != "candle" or self._hit_n <= 0 or self._hit_slot <= 0:
             return super().mouseMoveEvent(event)
         i = int((event.position().x() - self._hit_left) / self._hit_slot)
@@ -280,6 +303,10 @@ class SparklineWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
+        if self._unit_hover:
+            self._unit_hover = False
+            self._update_pan_cursor()
+            self.update()
         if self.interactive and self.hover_index is not None:
             self.hover_index = None
             self.update()
@@ -657,10 +684,22 @@ class SparklineWidget(QWidget):
         x = x0
         # 봉주기 라벨(D/W/M) — 5·20·60 이 어느 단위(일/주/월봉)인지 알려준다.
         unit_label = {"day": "D", "week": "W", "month": "M"}.get(self.candle_unit, "")
+        self._unit_rect = None
         if unit_label:
-            painter.setPen(QColor(C['subtext']))
+            tw = fm.horizontalAdvance(unit_label)
+            if self.interactive:
+                # 고정 팝업: 클릭하면 D→W→M 순환하는 버튼 — 테두리 박스로 눌러볼 수 있음을 표시
+                r = QRectF(x - 3, y - fm.ascent() - 2, tw + 6, fm.ascent() + fm.descent() + 4)
+                self._unit_rect = r.adjusted(-3, -3, 3, 3)       # 클릭 판정은 조금 넉넉히
+                border = QColor(C['text'] if self._unit_hover else C['border'])
+                fill = QColor(C['bg2']); fill.setAlpha(255 if self._unit_hover else 160)
+                painter.setPen(QPen(border, 1))
+                painter.setBrush(QBrush(fill))
+                painter.drawRoundedRect(r, 3, 3)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QColor(C['text'] if self._unit_hover else C['subtext']))
             painter.drawText(int(x), int(y), unit_label)
-            x += fm.horizontalAdvance(unit_label + "  ")
+            x += tw + fm.horizontalAdvance("  ") + (3 if self.interactive else 0)
         sep = QColor("#6c7086")            # 기간 사이 점(·) — 흐린 회보라
         for i, p in enumerate(self.ma_periods):
             if i > 0:
@@ -686,6 +725,7 @@ class ChartPopup(QWidget):
     PAD = 2   # 차트 둘레 여백 — 차트가 팝업에 꽉 차도록 작게
 
     close_requested = pyqtSignal()   # ✕ 클릭 (고정 모드 전용)
+    unit_cycle_requested = pyqtSignal()   # 봉주기 라벨(D/W/M) 클릭 (고정 모드 전용)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -729,6 +769,7 @@ class ChartPopup(QWidget):
         if interactive:
             self.chart.interactive = True
             self.chart.setMouseTracking(True)
+            self.chart.unit_clicked.connect(self.unit_cycle_requested.emit)
             # Esc 로 닫기 — 앱 어디서 눌러도 (고정 팝업이 떠 있는 동안만 유효, ✕ 와 동일 경로)
             esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
             esc.setContext(Qt.ShortcutContext.ApplicationShortcut)
