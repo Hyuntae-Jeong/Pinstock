@@ -66,6 +66,8 @@ class SparklineWidget(QWidget):
     VOL_PANEL_RATIO = 0.24   # 거래량 패널이 차지하는 플롯 높이 비율 (거래량 표시 ON 시)
     VOL_GAP = 4              # 가격/거래량 패널 사이 여백(px)
     TOP_BAR_H = 22           # 확대 팝업 상단바 높이 (봉주기·이동평균 범례 · 종목명 · ✕)
+    ZOOM_MIN_BARS = 10       # 휠 줌으로 넓힐 때 한 화면 최소 봉 수 (이보다 적으면 봉이 너무 뚱뚱해짐)
+    ZOOM_PER_NOTCH = 1.2     # 휠 1칸(120)당 표시 봉 수 배율 — 아래로 내리면 ×1.2(압축), 위로 ÷1.2(확대)
 
     def __init__(self, parent=None, width: int | None = None, height: int | None = None):
         super().__init__(parent)
@@ -103,6 +105,10 @@ class SparklineWidget(QWidget):
         self._drag_x: float = 0.0
         self._drag_start_offset: int = 0
         self._wheel_accum: float = 0.0      # 트랙패드 가로 스크롤 픽셀 누적(부드러운 팬)
+        # 세로 휠 줌(가로 압축/확대) — 고정 팝업 전용. 볼 수 있는 전체 구간(최신부터 zoom_span 개)
+        # 안에서 display_count 를 바꾸고, 남는 만큼을 scroll_limit 으로 돌려 팬 범위를 맞춘다.
+        self.zoom_span: int = 0             # 0 이면 줌 비활성
+        self._zoom_level: float = 0.0       # display_count 의 실수값 — 트랙패드 작은 델타도 누적되게
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_data(self, prices: list[float], open_price: float, prev_close: float = 0.0):
@@ -133,10 +139,18 @@ class SparklineWidget(QWidget):
         self.candle_unit = candle_unit
         self.scroll_limit = max(0, scroll_limit)
         self.scroll_offset = 0
-        self.setCursor(Qt.CursorShape.OpenHandCursor if scroll_limit > 0
-                       else Qt.CursorShape.ArrowCursor)
+        # 줌 구간 = 처음 보여줄 개수 + 스크롤로 갈 수 있는 과거 (= 관리창 '기간'). 고정 팝업에서만.
+        n_all = len(candles)
+        dc0 = max(1, min(display_count or n_all, n_all)) if n_all else 0
+        self.zoom_span = min(n_all, dc0 + self.scroll_limit) if self.interactive else 0
+        self._zoom_level = float(dc0)
+        self._update_pan_cursor()
         self.hover_index = None
         self.update()
+
+    def _update_pan_cursor(self):
+        self.setCursor(Qt.CursorShape.OpenHandCursor if self.scroll_limit > 0
+                       else Qt.CursorShape.ArrowCursor)
 
     @staticmethod
     def _sma(values: list[float], period: int) -> list:
@@ -181,12 +195,22 @@ class SparklineWidget(QWidget):
         else:
             super().mouseReleaseEvent(event)
 
-    # ── 가로 스크롤 (트랙패드 옆스와이프 · Shift+휠 · 가로 휠) — 드래그와 방향 동일 ──
+    # ── 세로 휠: 가로 줌 / 가로 휠·옆스와이프·Shift+휠: 가로 스크롤 (드래그와 방향 동일) ──
     def wheelEvent(self, event):
+        ad = event.angleDelta()
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        # 세로 성분이 주된 휠(Shift 없이) → 줌. 옆스와이프와 섞인 트랙패드 입력은 큰 쪽을 따른다.
+        if (not shift and self.zoom_span > 0 and self.mode == "candle"
+                and abs(ad.y()) > abs(ad.x())):
+            self._zoom_by_wheel(ad.y(), event.position().x())
+            event.accept()
+            return
         if self.scroll_limit <= 0 or self._hit_slot <= 0:
             return super().wheelEvent(event)
         px = event.pixelDelta().x()          # 트랙패드(부드러운 픽셀 델타)
-        ax = event.angleDelta().x()          # 휠 notch(가로 성분)
+        ax = ad.x()                          # 휠 notch(가로 성분)
+        if shift and px == 0 and ax == 0:    # Windows 는 Shift+휠을 가로로 바꿔주지 않으므로 직접 변환
+            ax = ad.y()
         if px == 0 and ax == 0:              # 가로 성분 없음(세로 스크롤) → 무시
             return super().wheelEvent(event)
         if px != 0:
@@ -203,6 +227,38 @@ class SparklineWidget(QWidget):
                 self.hover_index = None
                 self.update()
         event.accept()
+
+    def _zoom_by_wheel(self, delta_y: int, mouse_x: float):
+        """세로 휠로 한 화면 봉 수를 바꾼다. 아래(delta<0)=압축(봉↑), 위(delta>0)=확대(봉↓).
+        마우스 아래 봉이 같은 x 에 머물도록 scroll_offset 을 다시 맞춘다."""
+        n_all = len(self.candles)
+        span = min(self.zoom_span, n_all)
+        if span <= 0 or self._hit_n <= 0 or self._hit_slot <= 0:
+            return
+        lo = min(self.ZOOM_MIN_BARS, span)
+        old_dc = self._hit_n
+        # 연속 배율이라 트랙패드의 작은 델타도 _zoom_level 에 쌓였다가 정수 봉 수로 반영된다
+        level = self._zoom_level * (self.ZOOM_PER_NOTCH ** (-delta_y / 120))
+        self._zoom_level = max(float(lo), min(float(span), level))
+        new_dc = max(lo, min(span, round(self._zoom_level)))
+        if new_dc == old_dc:
+            return
+
+        # 줌 앵커: 마우스 아래 지점의 글로벌 캔들 위치를 고정
+        w = self._hit_slot * old_dc
+        frac = max(0.0, min(1.0, (mouse_x - self._hit_left) / w)) if w > 0 else 1.0
+        old_start = (n_all - old_dc) - self.scroll_offset
+        anchor = old_start + frac * old_dc
+        new_start = round(anchor - frac * new_dc)
+
+        self.display_count = new_dc
+        self.scroll_limit = span - new_dc          # 줌 구간 안에서만 팬
+        self.scroll_offset = max(0, min((n_all - new_dc) - new_start, self.scroll_limit))
+        self._update_pan_cursor()
+        # hover 박스는 커서 아래 봉으로 바로 갱신 (다음 마우스 이동까지 엉뚱한 봉을 가리키지 않게)
+        if self.hover_index is not None:
+            self.hover_index = max(0, min(new_dc - 1, int(frac * new_dc)))
+        self.update()
 
     # ── 마우스 이동: 드래그 중이면 가로 팬, 아니면 봉 hover(interactive) ──────────
     def mouseMoveEvent(self, event):
