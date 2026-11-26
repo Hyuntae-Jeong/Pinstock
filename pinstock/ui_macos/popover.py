@@ -717,9 +717,9 @@ class WatchRow(QWidget):
         return tuple(p for p, key in ((5, "ma5"), (20, "ma20"), (60, "ma60")) if s.get(key, True))
 
     def _popup_months(self) -> int:
-        """일봉 확대 차트 조회 기간(3~12개월). 관리창 설정(공유 dict)을 따른다."""
+        """일봉 확대 차트 조회 기간(3개월~5년). 관리창 설정(공유 dict)을 따른다."""
         s = self._ma_settings or {}
-        return max(3, min(12, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
+        return max(3, min(60, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
 
     def _candle_unit(self) -> str:
         """봉주기 설정(day/week/month). 잘못된 값이면 day."""
@@ -749,17 +749,18 @@ class WatchRow(QWidget):
             candles = getattr(self.sparkline, "candles", None)
         if not candles:
             return
-        # 일봉은 기간(개월)이 늘수록 가로 폭만 비례 확장. 주/월봉은 고정 개수 + 3개월 기준 고정 폭.
+        # 팝업 폭은 고정. 처음 보이는 봉 수(뷰포트) 밖의 구간은 드래그/휠로 스크롤·줌한다.
         if unit == "day":
-            # 일봉: 뷰포트 3개월 고정폭 + 나머지 구간은 드래그로 스크롤(기간=스크롤 범위).
-            months = self._popup_months()                                   # 3~12
+            # 일봉: 뷰포트 3개월 + 관리창 '기간'(3개월~5년)까지 스크롤.
+            months = self._popup_months()                                   # 3~60
             display_count = self.POPUP_BASE_MONTHS * self.TRADING_DAYS_PER_MONTH   # 3개월 뷰포트
             chart_w = round(self.sparkline.width() * self.POPUP_SCALE)       # 3개월 고정폭
             scroll_limit = max(0, months * self.TRADING_DAYS_PER_MONTH - display_count)
         else:
+            # 주/월봉: 고정 개수 뷰포트 + 받아 둔 이력(5년) 전체를 스크롤.
             display_count = self.POPUP_WEEK_BARS if unit == "week" else self.POPUP_MONTH_BARS
             chart_w = round(self.sparkline.width() * self.POPUP_SCALE)
-            scroll_limit = 0
+            scroll_limit = max(0, len(candles) - display_count)
         chart_h = round(self.sparkline.height() * self.POPUP_SCALE)
         # 폭이 다르거나 고정/hover 모드(입력 수신 여부)가 바뀌면 새로 만든다.
         if (self._chart_popup is None or self._chart_popup.chart.W != chart_w

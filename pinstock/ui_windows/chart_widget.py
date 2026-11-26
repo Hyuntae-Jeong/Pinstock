@@ -70,6 +70,7 @@ class SparklineWidget(QWidget):
     TOP_BAR_H = 22           # 확대 팝업 상단바 높이 (봉주기·이동평균 범례 · 종목명 · ✕)
     ZOOM_MIN_BARS = 10       # 휠 줌으로 넓힐 때 한 화면 최소 봉 수 (이보다 적으면 봉이 너무 뚱뚱해짐)
     ZOOM_PER_NOTCH = 1.2     # 휠 1칸(120)당 표시 봉 수 배율 — 아래로 내리면 ×1.2(압축), 위로 ÷1.2(확대)
+    ZOOM_MIN_SLOT_PX = 1.0   # 압축 한계 — 봉 하나가 이 폭(px)보다 좁아지면 봉이 겹쳐 뭉개지므로 멈춘다
 
     def __init__(self, parent=None, width: int | None = None, height: int | None = None):
         super().__init__(parent)
@@ -251,15 +252,17 @@ class SparklineWidget(QWidget):
             return
         lo = min(self.ZOOM_MIN_BARS, span)
         old_dc = self._hit_n
+        w = self._hit_slot * old_dc                 # 플롯 폭(px)
+        # 한 화면 최대 봉 수: 줌 구간 전체, 단 봉 폭이 ZOOM_MIN_SLOT_PX 이상인 데까지만
+        hi = min(span, max(lo, int(w / self.ZOOM_MIN_SLOT_PX)))
         # 연속 배율이라 트랙패드의 작은 델타도 _zoom_level 에 쌓였다가 정수 봉 수로 반영된다
         level = self._zoom_level * (self.ZOOM_PER_NOTCH ** (-delta_y / 120))
-        self._zoom_level = max(float(lo), min(float(span), level))
-        new_dc = max(lo, min(span, round(self._zoom_level)))
+        self._zoom_level = max(float(lo), min(float(hi), level))
+        new_dc = max(lo, min(hi, round(self._zoom_level)))
         if new_dc == old_dc:
             return
 
         # 줌 앵커: 마우스 아래 지점의 글로벌 캔들 위치를 고정
-        w = self._hit_slot * old_dc
         frac = max(0.0, min(1.0, (mouse_x - self._hit_left) / w)) if w > 0 else 1.0
         old_start = (n_all - old_dc) - self.scroll_offset
         anchor = old_start + frac * old_dc

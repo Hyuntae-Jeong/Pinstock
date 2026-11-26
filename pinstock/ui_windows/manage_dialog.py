@@ -2726,7 +2726,7 @@ class ManageWatchlistDialog(FramelessDialog):
                     self._ma_settings[k] = bool(ma_settings[k])
             pm = ma_settings.get("popup_months")
             if isinstance(pm, (int, float)):
-                self._ma_settings["popup_months"] = max(3, min(12, int(pm)))
+                self._ma_settings["popup_months"] = max(3, min(60, int(pm)))
             cu = ma_settings.get("candle_unit")
             if cu in ("day", "week", "month"):
                 self._ma_settings["candle_unit"] = cu
@@ -2846,23 +2846,24 @@ class ManageWatchlistDialog(FramelessDialog):
         self._unit_combo.setFixedWidth(72)
         ma_row.addWidget(self._unit_combo)
 
-        # 확대 차트 조회 기간 (일봉 전용, 3~12개월) — 뷰포트는 3개월 고정, 나머지는 드래그로 스크롤.
-        # 주·월봉은 고정 범위라 기간 콤보 대신 안내 문구를 보여준다.
+        # 확대 차트 조회 기간 (일봉 전용, 3개월~5년) — 뷰포트는 3개월 고정, 나머지는 드래그로 스크롤.
+        # 주·월봉은 받아 둔 5년 전체를 스크롤하므로 기간 콤보 대신 안내 문구를 보여준다.
         ma_row.addSpacing(8)
         self._period_lbl = QLabel("기간")
         self._period_lbl.setStyleSheet(f"color: {C['subtext']}; font-size: 12px;")
         ma_row.addWidget(self._period_lbl)
         self._period_combo = _NoScrollComboBox()
-        self._period_combo.setToolTip("일봉 조회 기간(3~12개월) — 뷰포트는 3개월, 나머지는 드래그로 스크롤")
-        for m in (3, 6, 9, 12):
-            self._period_combo.addItem(f"{m}개월", m)
+        self._period_combo.setToolTip("일봉 조회 기간(3개월~5년) — 뷰포트는 3개월, 나머지는 드래그로 스크롤")
+        # 9개월은 기존 저장값 호환용으로 남긴다 (없애면 저장된 9가 3개월로 보임)
+        for m in (3, 6, 9, 12, 24, 36, 60):
+            self._period_combo.addItem(f"{m // 12}년" if m >= 12 else f"{m}개월", m)
         cur = int(self._ma_settings.get("popup_months", 3))
         idx = self._period_combo.findData(cur)
         self._period_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._period_combo.setFixedWidth(84)
         ma_row.addWidget(self._period_combo)
         # 주·월봉일 때 기간 콤보 대신 뜨는 안내 (일봉일 땐 숨김)
-        self._period_note = QLabel("주·월봉은 고정 범위")
+        self._period_note = QLabel("주·월봉은 5년 전체")
         self._period_note.setStyleSheet(f"color: {C['subtext']}; font-size: 11px; font-style: italic;")
         ma_row.addWidget(self._period_note)
         ma_row.addStretch()

@@ -11,8 +11,9 @@ from datetime import datetime
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
-    fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES, WATCH_POPUP_CANDLES_LONG,
+    fetch_watch_quote,
 )
+from ..core.watch_daily import get_watch_daily
 from ..core.portfolio import is_us_stock, format_watch_price, stock_metrics
 from .theme import C, TRAY_MENU_STYLE
 from .win_chrome import disable_win11_dwm_chrome
@@ -899,9 +900,9 @@ class CompactWatchRow(QWidget):
         return tuple(p for p, key in ((5, "ma5"), (20, "ma20"), (60, "ma60")) if s.get(key, True))
 
     def _popup_months(self) -> int:
-        """일봉 확대 차트 조회 기간(3~12개월). 관리창 값(공유 dict)을 따른다."""
+        """일봉 확대 차트 조회 기간(3개월~5년). 관리창 값(공유 dict)을 따른다."""
         s = self._ma_settings or {}
-        return max(3, min(12, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
+        return max(3, min(60, int(s.get("popup_months", self.POPUP_BASE_MONTHS) or self.POPUP_BASE_MONTHS)))
 
     def _candle_unit(self) -> str:
         """봉주기 설정(day/week/month). 잘못된 값이면 day."""
@@ -931,17 +932,18 @@ class CompactWatchRow(QWidget):
             candles = getattr(self.sparkline, "candles", None)
         if not candles:
             return
-        # 일봉은 기간(개월)이 늘수록 가로 폭만 비례 확장. 주/월봉은 고정 개수 + 3개월 기준 고정 폭.
+        # 팝업 폭은 고정. 처음 보이는 봉 수(뷰포트) 밖의 구간은 드래그/휠로 스크롤·줌한다.
         if unit == "day":
-            # 일봉: 뷰포트 3개월 고정폭 + 나머지 구간은 드래그로 스크롤(기간=스크롤 범위).
-            months = self._popup_months()                                   # 3~12
+            # 일봉: 뷰포트 3개월 + 관리창 '기간'(3개월~5년)까지 스크롤.
+            months = self._popup_months()                                   # 3~60
             display_count = self.POPUP_BASE_MONTHS * self.TRADING_DAYS_PER_MONTH   # 3개월 뷰포트
             chart_w = round(self.SPARK_W * self.POPUP_SCALE)                # 3개월 고정폭
             scroll_limit = max(0, months * self.TRADING_DAYS_PER_MONTH - display_count)
         else:
+            # 주/월봉: 고정 개수 뷰포트 + 받아 둔 이력(5년) 전체를 스크롤.
             display_count = self.POPUP_WEEK_BARS if unit == "week" else self.POPUP_MONTH_BARS
             chart_w = round(self.SPARK_W * self.POPUP_SCALE)
-            scroll_limit = 0
+            scroll_limit = max(0, len(candles) - display_count)
         chart_h = round(self.SPARK_H * self.POPUP_SCALE)
         # 폭이 다르거나 고정/hover 모드(입력 수신 여부)가 바뀌면 새로 만든다.
         if (self._chart_popup is None or self._chart_popup.chart.W != chart_w
@@ -1013,15 +1015,14 @@ class CompactWatchRow(QWidget):
         result = fetch_watch_quote(self.data)
         if result:
             self._apply_price(result)
-        # 확대 팝업의 이동평균선까지 그릴 수 있게 긴 이력을 받되, 미니 차트에는 최근
-        # 일부(MINI_CANDLES)만 표시한다. 고정 팝업에서 주/월봉으로 바꿔 볼 수 있으므로
-        # 기본 주기와 상관없이 주/월봉 집계에 충분한 긴 이력을 받아 원본으로 보관한다.
-        unit = self._candle_unit()
-        daily = fetch_watch_daily(self.data, max_candles=WATCH_POPUP_CANDLES_LONG)
-        if daily and daily.get("candles"):
-            self._raw_daily = daily["candles"]
-            candles = aggregate_candles(self._raw_daily, unit)
-            self.sparkline.set_candles(candles, display_count=self.MINI_CANDLES)
+        # 5년치 일봉 이력(캐시: 전체는 30분마다, 평소엔 최근분만 받아 이어 붙임)을 원본으로
+        # 보관한다. 확대 팝업의 스크롤·이동평균·주/월봉 전환이 모두 이걸 다시 집계해 쓴다.
+        # 미니 차트에는 기본 주기로 집계한 최근 일부(MINI_CANDLES)만 표시한다.
+        candles = get_watch_daily(self.data)
+        if candles:
+            self._raw_daily = candles
+            self.sparkline.set_candles(aggregate_candles(candles, self._candle_unit()),
+                                       display_count=self.MINI_CANDLES)
 
     def _apply_price(self, result: dict):
         self.data["name"] = result["name"]

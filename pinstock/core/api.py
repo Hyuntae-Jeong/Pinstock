@@ -813,13 +813,6 @@ def fetch_index(code: str, market: str | None = None) -> dict | None:
     return result
 
 
-# 관심종목 확대 팝업용 일봉 개수 — 일봉 가로 스크롤 최대 12개월(약 252거래일) + 이동평균 lookback 여유
-WATCH_POPUP_CANDLES = 264
-
-# 주봉·월봉 표시용 — 더 긴 일봉 이력(약 2년). 봉주기가 주/월일 때만 이 길이로 조회한다.
-WATCH_POPUP_CANDLES_LONG = 500
-
-
 def _days_for_candles(max_candles: int) -> int:
     """필요 거래일 수 → 조회 달력일 수(주말·공휴일 고려 약 1.5배), 최소 45일."""
     return max(45, round(max_candles * 1.5))
@@ -835,7 +828,9 @@ def _yahoo_range_for_candles(max_candles: int) -> str:
         return "6mo"
     if max_candles <= 252:
         return "1y"
-    return "2y"
+    if max_candles <= 504:
+        return "2y"
+    return "5y"   # 관심종목 5년 이력(watch_daily.WATCH_HISTORY_CANDLES)
 
 
 def fetch_index_daily(code: str, market: str | None = None, max_candles: int = 30) -> dict | None:

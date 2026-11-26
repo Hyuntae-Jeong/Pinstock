@@ -20,10 +20,10 @@ from ..core import updater, stock_index
 from ..core.api import (
     fetch_stock, fetch_minute_chart, fetch_daily_chart,
     fetch_us_stock, fetch_us_minute_chart, fetch_us_daily_chart,
-    fetch_usd_krw_rate, fetch_watch_quote, fetch_watch_daily, WATCH_POPUP_CANDLES,
-    WATCH_POPUP_CANDLES_LONG,
+    fetch_usd_krw_rate, fetch_watch_quote,
 )
-from ..ui_windows.chart_widget import aggregate_candles, PinController
+from ..core.watch_daily import get_watch_daily
+from ..ui_windows.chart_widget import PinController
 from ..core.autostart import autostart_supported, is_autostart_enabled, set_autostart
 from ..core.restart import launch_relaunch
 from ..core.portfolio import is_us_stock, portfolio_totals
@@ -159,12 +159,11 @@ class WatchFetcher(QObject):
         result = fetch_watch_quote(self.item)
         if result:
             self.price_updated.emit(self.code, result)
-        # 확대 팝업의 이동평균선까지 그릴 수 있게 긴 이력을 받는다. 고정 팝업에서 주/월봉으로
-        # 바꿔 볼 수 있어 기본 주기와 상관없이 긴 이력을 받고, 집계 전 일봉 그대로 넘긴다
-        # (봉주기 집계는 행 WatchRow.apply_daily 가 한다).
-        daily = fetch_watch_daily(self.item, max_candles=WATCH_POPUP_CANDLES_LONG)
-        if daily and daily.get("candles"):
-            self.daily_updated.emit(self.code, daily["candles"])
+        # 5년치 일봉 이력(캐시: 전체는 30분마다, 평소엔 최근분만 받아 이어 붙임)을 집계 전
+        # 그대로 넘긴다. 봉주기 집계는 행 WatchRow.apply_daily / 확대 팝업이 한다.
+        candles = get_watch_daily(self.item)
+        if candles:
+            self.daily_updated.emit(self.code, candles)
 
     def stop(self):
         self.timer.stop()
@@ -913,7 +912,7 @@ class MacAppManager(QObject):
                         self.watch_ma[k] = bool(ma[k])
                 pm = ma.get("popup_months")
                 if isinstance(pm, (int, float)):
-                    self.watch_ma["popup_months"] = max(3, min(12, int(pm)))
+                    self.watch_ma["popup_months"] = max(3, min(60, int(pm)))
                 cu = ma.get("candle_unit")
                 if cu in ("day", "week", "month"):
                     self.watch_ma["candle_unit"] = cu
