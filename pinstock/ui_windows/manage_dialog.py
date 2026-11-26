@@ -655,9 +655,11 @@ class BuyPreviewDialog(FramelessDialog):
 class StockDialog(FramelessDialog):
     def __init__(self, parent=None, data: dict | None = None, watch_mode: bool = False,
                  tags: list[dict] | None = None, accounts: list[dict] | None = None,
-                 default_account: str | None = None):
+                 default_account: str | None = None, default_tag: str = ""):
         super().__init__(parent, resizable=False)
         self.is_edit = data is not None
+        # 추가 모드에서 태그 콤보의 초기값 (관심종목 창에서 걸어둔 태그 필터). 수정 모드는 data 의 태그가 우선.
+        self._default_tag = str(default_tag or "")
         self.watch_mode = watch_mode   # 관심종목 모드: 평단가/수량 입력 숨김
         self._tags = tags or []        # 관심종목 태그 레지스트리 (추가/수정 시 태그 지정용)
         # 계좌 선택은 보유 종목에만 있다 (관심종목은 전 계좌 공유). 계좌가 1개뿐이면
@@ -800,7 +802,7 @@ class StockDialog(FramelessDialog):
         if self.watch_mode:
             self.tag_combo = _NoScrollComboBox()
             self.tag_combo.addItem("없음", "")
-            cur_tag = str((data or {}).get("tag") or "")
+            cur_tag = str((data or {}).get("tag") or "") if self.is_edit else self._default_tag
             sel = 0
             for i, t in enumerate(self._tags, start=1):
                 self.tag_combo.addItem(
@@ -3285,15 +3287,24 @@ class ManageWatchlistDialog(FramelessDialog):
         )
 
     def _add(self):
-        dlg = StockDialog(watch_mode=True, parent=self, tags=self._tags)
+        # 특정 태그(또는 '태그 없음')로 필터 중이면 그 태그를 기본값으로 채운다
+        default_tag = "" if self._tag_filter == self.FILTER_ALL else self._tag_filter
+        dlg = StockDialog(watch_mode=True, parent=self, tags=self._tags, default_tag=default_tag)
         if not dlg.exec():
             return
         d = dlg.get_data()
         code = d["code"]
         if not code:
             return
-        if any(w["code"] == code for w in self._items):
-            notify(self, "알림", f"'{code}'는 이미 관심종목에 있습니다.")
+        existing = next((w for w in self._items if w["code"] == code), None)
+        if existing is not None:
+            # 어느 태그에 들어 있는지 알려줘야 필터를 바꿔 찾아갈 수 있다
+            tag_id = str(existing.get("tag") or "")
+            tag = next((t for t in self._tags if t["id"] == tag_id), None)
+            where = f"'{tag.get('name', '')}' 태그" if tag else "'태그 없음'"
+            name = existing.get("name") or code
+            label = f"'{name}'({code})" if name != code else f"'{code}'"
+            notify(self, "알림", f"{label}는 이미 {where}에 있습니다.")
             return
         result = fetch_quote_for_stock(d)
         if not result:
@@ -3305,10 +3316,13 @@ class ManageWatchlistDialog(FramelessDialog):
         d["name"] = result["name"]
         self._items.append(d)
         self._regroup_items()        # 새 항목을 제 태그 그룹 위치로 정렬
-        # 새 항목이 현재 태그 필터에 가려지지 않도록 '전체'로 보여준다
-        self._tag_filter = self.FILTER_ALL
+        # 필터 중이었다면 새 항목이 들어간 태그로 필터를 맞춘다 — 기본값 그대로면 필터 유지,
+        # 다이얼로그에서 태그를 바꿨으면 그 태그로 이동해 새 항목이 가려지지 않게 한다.
+        # '전체'였다면 그대로 '전체'.
+        if self._tag_filter != self.FILTER_ALL:
+            self._tag_filter = str(d.get("tag") or "")
         self._populate_filter_combo()
-        self._update_drag_enabled()  # '전체'로 돌아왔으니 드래그는 끈다
+        self._update_drag_enabled()
         sel = next((i for i, w in enumerate(self._items) if w is d), None)
         self._rebuild_table(select_row=sel)
 
